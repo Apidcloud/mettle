@@ -1,0 +1,66 @@
+{
+  "Flow declaration": {
+    "prefix": "flow",
+    "description": "Declare a reusable Flow function",
+    "body": [
+      "flow ${1:name}(${2}) {",
+      "    ${3:return null}",
+      "}"
+    ]
+  },
+  "Expression-bodied flow": {
+    "prefix": "flowexpr",
+    "description": "Declare a concise reusable Flow function",
+    "body": [
+      "flow ${1:name}(${2}) = ${3:http.get(\"/path\")}"
+    ]
+  },
+  "Anonymous workflow": {
+    "prefix": "flowblock",
+    "description": "Declare an anonymous multi-operation flow",
+    "body": [
+      "flow {",
+      "    ${1:return http.get(\"/path\")}",
+      "}"
+    ]
+  },
+  "Runnable main flow": {
+    "prefix": "flowmain",
+    "description": "Declare the program entry flow",
+    "body": [
+      "flow main() {",
+      "    ${1:return null}",
+      "}"
+    ]
+  },
+  "HTTP context": {
+    "prefix": "flowcontext",
+    "description": "Declare an HTTP context",
+    "body": [
+      "context ${1:api} {",
+      "    defaults http {",
+      "        baseUrl: \"${2:https://postman-echo.com}\"",
+      "        timeout: ${3:5s}",
+      "    }",
+      "}"
+    ]
+  },
+  "HTTP GET": {
+    "prefix": "httpget",
+    "description": "Send an HTTP GET request",
+    "body": [
+      "http.get(\"${1:https://postman-echo.com/get}\")"
+    ]
+  },
+  "HTTP JSON POST": {
+    "prefix": "httppost",
+    "description": "Send an HTTP POST request with a JSON body",
+    "body": [
+      "http.post(\"${1:https://postman-echo.com/post}\") {",
+      "    json: {",
+      "        ${2:name}: ${3:\"value\"}",
+      "    }",
+      "}"
+    ]
+  }
+}

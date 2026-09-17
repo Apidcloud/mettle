@@ -1,0 +1,18 @@
+context fixture {
+    defaults http {
+        baseUrl: "${FLOW_BASE_URL}"
+        headers: {
+            "Authorization": "Bearer ${FLOW_API_TOKEN}"
+        }
+    }
+}
+
+use context fixture
+
+http.get("/seed")
+
+flow getSeed(baseUrl, apiToken) = http.get("${baseUrl}/seed") {
+    headers: {
+        "authorization": "Bearer ${apiToken}"
+    }
+}

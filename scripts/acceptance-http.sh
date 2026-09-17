@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+state_dir="$(mktemp -d)"
+server_pids=()
+
+cleanup() {
+  for server_pid in "${server_pids[@]}"; do
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  done
+  rm -rf "$state_dir"
+}
+trap cleanup EXIT
+
+python3 "$repository_dir/util/test-server/http_fixture.py" \
+  --port 0 \
+  --port-file "$state_dir/port" \
+  >"$state_dir/server.log" 2>&1 &
+server_pid=$!
+server_pids+=("$server_pid")
+
+for _ in {1..100}; do
+  if [[ -s "$state_dir/port" ]]; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$state_dir/server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+
+if [[ ! -s "$state_dir/port" ]]; then
+  echo "HTTP fixture did not start" >&2
+  exit 1
+fi
+
+port="$(cat "$state_dir/port")"
+result="$(
+  cd "$repository_dir"
+  FLOW_BASE_URL="http://127.0.0.1:$port" \
+    FLOW_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/http.flow --raw
+)"
+
+python3 - "$result" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["id"] == "created-seed-42", result
+assert result["active"] is True, result
+assert result["roles"] == ["tester"], result
+assert result["seedConnection"] == result["connectionId"], result
+print(json.dumps(result, indent=2))
+PY
+
+anonymous_result="$(
+  cd "$repository_dir"
+  FLOW_BASE_URL="http://127.0.0.1:$port" \
+    FLOW_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/entry-flows.flow --line 12 --raw
+)"
+
+named_result="$(
+  cd "$repository_dir"
+  FLOW_BASE_URL="http://127.0.0.1:$port" \
+    FLOW_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/entry-flows.flow getSeed --raw \
+      --arg "baseUrl=http://127.0.0.1:$port" \
+      --arg apiToken=local-test-token
+)"
+
+python3 - "$anonymous_result" "$named_result" <<'PY'
+import json
+import sys
+
+anonymous = json.loads(sys.argv[1])
+named = json.loads(sys.argv[2])
+assert anonymous["status"] == 200, anonymous
+assert anonymous["json"]["id"] == "seed-42", anonymous
+assert named["status"] == 200, named
+assert named["json"]["id"] == "seed-42", named
+PY
+
+if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  check "$repository_dir/tests/fixtures/invalid-http-option.flow" \
+  >"$state_dir/invalid.out" 2>"$state_dir/invalid.err"; then
+  echo "invalid HTTP option unexpectedly compiled" >&2
+  exit 1
+fi
+
+rg -q 'unknown option `banana`' "$state_dir/invalid.err"
+
+if FLOW_BASE_URL="http://127.0.0.1:$port" \
+  cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/http-timeout.flow" \
+  >"$state_dir/timeout.out" 2>"$state_dir/timeout.err"; then
+  echo "slow HTTP request unexpectedly completed" >&2
+  exit 1
+fi
+
+rg -q 'exceeded its 50 ms timeout' "$state_dir/timeout.err"
+
+python3 "$repository_dir/util/test-server/http_fixture.py" \
+  --port 0 \
+  --port-file "$state_dir/tls-port" \
+  --tls-cert "$repository_dir/tests/fixtures/tls/localhost-cert.pem" \
+  --tls-key "$repository_dir/tests/fixtures/tls/localhost-key.pem" \
+  >"$state_dir/tls-server.log" 2>&1 &
+tls_server_pid=$!
+server_pids+=("$tls_server_pid")
+
+for _ in {1..100}; do
+  if [[ -s "$state_dir/tls-port" ]]; then
+    break
+  fi
+  if ! kill -0 "$tls_server_pid" 2>/dev/null; then
+    cat "$state_dir/tls-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+
+if [[ ! -s "$state_dir/tls-port" ]]; then
+  echo "HTTPS fixture did not start" >&2
+  exit 1
+fi
+
+tls_port="$(cat "$state_dir/tls-port")"
+tls_url="https://localhost:$tls_port"
+tls_result="$(
+  cd "$repository_dir"
+  FLOW_BASE_URL="$tls_url" cargo run --quiet -- run tests/fixtures/https-insecure.flow --raw
+)"
+[[ "$tls_result" == "200" ]]
+
+if FLOW_BASE_URL="$tls_url" cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/https-secure.flow" \
+  >"$state_dir/tls-secure.out" 2>"$state_dir/tls-secure.err"; then
+  echo "self-signed HTTPS unexpectedly passed secure verification" >&2
+  exit 1
+fi
+
+rg -qi 'certificate|issuer|unknownca' "$state_dir/tls-secure.err"
+echo "HTTP acceptance checks passed."

@@ -1,0 +1,74 @@
+{
+  "name": "flow-language",
+  "displayName": "Flow Language",
+  "description": "Language support for the Flow I/O-oriented programming language.",
+  "version": "0.3.0",
+  "publisher": "flow-lang",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": ">=1.85.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:flow",
+    "onCommand:flow.runFlow"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "flow",
+    "http",
+    "load testing",
+    "language"
+  ],
+  "scripts": {
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/flow-language-0.3.0.vsix"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "flow.runFlow",
+        "title": "Flow: Run Flow",
+        "icon": "$(play)"
+      }
+    ],
+    "configuration": {
+      "title": "Flow",
+      "properties": {
+        "flow.executablePath": {
+          "type": "string",
+          "default": "flow",
+          "description": "Path or command name for the Flow CLI used by Run Flow CodeLens actions."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "flow",
+        "aliases": [
+          "Flow",
+          "flow"
+        ],
+        "extensions": [
+          ".flow"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "flow",
+        "scopeName": "source.flow",
+        "path": "./syntaxes/flow.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "flow",
+        "path": "./snippets/flow.json"
+      }
+    ]
+  }
+}

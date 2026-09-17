@@ -1,0 +1,244 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Flow",
+  "scopeName": "source.flow",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#directives" },
+    { "include": "#controlKeywords" },
+    { "include": "#constants" },
+    { "include": "#durations" },
+    { "include": "#numbers" },
+    { "include": "#qualifiedCalls" },
+    { "include": "#calls" },
+    { "include": "#bindings" },
+    { "include": "#properties" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.flow",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.flow",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.flow" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.flow" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.flow",
+              "match": "\\\\(?:[\\\"nrt]|u\\{[0-9A-Fa-f]+\\})"
+            },
+            {
+              "name": "meta.interpolation.flow",
+              "begin": "\\$\\{",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.interpolation.begin.flow" }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": { "name": "punctuation.section.interpolation.end.flow" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            },
+            {
+              "name": "invalid.illegal.newline.flow",
+              "match": "\\n"
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(flow)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.flow" },
+            "3": { "name": "entity.name.function.flow" }
+          }
+        },
+        {
+          "name": "storage.type.function.flow",
+          "match": "\\bflow\\b"
+        },
+        {
+          "match": "\\b(context)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.flow" },
+            "3": { "name": "entity.name.type.context.flow" }
+          }
+        },
+        {
+          "match": "\\b(namespace)(\\s+)([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "storage.type.namespace.flow" },
+            "3": { "name": "entity.name.namespace.flow" }
+          }
+        },
+        {
+          "match": "\\b(data)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.flow" },
+            "3": { "name": "entity.name.variable.flow" }
+          }
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "match": "\\b(use)(\\s+)(context|namespace)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.import.flow" },
+            "3": { "name": "storage.type.flow" }
+          }
+        },
+        {
+          "match": "\\b(defaults)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.flow" },
+            "3": { "name": "support.type.capability.flow" }
+          }
+        }
+      ]
+    },
+    "controlKeywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.flow",
+          "match": "\\b(?:return|assert|parallel|race|rate|repeat|retry|within)\\b"
+        },
+        {
+          "name": "storage.type.flow",
+          "match": "\\b(?:test)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.flow",
+          "match": "\\b(?:true|false|null)\\b"
+        }
+      ]
+    },
+    "durations": {
+      "patterns": [
+        {
+          "name": "constant.numeric.duration.flow",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:ns|us|ms|s|m|h)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.flow",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?\\b"
+        }
+      ]
+    },
+    "qualifiedCalls": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "support.type.capability.flow" },
+            "2": { "name": "punctuation.accessor.flow" },
+            "3": { "name": "support.function.flow" }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.flow",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "bindings": {
+      "patterns": [
+        {
+          "name": "variable.other.readwrite.flow",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*=)"
+        }
+      ]
+    },
+    "properties": {
+      "patterns": [
+        {
+          "name": "variable.other.property.flow",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.flow",
+          "match": "(?:==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.assignment.flow",
+          "match": "="
+        },
+        {
+          "name": "punctuation.accessor.flow",
+          "match": "\\."
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.flow",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.flow",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.group.begin.flow",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.group.end.flow",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.flow",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.flow",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.separator.flow",
+          "match": "[:,]"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "flow-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flow-capability = { path = "../flow-capability" }
+flow-compiler = { path = "../flow-compiler" }
+
+[dev-dependencies]
+flow-syntax = { path = "../flow-syntax" }
+
+[lints]
+workspace = true

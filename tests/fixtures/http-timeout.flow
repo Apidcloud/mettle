@@ -1,0 +1,15 @@
+context localApi {
+    defaults http {
+        baseUrl: env("FLOW_BASE_URL")
+        timeout: 50ms
+
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+    }
+}
+
+flow main() {
+    use context localApi
+    return http.get("/slow-body")
+}
