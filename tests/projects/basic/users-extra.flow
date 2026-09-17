@@ -1,0 +1,6 @@
+namespace users
+
+flow getSeedId() {
+    response = getSeed()
+    return response.json.id
+}

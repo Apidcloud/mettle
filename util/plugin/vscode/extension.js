@@ -13,9 +13,9 @@ function flowExecutable() {
 function discoverFlows(document, output, token) {
   return new Promise((resolve) => {
     const executable = flowExecutable();
-    const child = spawn(executable, ["list", "-", "--json"], {
+    const child = spawn(executable, ["list", document.uri.fsPath, "--json"], {
       cwd: path.dirname(document.uri.fsPath),
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
     let stdout = "";
@@ -34,9 +34,6 @@ function discoverFlows(document, output, token) {
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
-    });
-    child.stdin.on("error", () => {
-      // The process error/close handlers report startup and early-exit failures.
     });
     child.on("error", (error) => {
       cancellation.dispose();
@@ -61,13 +58,19 @@ function discoverFlows(document, output, token) {
       }
       try {
         const result = JSON.parse(stdout);
-        resolve(Array.isArray(result.flows) ? result.flows : []);
+        const flows = Array.isArray(result.flows) ? result.flows : [];
+        resolve(
+          flows.filter(
+            (flow) =>
+              !flow.path ||
+              path.resolve(flow.path) === path.resolve(document.uri.fsPath),
+          ),
+        );
       } catch (error) {
         output.appendLine(`Could not parse Flow discovery output: ${error.message}`);
         resolve([]);
       }
     });
-    child.stdin.end(document.getText());
   });
 }
 

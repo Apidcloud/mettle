@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use flow_capability::{CapabilityDescriptor, FieldSchema, SchemaType};
+pub use flow_syntax::BinaryOperator;
 use flow_syntax::{
     ContextMember, Expression, ExpressionKind, FlowDecl, ObjectField, Program, Span, Statement,
 };
@@ -53,6 +54,7 @@ pub enum Instruction {
         expression: PlanExpression,
     },
     Evaluate(PlanExpression),
+    Assert(PlanExpression),
     Return(PlanExpression),
 }
 
@@ -74,6 +76,11 @@ pub enum PlanExpressionKind {
     Member {
         value: Box<PlanExpression>,
         member: String,
+    },
+    Binary {
+        left: Box<PlanExpression>,
+        operator: BinaryOperator,
+        right: Box<PlanExpression>,
     },
     InterpolatedString(Vec<StringPart>),
     FlowCall {
@@ -181,9 +188,9 @@ struct Compiler<'a> {
     program: &'a Program,
     capabilities: &'a [CapabilityDescriptor],
     capability_ids: HashMap<&'a str, usize>,
-    context_ids: HashMap<&'a str, usize>,
+    context_ids: HashMap<String, usize>,
     context_fields: Vec<HashMap<String, usize>>,
-    flow_ids: HashMap<&'a str, usize>,
+    flow_ids: HashMap<String, usize>,
     errors: Vec<CompileError>,
     call_edges: Vec<Vec<(usize, Span)>>,
 }
@@ -252,16 +259,10 @@ impl<'a> Compiler<'a> {
 
     fn collect_context_names(&mut self) {
         for (index, context) in self.program.contexts.iter().enumerate() {
-            if self
-                .context_ids
-                .insert(&context.name.value, index)
-                .is_some()
-            {
+            let qualified = qualified_name(&context.namespace, &context.name.value);
+            if self.context_ids.insert(qualified.clone(), index).is_some() {
                 self.errors.push(CompileError::new(
-                    format!(
-                        "context `{}` is declared more than once",
-                        context.name.value
-                    ),
+                    format!("context `{qualified}` is declared more than once"),
                     context.name.span,
                 ));
             }
@@ -273,11 +274,52 @@ impl<'a> Compiler<'a> {
             let Some(name) = &flow.name else {
                 continue;
             };
-            if self.flow_ids.insert(&name.value, index).is_some() {
+            let qualified = qualified_name(&flow.namespace, &name.value);
+            if self.flow_ids.insert(qualified.clone(), index).is_some() {
                 self.errors.push(CompileError::new(
-                    format!("flow `{}` is declared more than once", name.value),
+                    format!("flow `{qualified}` is declared more than once"),
                     name.span,
                 ));
+            }
+        }
+    }
+
+    fn resolve_context_name(
+        &mut self,
+        name: &str,
+        namespace: &str,
+        uses: &[flow_syntax::Spanned<String>],
+        span: Span,
+    ) -> Option<usize> {
+        match resolve_visible_name(&self.context_ids, name, namespace, uses) {
+            NameResolution::Found(id) => Some(id),
+            NameResolution::Missing => None,
+            NameResolution::Ambiguous(candidates) => {
+                self.errors.push(CompileError::new(
+                    format!(
+                        "context `{name}` is ambiguous; it is provided by {}",
+                        candidates.join(", ")
+                    ),
+                    span,
+                ));
+                None
+            }
+        }
+    }
+
+    fn resolve_flow_name(&mut self, name: &str, flow: &FlowDecl, span: Span) -> Option<usize> {
+        match resolve_visible_name(&self.flow_ids, name, &flow.namespace, &flow.namespace_uses) {
+            NameResolution::Found(id) => Some(id),
+            NameResolution::Missing => None,
+            NameResolution::Ambiguous(candidates) => {
+                self.errors.push(CompileError::new(
+                    format!(
+                        "flow `{name}` is ambiguous; it is provided by {}",
+                        candidates.join(", ")
+                    ),
+                    span,
+                ));
+                None
             }
         }
     }
@@ -290,110 +332,199 @@ impl<'a> Compiler<'a> {
                 duplicate.span,
             ));
         }
-        self.context_ids
-            .get(name.value.as_str())
-            .copied()
-            .or_else(|| {
+        let error_count = self.errors.len();
+        self.resolve_context_name(
+            &name.value,
+            self.program
+                .namespace
+                .as_ref()
+                .map_or("", |namespace| namespace.value.as_str()),
+            &self.program.namespace_uses,
+            name.span,
+        )
+        .or_else(|| {
+            if self.errors.len() == error_count {
                 self.errors.push(CompileError::new(
                     format!("context `{}` is not defined", name.value),
                     name.span,
                 ));
-                None
-            })
+            }
+            None
+        })
     }
 
     fn compile_contexts(&mut self) -> Vec<ContextPlan> {
-        self.program
-            .contexts
-            .iter()
-            .enumerate()
-            .map(|(context_id, context)| {
-                let mut fields = Vec::new();
-                let mut defaults = Vec::new();
-                let mut default_capabilities = HashMap::new();
+        let mut states = vec![VisitState::Unvisited; self.program.contexts.len()];
+        let mut cache = vec![None; self.program.contexts.len()];
+        let mut stack = Vec::new();
+        for context in 0..self.program.contexts.len() {
+            self.flatten_context(context, &mut states, &mut cache, &mut stack);
+        }
 
-                for member in &context.members {
-                    match member {
-                        ContextMember::Field(field) => {
-                            if self.context_fields[context_id].contains_key(&field.name.value) {
-                                self.errors.push(CompileError::new(
-                                    format!(
-                                        "context field `{}` is declared more than once",
-                                        field.name.value
-                                    ),
-                                    field.name.span,
-                                ));
-                                continue;
-                            }
-                            let expression = self.compile_expression(
-                                None,
-                                &field.expression,
-                                &HashMap::new(),
-                                Some(context_id),
-                            );
-                            let slot = self.context_fields[context_id].len();
-                            self.context_fields[context_id]
-                                .insert(field.name.value.clone(), slot);
-                            if let Some(expression) = expression {
-                                fields.push(PlanField {
-                                    name: field.name.value.clone(),
-                                    expression,
-                                });
-                            }
-                        }
-                        ContextMember::Defaults {
-                            capability,
-                            fields: source_fields,
-                            ..
-                        } => {
-                            let Some(capability_id) =
-                                self.capability_ids.get(capability.value.as_str()).copied()
-                            else {
-                                self.errors.push(CompileError::new(
-                                    format!(
-                                        "capability `{}` is not registered",
-                                        capability.value
-                                    ),
-                                    capability.span,
-                                ));
-                                continue;
-                            };
-                            if default_capabilities
-                                .insert(capability_id, capability.span)
-                                .is_some()
-                            {
-                                self.errors.push(CompileError::new(
-                                    format!(
-                                        "defaults for `{}` are declared more than once in this context",
-                                        capability.value
-                                    ),
-                                    capability.span,
-                                ));
-                                continue;
-                            }
-                            let schema = self.capabilities[capability_id].defaults;
-                            let compiled = self.compile_fields(
-                                None,
-                                source_fields,
-                                &HashMap::new(),
-                                Some(context_id),
-                                Some(schema),
-                            );
-                            defaults.push(CapabilityDefaultsPlan {
-                                capability: capability_id,
-                                fields: compiled,
-                            });
-                        }
-                    }
+        for (context_id, flattened) in cache.iter().enumerate() {
+            if let Some(flattened) = flattened {
+                for (slot, field) in flattened.fields.iter().enumerate() {
+                    self.context_fields[context_id].insert(field.name.value.clone(), slot);
                 }
+            }
+        }
 
+        cache
+            .into_iter()
+            .enumerate()
+            .map(|(context_id, flattened)| {
+                let flattened = flattened.unwrap_or_default();
+                let fields = flattened
+                    .fields
+                    .iter()
+                    .filter_map(|field| {
+                        self.compile_expression(
+                            None,
+                            &field.expression,
+                            &HashMap::new(),
+                            Some(context_id),
+                        )
+                        .map(|expression| PlanField {
+                            name: field.name.value.clone(),
+                            expression,
+                        })
+                    })
+                    .collect();
+                let mut defaults = Vec::new();
+                for (capability, source_fields) in &flattened.defaults {
+                    let Some(capability_id) =
+                        self.capability_ids.get(capability.value.as_str()).copied()
+                    else {
+                        self.errors.push(CompileError::new(
+                            format!("capability `{}` is not registered", capability.value),
+                            capability.span,
+                        ));
+                        continue;
+                    };
+                    defaults.push(CapabilityDefaultsPlan {
+                        capability: capability_id,
+                        fields: self.compile_fields(
+                            None,
+                            source_fields,
+                            &HashMap::new(),
+                            Some(context_id),
+                            Some(self.capabilities[capability_id].defaults),
+                        ),
+                    });
+                }
+                let context = &self.program.contexts[context_id];
                 ContextPlan {
-                    name: context.name.value.clone(),
+                    name: qualified_name(&context.namespace, &context.name.value),
                     fields,
                     defaults,
                 }
             })
             .collect()
+    }
+
+    fn flatten_context(
+        &mut self,
+        context_id: usize,
+        states: &mut [VisitState],
+        cache: &mut [Option<FlattenedContext>],
+        stack: &mut Vec<usize>,
+    ) -> FlattenedContext {
+        if states[context_id] == VisitState::Complete {
+            return cache[context_id].clone().unwrap_or_default();
+        }
+        if states[context_id] == VisitState::Visiting {
+            let start = stack.iter().position(|id| *id == context_id).unwrap_or(0);
+            let mut chain = stack[start..]
+                .iter()
+                .map(|id| self.context_qualified_name(*id))
+                .collect::<Vec<_>>();
+            chain.push(self.context_qualified_name(context_id));
+            self.errors.push(CompileError::new(
+                format!("context composition cycle: {}", chain.join(" -> ")),
+                self.program.contexts[context_id].name.span,
+            ));
+            return FlattenedContext::default();
+        }
+
+        states[context_id] = VisitState::Visiting;
+        stack.push(context_id);
+        let context = self.program.contexts[context_id].clone();
+        let mut flattened = FlattenedContext::default();
+        for member in &context.members {
+            if let ContextMember::UseContext { name, .. } = member {
+                let error_count = self.errors.len();
+                if let Some(parent) = self.resolve_context_name(
+                    &name.value,
+                    &context.namespace,
+                    &context.namespace_uses,
+                    name.span,
+                ) {
+                    let parent = self.flatten_context(parent, states, cache, stack);
+                    for field in parent.fields {
+                        merge_context_field(&mut flattened.fields, field);
+                    }
+                    flattened.defaults.extend(parent.defaults);
+                } else if self.errors.len() == error_count {
+                    self.errors.push(CompileError::new(
+                        format!("context `{}` is not defined", name.value),
+                        name.span,
+                    ));
+                }
+            }
+        }
+
+        let mut local_fields = HashMap::new();
+        let mut local_defaults = HashMap::new();
+        for member in &context.members {
+            match member {
+                ContextMember::Field(field) => {
+                    if local_fields
+                        .insert(&field.name.value, field.name.span)
+                        .is_some()
+                    {
+                        self.errors.push(CompileError::new(
+                            format!(
+                                "context field `{}` is declared more than once",
+                                field.name.value
+                            ),
+                            field.name.span,
+                        ));
+                    } else {
+                        merge_context_field(&mut flattened.fields, field.clone());
+                    }
+                }
+                ContextMember::Defaults {
+                    capability, fields, ..
+                } => {
+                    if local_defaults
+                        .insert(&capability.value, capability.span)
+                        .is_some()
+                    {
+                        self.errors.push(CompileError::new(
+                            format!(
+                                "defaults for `{}` are declared more than once in this context",
+                                capability.value
+                            ),
+                            capability.span,
+                        ));
+                    } else {
+                        flattened
+                            .defaults
+                            .push((capability.clone(), fields.clone()));
+                    }
+                }
+                ContextMember::UseContext { .. } => {}
+            }
+        }
+        stack.pop();
+        states[context_id] = VisitState::Complete;
+        cache[context_id] = Some(flattened.clone());
+        flattened
+    }
+
+    fn context_qualified_name(&self, context: usize) -> String {
+        let context = &self.program.contexts[context];
+        qualified_name(&context.namespace, &context.name.value)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -420,16 +551,24 @@ impl<'a> Compiler<'a> {
         for statement in &flow.body {
             match statement {
                 Statement::UseContext { name, span } if !executable_seen => {
-                    let Some(context) = self.context_ids.get(name.value.as_str()).copied() else {
-                        self.errors.push(CompileError::new(
-                            format!("context `{}` is not defined", name.value),
-                            name.span,
-                        ));
+                    let error_count = self.errors.len();
+                    let Some(context) = self.resolve_context_name(
+                        &name.value,
+                        &flow.namespace,
+                        &flow.namespace_uses,
+                        name.span,
+                    ) else {
+                        if self.errors.len() == error_count {
+                            self.errors.push(CompileError::new(
+                                format!("context `{}` is not defined", name.value),
+                                name.span,
+                            ));
+                        }
                         continue;
                     };
                     if local_context_seen {
                         self.errors.push(CompileError::new(
-                            "multiple contexts in one flow are reserved for the composition milestone",
+                            "a flow may apply one context; compose reusable contexts in a context declaration",
                             *span,
                         ));
                     } else {
@@ -495,6 +634,22 @@ impl<'a> Compiler<'a> {
                     }
                     returned = true;
                 }
+                Statement::Assert { expression, .. } => {
+                    if let Some(expression) =
+                        self.compile_expression(Some(flow_id), expression, &locals, active_context)
+                    {
+                        if !matches!(
+                            expression.value_type,
+                            ValueType::Boolean | ValueType::Inferred
+                        ) {
+                            self.errors.push(CompileError::new(
+                                "assertion expression must be boolean",
+                                expression.span,
+                            ));
+                        }
+                        instructions.push(Instruction::Assert(expression));
+                    }
+                }
                 Statement::UseContext { .. } => unreachable!("context statements were skipped"),
             }
         }
@@ -508,7 +663,10 @@ impl<'a> Compiler<'a> {
         }
 
         FlowPlan {
-            name: flow.name.as_ref().map(|name| name.value.clone()),
+            name: flow
+                .name
+                .as_ref()
+                .map(|name| qualified_name(&flow.namespace, &name.value)),
             display_name: flow_display_name(flow, flow_id),
             parameters: flow
                 .parameters
@@ -577,6 +735,22 @@ impl<'a> Compiler<'a> {
                         member: member.value.clone(),
                     },
                     ValueType::Inferred,
+                )
+            }
+            ExpressionKind::Binary {
+                left,
+                operator,
+                right,
+            } => {
+                let left = self.compile_expression(current_flow, left, locals, context)?;
+                let right = self.compile_expression(current_flow, right, locals, context)?;
+                (
+                    PlanExpressionKind::Binary {
+                        left: Box::new(left),
+                        operator: *operator,
+                        right: Box::new(right),
+                    },
+                    ValueType::Boolean,
                 )
             }
             ExpressionKind::Call {
@@ -698,11 +872,23 @@ impl<'a> Compiler<'a> {
             });
         }
 
-        let Some(target) = self.flow_ids.get(callee.value.as_str()).copied() else {
+        let Some(current_flow_id) = current_flow else {
             self.errors.push(CompileError::new(
-                format!("flow `{}` is not defined", callee.value),
+                "flow calls are not available while evaluating a context",
                 callee.span,
             ));
+            return None;
+        };
+        let current_flow_decl = self.program.flows[current_flow_id].clone();
+        let error_count = self.errors.len();
+        let Some(target) = self.resolve_flow_name(&callee.value, &current_flow_decl, callee.span)
+        else {
+            if self.errors.len() == error_count {
+                self.errors.push(CompileError::new(
+                    format!("flow `{}` is not defined", callee.value),
+                    callee.span,
+                ));
+            }
             return None;
         };
         if !options.is_empty() {
@@ -726,9 +912,7 @@ impl<'a> Compiler<'a> {
             .iter()
             .filter_map(|argument| self.compile_expression(current_flow, argument, locals, context))
             .collect();
-        if let Some(current_flow) = current_flow {
-            self.call_edges[current_flow].push((target, callee.span));
-        }
+        self.call_edges[current_flow_id].push((target, callee.span));
         Some(PlanExpression {
             kind: PlanExpressionKind::FlowCall {
                 flow: target,
@@ -1005,7 +1189,7 @@ impl<'a> Compiler<'a> {
 
 fn flow_display_name(flow: &FlowDecl, flow_id: usize) -> String {
     if let Some(name) = &flow.name {
-        return name.value.clone();
+        return qualified_name(&flow.namespace, &name.value);
     }
     if let [Statement::Return { expression, .. }] = flow.body.as_slice()
         && let ExpressionKind::Call {
@@ -1024,6 +1208,65 @@ fn flow_display_name(flow: &FlowDecl, flow_id: usize) -> String {
         return callee.value.clone();
     }
     format!("anonymous flow {}", flow_id + 1)
+}
+
+fn qualified_name(namespace: &str, name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{namespace}.{name}")
+    }
+}
+
+enum NameResolution {
+    Found(usize),
+    Missing,
+    Ambiguous(Vec<String>),
+}
+
+fn resolve_visible_name(
+    names: &HashMap<String, usize>,
+    name: &str,
+    namespace: &str,
+    uses: &[flow_syntax::Spanned<String>],
+) -> NameResolution {
+    let local = qualified_name(namespace, name);
+    if let Some(id) = names.get(&local).copied() {
+        return NameResolution::Found(id);
+    }
+
+    let mut candidates = Vec::new();
+    if !namespace.is_empty() && names.contains_key(name) {
+        candidates.push(name.to_owned());
+    }
+    for used in uses {
+        let candidate = qualified_name(&used.value, name);
+        if names.contains_key(&candidate) && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    match candidates.as_slice() {
+        [] => NameResolution::Missing,
+        [candidate] => NameResolution::Found(names[candidate]),
+        _ => NameResolution::Ambiguous(candidates),
+    }
+}
+
+#[derive(Clone, Default)]
+struct FlattenedContext {
+    fields: Vec<ObjectField>,
+    defaults: Vec<(flow_syntax::Spanned<String>, Vec<ObjectField>)>,
+}
+
+fn merge_context_field(fields: &mut Vec<ObjectField>, field: ObjectField) {
+    if let Some(existing) = fields
+        .iter_mut()
+        .find(|existing| existing.name.value == field.name.value)
+    {
+        *existing = field;
+    } else {
+        fields.push(field);
+    }
 }
 
 fn is_valid_identifier(value: &str) -> bool {

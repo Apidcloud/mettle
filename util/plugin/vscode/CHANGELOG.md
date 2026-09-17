@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.4.0
+
+- Discover runnable flows through project-aware CLI compilation.
+- Add namespace and assertion snippets for the Milestone 3 language.
+- Keep CodeLens actions scoped to declarations in the open file.
+
 ## 0.3.0
 
 - Add compiler-backed Run Flow CodeLens actions for named and anonymous flows.

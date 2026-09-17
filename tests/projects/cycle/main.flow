@@ -1,0 +1,12 @@
+context first {
+    use context second
+}
+
+context second {
+    use context first
+}
+
+flow main() {
+    use context first
+    return null
+}

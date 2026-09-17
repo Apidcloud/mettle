@@ -33,6 +33,21 @@
       "}"
     ]
   },
+  "Namespace declaration": {
+    "prefix": "namespace",
+    "description": "Declare this file's namespace and an optional dependency",
+    "body": [
+      "namespace ${1:name}",
+      "use namespace ${2:core}"
+    ]
+  },
+  "Assertion": {
+    "prefix": "assert",
+    "description": "Assert that an expression is true",
+    "body": [
+      "assert(${1:response.status == 200})"
+    ]
+  },
   "HTTP context": {
     "prefix": "flowcontext",
     "description": "Declare an HTTP context",

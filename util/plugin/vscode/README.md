@@ -9,11 +9,11 @@ Basic language support for `.flow` source files.
 - `//` comment toggling;
 - matching and automatic closing of braces, brackets, parentheses, and strings;
 - indentation and region folding;
-- snippets for named flows, anonymous flows, contexts, HTTP GET, and HTTP POST;
+- snippets for named flows, anonymous flows, namespaces, assertions, contexts, HTTP GET, and HTTP POST;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - prompts for named flow parameters and execution in a dedicated task terminal.
 
-The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Flow discovery comes from the Rust compiler through `flow list - --json`, so the editor does not maintain a second parser. Compiler diagnostics, completion, hover information, navigation, rename, formatting, and semantic highlighting require the planned Flow language server and are not available yet.
+The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Flow discovery comes from the Rust compiler through project-aware `flow list <file> --json`, so the editor does not maintain a second parser. Compiler diagnostics, completion, hover information, navigation, rename, formatting, and semantic highlighting require the planned Flow language server and are not available yet.
 
 ## Run flows
 
@@ -51,7 +51,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/flow-language-0.3.0.vsix
+dist/flow-language-0.4.0.vsix
 ```
 
 ## Install
@@ -59,7 +59,7 @@ dist/flow-language-0.3.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/flow-language-0.3.0.vsix --force
+code --install-extension dist/flow-language-0.4.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

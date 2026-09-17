@@ -7,7 +7,7 @@ use std::{env, fmt};
 
 use flow_capability::{Capability, Object, Span, Value};
 use flow_compiler::{
-    Constant, ContextPlan, ExecutionPlan, FlowPlan, Instruction, PlanExpression,
+    BinaryOperator, Constant, ContextPlan, ExecutionPlan, FlowPlan, Instruction, PlanExpression,
     PlanExpressionKind, PlanField, StringPart,
 };
 
@@ -79,6 +79,7 @@ impl Runtime {
             plan,
             capabilities: &self.capabilities,
             flow_stack: Vec::new(),
+            secrets: Vec::new(),
         }
         .execute_flow(flow, arguments, ActiveContext::default())
         .await
@@ -118,6 +119,7 @@ struct Executor<'a> {
     plan: &'a ExecutionPlan,
     capabilities: &'a [Arc<dyn Capability>],
     flow_stack: Vec<String>,
+    secrets: Vec<String>,
 }
 
 impl Executor<'_> {
@@ -238,6 +240,24 @@ impl Executor<'_> {
                 Instruction::Evaluate(expression) => {
                     self.evaluate(expression, &locals, &context).await?;
                 }
+                Instruction::Assert(expression) => {
+                    let value = self.evaluate(expression, &locals, &context).await?;
+                    match value {
+                        Value::Boolean(true) => {}
+                        Value::Boolean(false) => {
+                            return Err(self.error("assertion failed", expression.span));
+                        }
+                        value => {
+                            return Err(self.error(
+                                format!(
+                                    "assertion produced {}, expected boolean",
+                                    value.type_name()
+                                ),
+                                expression.span,
+                            ));
+                        }
+                    }
+                }
                 Instruction::Return(expression) => {
                     return self.evaluate(expression, &locals, &context).await;
                 }
@@ -288,14 +308,19 @@ impl Executor<'_> {
                         )
                     })
                 }
-                PlanExpressionKind::Environment(name) => {
-                    env::var(name).map(Value::String).map_err(|_| {
+                PlanExpressionKind::Environment(name) => env::var(name)
+                    .map(|value| {
+                        if !value.is_empty() && !self.secrets.contains(&value) {
+                            self.secrets.push(value.clone());
+                        }
+                        Value::String(value)
+                    })
+                    .map_err(|_| {
                         self.error(
                             format!("required environment variable `{name}` is not set"),
                             expression.span,
                         )
-                    })
-                }
+                    }),
                 PlanExpressionKind::Array(values) => {
                     let mut result = Vec::with_capacity(values.len());
                     for value in values {
@@ -318,6 +343,17 @@ impl Executor<'_> {
                     fields.get(member).cloned().ok_or_else(|| {
                         self.error(format!("object has no member `{member}`"), expression.span)
                     })
+                }
+                PlanExpressionKind::Binary {
+                    left,
+                    operator,
+                    right,
+                } => {
+                    let left = self.evaluate(left, locals, context).await?;
+                    let right = self.evaluate(right, locals, context).await?;
+                    evaluate_binary(&left, *operator, &right)
+                        .map(Value::Boolean)
+                        .map_err(|message| self.error(message, expression.span))
                 }
                 PlanExpressionKind::InterpolatedString(parts) => {
                     let mut result = String::new();
@@ -387,12 +423,49 @@ impl Executor<'_> {
     }
 
     fn error(&self, message: impl Into<String>, span: Span) -> RuntimeError {
+        let mut message = message.into();
+        for secret in &self.secrets {
+            message = message.replace(secret, "[REDACTED]");
+        }
         RuntimeError {
-            message: message.into(),
+            message,
             span,
             flow_stack: self.flow_stack.clone(),
         }
     }
+}
+
+fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Result<bool, String> {
+    if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+        let equal = left == right;
+        return Ok(if operator == BinaryOperator::Equal {
+            equal
+        } else {
+            !equal
+        });
+    }
+
+    let ordering = match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => left.partial_cmp(right),
+        (Value::Float(left), Value::Float(right)) => left.partial_cmp(right),
+        (Value::String(left), Value::String(right)) => left.partial_cmp(right),
+        (Value::Duration(left), Value::Duration(right)) => left.partial_cmp(right),
+        _ => {
+            return Err(format!(
+                "cannot compare {} and {}",
+                left.type_name(),
+                right.type_name()
+            ));
+        }
+    }
+    .ok_or_else(|| "comparison is undefined for these values".to_owned())?;
+    Ok(match operator {
+        BinaryOperator::Less => ordering.is_lt(),
+        BinaryOperator::LessEqual => ordering.is_le(),
+        BinaryOperator::Greater => ordering.is_gt(),
+        BinaryOperator::GreaterEqual => ordering.is_ge(),
+        BinaryOperator::Equal | BinaryOperator::NotEqual => unreachable!(),
+    })
 }
 
 #[cfg(test)]
@@ -436,6 +509,32 @@ mod tests {
             block_on(Runtime::default().execute(&plan)).expect("program should run"),
             Value::String("Hello from Flow".to_owned())
         );
+    }
+
+    #[test]
+    fn evaluates_assertions_and_comparisons() {
+        let passing = parse(
+            r#"
+            flow main() {
+                assert(10 > 5)
+                assert("flow" != "rust")
+                return true
+            }
+            "#,
+        )
+        .expect("program should parse");
+        let passing = compile(&passing).expect("program should compile");
+        assert_eq!(
+            block_on(Runtime::default().execute(&passing)).expect("assertions should pass"),
+            Value::Boolean(true)
+        );
+
+        let failing =
+            parse("flow main() { assert(false) return null }").expect("program should parse");
+        let failing = compile(&failing).expect("program should compile");
+        let error = block_on(Runtime::default().execute(&failing))
+            .expect_err("false assertion should fail");
+        assert_eq!(error.message, "assertion failed");
     }
 
     #[test]

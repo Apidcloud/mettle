@@ -1,6 +1,6 @@
 # Flow
 
-Flow is an experimental language and native runtime for I/O-oriented workflows. It currently supports concise request collections, reusable parameterized flows, immutable data, contexts, environment configuration, HTTP/1.1 and HTTPS operations, JSON payloads and responses, and compiler-validated HTTP options.
+Flow is an experimental language and native runtime for I/O-oriented workflows. It currently supports concise request collections, reusable parameterized flows, multi-file projects and namespaces, composable contexts, assertions, environment configuration, HTTP/1.1 and HTTPS operations, JSON payloads and responses, and compiler-validated HTTP options.
 
 The implementation compiles source into a resolved execution plan and interprets that plan on an asynchronous Rust runtime. HTTP clients and their connection pools are reused across operations.
 
@@ -29,9 +29,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ./scripts/check-licenses.py
 ./scripts/acceptance-http.sh
+./scripts/acceptance-project.sh
 ```
 
 The HTTP acceptance command starts isolated HTTP and HTTPS fixtures on random local ports. It verifies named and anonymous entry flows, CLI arguments, request chaining, JSON, environment configuration, connection reuse, whole-exchange timeouts (including response streaming), compile-time schema errors, secure certificate rejection, and the explicit certificate-verification override.
+
+The project acceptance command verifies multi-file discovery, namespaces, context composition, assertions, ambiguity and cycle diagnostics, and environment-value redaction.
 
 Build the optimized binary with:
 
@@ -128,6 +131,57 @@ The example reads seed data with `GET`, uses that response to construct a `POST`
 ```
 
 ## Language currently available
+
+### Projects, namespaces, and assertions
+
+A `flow.toml` file marks a project root. Running any `.flow` entry file below it discovers every `.flow` source in that project; files contribute declarations without import/export lists:
+
+```text
+project/
+├── flow.toml
+├── core.flow
+├── users.flow
+└── main.flow
+```
+
+Files without a namespace belong to the implicit global namespace. Named namespaces can span multiple files and are made visible explicitly:
+
+```flow
+namespace users
+use namespace core
+
+flow getUser(id) {
+    use context api
+    return http.get("/users/${id}")
+}
+```
+
+Contexts compose in listed order, followed by local declarations. Later defaults override conflicting earlier defaults while unrelated settings and HTTP headers are retained:
+
+```flow
+context api {
+    use context base
+    use context identified
+
+    defaults http {
+        timeout: 5s
+    }
+}
+```
+
+Assertions accept equality and ordering comparisons and fail with their source location and Flow call stack:
+
+```flow
+assert(response.status == 200)
+assert(response.json.id != null)
+assert(elapsed < 500ms)
+```
+
+Run the included project example with:
+
+```bash
+cargo run -- run examples/project/main.flow
+```
 
 ### Values and flows
 
@@ -301,7 +355,7 @@ The included VS Code extension provides `.flow` file recognition, syntax highlig
 cargo install --path crates/flow-cli --locked
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/flow-language-0.3.0.vsix --force
+code --install-extension dist/flow-language-0.4.0.vsix --force
 ```
 
 See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md).
@@ -317,6 +371,7 @@ crates/flow-http         HTTP schema, pooled client, JSON, timeouts, and TLS
 crates/flow-cli          Native command-line interface and diagnostics
 examples/                Runnable Flow programs
 tests/fixtures/          Deterministic HTTP programs, invalid programs, and local TLS material
+tests/projects/          Multi-file project acceptance fixtures
 util/plugin/vscode/      Installable VS Code language extension
 util/test-server/        Local HTTP/HTTPS acceptance fixture
 docs/                    Language, runtime, and dependency documentation
@@ -328,9 +383,8 @@ Third-party Rust dependencies and their licences are documented in [`docs/depend
 
 - HTTP/1.1 `GET` and `POST` only
 - no redirects or proxy discovery
-- one directly applied context per flow
-- no multi-file project discovery, context composition, or namespaces
-- no assertions, retries, deadlines scopes, parallel execution, or load generation
+- one directly applied context per flow; contexts themselves may compose
+- no retries, deadline scopes, parallel execution, or load generation
 - no custom CA bundles, client certificates, or mutual TLS
 - Linux is the tested release platform
 

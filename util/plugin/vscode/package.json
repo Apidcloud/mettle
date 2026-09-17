@@ -2,7 +2,7 @@
   "name": "flow-language",
   "displayName": "Flow Language",
   "description": "Language support for the Flow I/O-oriented programming language.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "flow-lang",
   "license": "UNLICENSED",
   "engines": {
@@ -24,7 +24,7 @@
     "language"
   ],
   "scripts": {
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/flow-language-0.3.0.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/flow-language-0.4.0.vsix"
   },
   "contributes": {
     "commands": [

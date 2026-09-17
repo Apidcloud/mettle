@@ -1,0 +1,16 @@
+use namespace users
+
+flow main() {
+    seedId = getSeedId()
+    assert(seedId == "seed-42")
+    return seedId
+}
+
+flow failingAssertion() {
+    assert(false)
+    return null
+}
+
+flow secretDiagnostic() {
+    return invalidSecretUrl()
+}

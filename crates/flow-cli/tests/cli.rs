@@ -15,6 +15,19 @@ fn source_file(contents: &str) -> std::path::PathBuf {
     path
 }
 
+fn project_directory() -> std::path::PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "flow-cli-project-test-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&path).expect("project directory should be creatable");
+    path
+}
+
 #[test]
 fn check_validates_a_source_file() {
     let path = source_file("flow main() { return \"valid\" }");
@@ -27,6 +40,36 @@ fn check_validates_a_source_file() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("Checked"));
+}
+
+#[test]
+fn discovers_and_executes_a_multi_file_project() {
+    let directory = project_directory();
+    fs::write(directory.join("flow.toml"), "name = \"test\"\n")
+        .expect("manifest should be writable");
+    fs::write(
+        directory.join("first.flow"),
+        "namespace tools\nflow first() = \"project\"\n",
+    )
+    .expect("first source should be writable");
+    fs::write(
+        directory.join("second.flow"),
+        "namespace tools\nflow second() = first()\n",
+    )
+    .expect("second source should be writable");
+    let entry = directory.join("main.flow");
+    fs::write(&entry, "use namespace tools\nflow main() = second()\n")
+        .expect("entry source should be writable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_flow"))
+        .arg("run")
+        .arg(&entry)
+        .output()
+        .expect("flow should start");
+    fs::remove_dir_all(directory).expect("project directory should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "project\n");
 }
 
 #[test]

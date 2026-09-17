@@ -4,6 +4,7 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Span {
+    pub source: usize,
     pub start: usize,
     pub end: usize,
 }
@@ -11,12 +12,25 @@ pub struct Span {
 impl Span {
     #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
+        Self {
+            source: 0,
+            start,
+            end,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_source(self, source: usize) -> Self {
+        Self { source, ..self }
     }
 
     #[must_use]
     pub const fn join(self, other: Self) -> Self {
-        Self::new(self.start, other.end)
+        Self {
+            source: self.source,
+            start: self.start,
+            end: other.end,
+        }
     }
 }
 
@@ -28,13 +42,141 @@ pub struct Spanned<T> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
+    pub namespace: Option<Spanned<String>>,
+    pub namespace_uses: Vec<Spanned<String>>,
     pub contexts: Vec<ContextDecl>,
     pub file_contexts: Vec<Spanned<String>>,
     pub flows: Vec<FlowDecl>,
 }
 
+impl Program {
+    /// Assign a source-file identity to every span in this parsed program.
+    pub fn set_source(&mut self, source: usize) {
+        if let Some(namespace) = &mut self.namespace {
+            namespace.span = namespace.span.with_source(source);
+        }
+        for namespace in &mut self.namespace_uses {
+            namespace.span = namespace.span.with_source(source);
+        }
+        for context in &mut self.contexts {
+            context.span = context.span.with_source(source);
+            context.name.span = context.name.span.with_source(source);
+            for namespace in &mut context.namespace_uses {
+                namespace.span = namespace.span.with_source(source);
+            }
+            for member in &mut context.members {
+                match member {
+                    ContextMember::UseContext { name, span } => {
+                        *span = span.with_source(source);
+                        name.span = name.span.with_source(source);
+                    }
+                    ContextMember::Field(field) => set_field_source(field, source),
+                    ContextMember::Defaults {
+                        capability,
+                        fields,
+                        span,
+                    } => {
+                        *span = span.with_source(source);
+                        capability.span = capability.span.with_source(source);
+                        for field in fields {
+                            set_field_source(field, source);
+                        }
+                    }
+                }
+            }
+        }
+        for context in &mut self.file_contexts {
+            context.span = context.span.with_source(source);
+        }
+        for flow in &mut self.flows {
+            flow.span = flow.span.with_source(source);
+            if let Some(name) = &mut flow.name {
+                name.span = name.span.with_source(source);
+            }
+            for namespace in &mut flow.namespace_uses {
+                namespace.span = namespace.span.with_source(source);
+            }
+            for parameter in &mut flow.parameters {
+                parameter.span = parameter.span.with_source(source);
+            }
+            for statement in &mut flow.body {
+                set_statement_source(statement, source);
+            }
+        }
+    }
+}
+
+fn set_statement_source(statement: &mut Statement, source: usize) {
+    match statement {
+        Statement::UseContext { name, span } | Statement::Bind { name, span, .. } => {
+            name.span = name.span.with_source(source);
+            *span = span.with_source(source);
+        }
+        Statement::Return { expression, span } | Statement::Assert { expression, span } => {
+            *span = span.with_source(source);
+            set_expression_source(expression, source);
+        }
+        Statement::Expression(expression) => set_expression_source(expression, source),
+    }
+    if let Statement::Bind { expression, .. } = statement {
+        set_expression_source(expression, source);
+    }
+}
+
+fn set_field_source(field: &mut ObjectField, source: usize) {
+    field.span = field.span.with_source(source);
+    field.name.span = field.name.span.with_source(source);
+    set_expression_source(&mut field.expression, source);
+}
+
+fn set_expression_source(expression: &mut Expression, source: usize) {
+    expression.span = expression.span.with_source(source);
+    match &mut expression.kind {
+        ExpressionKind::Array(values) => {
+            for value in values {
+                set_expression_source(value, source);
+            }
+        }
+        ExpressionKind::Object(fields) => {
+            for field in fields {
+                set_field_source(field, source);
+            }
+        }
+        ExpressionKind::Call {
+            callee,
+            arguments,
+            options,
+        } => {
+            callee.span = callee.span.with_source(source);
+            for argument in arguments {
+                set_expression_source(argument, source);
+            }
+            for field in options {
+                set_field_source(field, source);
+            }
+        }
+        ExpressionKind::Member { value, member } => {
+            set_expression_source(value, source);
+            member.span = member.span.with_source(source);
+        }
+        ExpressionKind::Binary { left, right, .. } => {
+            set_expression_source(left, source);
+            set_expression_source(right, source);
+        }
+        ExpressionKind::Null
+        | ExpressionKind::Boolean(_)
+        | ExpressionKind::Integer(_)
+        | ExpressionKind::Float(_)
+        | ExpressionKind::String(_)
+        | ExpressionKind::DurationNanos(_)
+        | ExpressionKind::Name(_) => {}
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextDecl {
+    pub namespace: String,
+    pub namespace_uses: Vec<Spanned<String>>,
     pub name: Spanned<String>,
     pub members: Vec<ContextMember>,
     pub span: Span,
@@ -42,6 +184,10 @@ pub struct ContextDecl {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContextMember {
+    UseContext {
+        name: Spanned<String>,
+        span: Span,
+    },
     Field(ObjectField),
     Defaults {
         capability: Spanned<String>,
@@ -59,6 +205,8 @@ pub struct ObjectField {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowDecl {
+    pub namespace: String,
+    pub namespace_uses: Vec<Spanned<String>>,
     pub name: Option<Spanned<String>>,
     pub parameters: Vec<Spanned<String>>,
     pub body: Vec<Statement>,
@@ -80,6 +228,10 @@ pub enum Statement {
         expression: Expression,
         span: Span,
     },
+    Assert {
+        expression: Expression,
+        span: Span,
+    },
     Expression(Expression),
 }
 
@@ -87,9 +239,10 @@ impl Statement {
     #[must_use]
     pub const fn span(&self) -> Span {
         match self {
-            Self::UseContext { span, .. } | Self::Bind { span, .. } | Self::Return { span, .. } => {
-                *span
-            }
+            Self::UseContext { span, .. }
+            | Self::Bind { span, .. }
+            | Self::Return { span, .. }
+            | Self::Assert { span, .. } => *span,
             Self::Expression(expression) => expression.span,
         }
     }
@@ -121,6 +274,21 @@ pub enum ExpressionKind {
         value: Box<Expression>,
         member: Spanned<String>,
     },
+    Binary {
+        left: Box<Expression>,
+        operator: BinaryOperator,
+        right: Box<Expression>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinaryOperator {
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,9 +324,11 @@ struct Token {
 enum TokenKind {
     Flow,
     Context,
+    Namespace,
     Defaults,
     Use,
     Return,
+    Assert,
     True,
     False,
     Null,
@@ -176,6 +346,12 @@ enum TokenKind {
     Comma,
     Colon,
     Equal,
+    EqualEqual,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
     Dot,
     End,
 }
@@ -225,7 +401,21 @@ fn lex(source: &str) -> Result<Vec<Token>, SyntaxError> {
             b')' => push_symbol(&mut tokens, &mut cursor, TokenKind::RightParen),
             b',' => push_symbol(&mut tokens, &mut cursor, TokenKind::Comma),
             b':' => push_symbol(&mut tokens, &mut cursor, TokenKind::Colon),
+            b'=' if bytes.get(cursor + 1) == Some(&b'=') => {
+                push_double_symbol(&mut tokens, &mut cursor, TokenKind::EqualEqual);
+            }
             b'=' => push_symbol(&mut tokens, &mut cursor, TokenKind::Equal),
+            b'!' if bytes.get(cursor + 1) == Some(&b'=') => {
+                push_double_symbol(&mut tokens, &mut cursor, TokenKind::BangEqual);
+            }
+            b'<' if bytes.get(cursor + 1) == Some(&b'=') => {
+                push_double_symbol(&mut tokens, &mut cursor, TokenKind::LessEqual);
+            }
+            b'<' => push_symbol(&mut tokens, &mut cursor, TokenKind::Less),
+            b'>' if bytes.get(cursor + 1) == Some(&b'=') => {
+                push_double_symbol(&mut tokens, &mut cursor, TokenKind::GreaterEqual);
+            }
+            b'>' => push_symbol(&mut tokens, &mut cursor, TokenKind::Greater),
             b'.' => push_symbol(&mut tokens, &mut cursor, TokenKind::Dot),
             b'"' => tokens.push(lex_string(source, &mut cursor)?),
             byte if byte.is_ascii_digit() => tokens.push(lex_number(source, &mut cursor)?),
@@ -258,6 +448,15 @@ fn push_symbol(tokens: &mut Vec<Token>, cursor: &mut usize, kind: TokenKind) {
     });
 }
 
+fn push_double_symbol(tokens: &mut Vec<Token>, cursor: &mut usize, kind: TokenKind) {
+    let start = *cursor;
+    *cursor += 2;
+    tokens.push(Token {
+        kind,
+        span: Span::new(start, *cursor),
+    });
+}
+
 fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
     let bytes = source.as_bytes();
     let start = *cursor;
@@ -269,9 +468,11 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
     let kind = match text {
         "flow" => TokenKind::Flow,
         "context" => TokenKind::Context,
+        "namespace" => TokenKind::Namespace,
         "defaults" => TokenKind::Defaults,
         "use" => TokenKind::Use,
         "return" => TokenKind::Return,
+        "assert" => TokenKind::Assert,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
@@ -434,23 +635,55 @@ impl Parser {
     }
 
     fn parse_program(mut self) -> Result<Program, SyntaxError> {
+        let mut namespace = None;
+        let mut namespace_uses = Vec::new();
         let mut contexts = Vec::new();
         let mut file_contexts = Vec::new();
         let mut flows = Vec::new();
         while !self.at(&TokenKind::End) {
-            if self.at(&TokenKind::Context) {
-                contexts.push(self.parse_context()?);
+            if self.at(&TokenKind::Namespace) {
+                let start = self.advance().span;
+                let name = self.take_identifier("a namespace name")?;
+                if namespace.replace(name.clone()).is_some() {
+                    return Err(SyntaxError::new(
+                        "a file may declare only one namespace",
+                        start.join(name.span),
+                    ));
+                }
             } else if self.at(&TokenKind::Use) {
                 self.advance();
-                self.take(&TokenKind::Context)?;
-                file_contexts.push(self.take_identifier("a context name")?);
+                if self.take_if(&TokenKind::Namespace) {
+                    namespace_uses.push(self.take_identifier("a namespace name")?);
+                } else {
+                    self.take(&TokenKind::Context)?;
+                    file_contexts.push(self.take_identifier("a context name")?);
+                }
+            } else if self.at(&TokenKind::Context) {
+                let mut context = self.parse_context()?;
+                context.namespace = namespace
+                    .as_ref()
+                    .map_or_else(String::new, |name| name.value.clone());
+                context.namespace_uses.clone_from(&namespace_uses);
+                contexts.push(context);
             } else if self.at(&TokenKind::Flow) {
-                flows.push(self.parse_flow()?);
+                let mut flow = self.parse_flow()?;
+                flow.namespace = namespace
+                    .as_ref()
+                    .map_or_else(String::new, |name| name.value.clone());
+                flow.namespace_uses.clone_from(&namespace_uses);
+                flows.push(flow);
             } else {
-                flows.push(self.parse_anonymous_expression_flow()?);
+                let mut flow = self.parse_anonymous_expression_flow()?;
+                flow.namespace = namespace
+                    .as_ref()
+                    .map_or_else(String::new, |name| name.value.clone());
+                flow.namespace_uses.clone_from(&namespace_uses);
+                flows.push(flow);
             }
         }
         Ok(Program {
+            namespace,
+            namespace_uses,
             contexts,
             file_contexts,
             flows,
@@ -466,7 +699,15 @@ impl Parser {
             if self.at(&TokenKind::End) {
                 return Err(self.expected("a context member or `}`"));
             }
-            if self.at(&TokenKind::Defaults) {
+            if self.at(&TokenKind::Use) {
+                let start = self.advance().span;
+                self.take(&TokenKind::Context)?;
+                let name = self.take_identifier("a context name")?;
+                members.push(ContextMember::UseContext {
+                    span: start.join(name.span),
+                    name,
+                });
+            } else if self.at(&TokenKind::Defaults) {
                 let defaults = self.advance().span;
                 let capability = self.take_identifier("a capability name")?;
                 let (fields, block_span) = self.parse_object_fields()?;
@@ -481,6 +722,8 @@ impl Parser {
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
         Ok(ContextDecl {
+            namespace: String::new(),
+            namespace_uses: Vec::new(),
             name,
             members,
             span: start.join(end),
@@ -492,6 +735,8 @@ impl Parser {
         if self.at(&TokenKind::LeftBrace) {
             let (body, end) = self.parse_statement_block()?;
             return Ok(FlowDecl {
+                namespace: String::new(),
+                namespace_uses: Vec::new(),
                 name: None,
                 parameters: Vec::new(),
                 body,
@@ -515,6 +760,8 @@ impl Parser {
             let expression = self.parse_expression()?;
             let span = start.join(expression.span);
             return Ok(FlowDecl {
+                namespace: String::new(),
+                namespace_uses: Vec::new(),
                 name: Some(name),
                 parameters,
                 body: vec![Statement::Return { expression, span }],
@@ -524,6 +771,8 @@ impl Parser {
 
         let (body, end) = self.parse_statement_block()?;
         Ok(FlowDecl {
+            namespace: String::new(),
+            namespace_uses: Vec::new(),
             name: Some(name),
             parameters,
             body,
@@ -554,6 +803,8 @@ impl Parser {
         }
         let span = expression.span;
         Ok(FlowDecl {
+            namespace: String::new(),
+            namespace_uses: Vec::new(),
             name: None,
             parameters: Vec::new(),
             body: vec![Statement::Return { expression, span }],
@@ -581,6 +832,17 @@ impl Parser {
             });
         }
 
+        if self.at(&TokenKind::Assert) {
+            let start = self.advance().span;
+            self.take(&TokenKind::LeftParen)?;
+            let expression = self.parse_expression()?;
+            let end = self.take(&TokenKind::RightParen)?.span;
+            return Ok(Statement::Assert {
+                expression,
+                span: start.join(end),
+            });
+        }
+
         if matches!(self.current().kind, TokenKind::Identifier(_))
             && self.peek_at(1, &TokenKind::Equal)
         {
@@ -598,6 +860,30 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, SyntaxError> {
+        let left = self.parse_primary_expression()?;
+        let operator = match self.current().kind {
+            TokenKind::EqualEqual => BinaryOperator::Equal,
+            TokenKind::BangEqual => BinaryOperator::NotEqual,
+            TokenKind::Less => BinaryOperator::Less,
+            TokenKind::LessEqual => BinaryOperator::LessEqual,
+            TokenKind::Greater => BinaryOperator::Greater,
+            TokenKind::GreaterEqual => BinaryOperator::GreaterEqual,
+            _ => return Ok(left),
+        };
+        self.advance();
+        let right = self.parse_primary_expression()?;
+        let span = left.span.join(right.span);
+        Ok(Expression {
+            kind: ExpressionKind::Binary {
+                left: Box::new(left),
+                operator,
+                right: Box::new(right),
+            },
+            span,
+        })
+    }
+
+    fn parse_primary_expression(&mut self) -> Result<Expression, SyntaxError> {
         let token = self.advance();
         let mut expression = match token.kind {
             TokenKind::Null => literal(ExpressionKind::Null, token.span),
@@ -812,9 +1098,11 @@ const fn token_description(token: &TokenKind) -> &'static str {
     match token {
         TokenKind::Flow => "`flow`",
         TokenKind::Context => "`context`",
+        TokenKind::Namespace => "`namespace`",
         TokenKind::Defaults => "`defaults`",
         TokenKind::Use => "`use`",
         TokenKind::Return => "`return`",
+        TokenKind::Assert => "`assert`",
         TokenKind::True => "`true`",
         TokenKind::False => "`false`",
         TokenKind::Null => "`null`",
@@ -832,6 +1120,12 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::Comma => "`,`",
         TokenKind::Colon => "`:`",
         TokenKind::Equal => "`=`",
+        TokenKind::EqualEqual => "`==`",
+        TokenKind::BangEqual => "`!=`",
+        TokenKind::Less => "`<`",
+        TokenKind::LessEqual => "`<=`",
+        TokenKind::Greater => "`>`",
+        TokenKind::GreaterEqual => "`>=`",
         TokenKind::Dot => "`.`",
         TokenKind::End => "the end of the file",
     }
@@ -839,7 +1133,43 @@ const fn token_description(token: &TokenKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextMember, ExpressionKind, Statement, parse, parse_value};
+    use super::{BinaryOperator, ContextMember, ExpressionKind, Statement, parse, parse_value};
+
+    #[test]
+    fn parses_namespaces_context_composition_and_assertions() {
+        let program = parse(
+            r"
+            namespace users
+            use namespace core
+            context api {
+                use context base
+            }
+            flow main() {
+                response = lookup()
+                assert(response.status == 200)
+                return response
+            }
+            ",
+        )
+        .expect("project syntax should parse");
+
+        assert_eq!(program.namespace.as_ref().unwrap().value, "users");
+        assert_eq!(program.namespace_uses[0].value, "core");
+        assert!(matches!(
+            program.contexts[0].members[0],
+            ContextMember::UseContext { .. }
+        ));
+        let Statement::Assert { expression, .. } = &program.flows[0].body[1] else {
+            panic!("expected assertion");
+        };
+        assert!(matches!(
+            expression.kind,
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Equal,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn parses_contexts_http_calls_and_structured_values() {

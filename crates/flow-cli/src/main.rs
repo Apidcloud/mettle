@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -190,9 +190,8 @@ fn set_selector(options: &mut RunOptions, selector: FlowSelector) -> Result<(), 
 }
 
 fn check(path: &Path) -> Result<(), CliError> {
-    let source = read_source(path)?;
-    let syntax = parse_source(path, &source)?;
-    let plan = compile_source(path, &source, &syntax)?;
+    let project = load_project(path)?;
+    let plan = compile_project(&project)?;
     println!(
         "Checked {} ({} flow{}).",
         path.display(),
@@ -203,16 +202,16 @@ fn check(path: &Path) -> Result<(), CliError> {
 }
 
 fn list_flows(path: &Path, json: bool) -> Result<(), CliError> {
-    let source = read_source(path)?;
-    let syntax = parse_source(path, &source)?;
-    let plan = compile_source(path, &source, &syntax)?;
+    let project = load_project(path)?;
+    let plan = compile_project(&project)?;
     if json {
         let flows = plan
             .flows
             .iter()
             .enumerate()
             .map(|(id, flow)| {
-                let (line, column) = source_location(&source, flow.span.start);
+                let source = &project.sources[flow.span.source];
+                let (line, column) = source_location(&source.text, flow.span.start);
                 serde_json::json!({
                     "id": id,
                     "name": flow.name,
@@ -220,21 +219,21 @@ fn list_flows(path: &Path, json: bool) -> Result<(), CliError> {
                     "parameters": flow.parameters,
                     "line": line,
                     "column": column,
+                    "path": source.path,
                 })
             })
             .collect::<Vec<_>>();
         println!("{}", serde_json::json!({ "flows": flows }));
     } else {
-        print_flow_list(&plan, &source, false);
+        print_flow_list(&plan, &project, false);
     }
     Ok(())
 }
 
 fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
-    let source = read_source(path)?;
-    let syntax = parse_source(path, &source)?;
-    let plan = compile_source(path, &source, &syntax)?;
-    let flow_id = select_flow(&plan, &source, options.selector.as_ref())?;
+    let project = load_project(path)?;
+    let plan = compile_project(&project)?;
+    let flow_id = select_flow(&plan, &project, options.selector.as_ref())?;
     let arguments = resolve_arguments(&plan.flows[flow_id], &options.arguments)?;
     let async_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -257,7 +256,7 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
         Err(error) => {
             eprintln!(
                 "{}",
-                render_diagnostic(path, &source, &error.message, error.span)
+                render_diagnostic(&project, &error.message, error.span)
             );
             if !error.flow_stack.is_empty() {
                 eprintln!("flow stack: {}", error.flow_stack.join(" -> "));
@@ -355,7 +354,7 @@ fn human_readable_json(
 
 fn select_flow(
     plan: &ExecutionPlan,
-    source: &str,
+    project: &LoadedProject,
     selector: Option<&FlowSelector>,
 ) -> Result<usize, CliError> {
     let selected = match selector {
@@ -368,7 +367,12 @@ fn select_flow(
                 .flows
                 .iter()
                 .enumerate()
-                .filter(|(_, flow)| source_location(source, flow.span.start).0 == *line)
+                .filter(|(_, flow)| {
+                    flow.span.source == project.entry_source
+                        && source_location(&project.sources[flow.span.source].text, flow.span.start)
+                            .0
+                            == *line
+                })
                 .map(|(id, _)| id)
                 .collect::<Vec<_>>();
             if matches.len() > 1 {
@@ -393,21 +397,27 @@ fn select_flow(
         None if plan.flows.is_empty() => eprintln!("error: this source contains no flows"),
         None => eprintln!("error: no default flow was found; select one by name or line"),
     }
-    print_flow_list(plan, source, true);
+    print_flow_list(plan, project, true);
     Err(CliError::Failure)
 }
 
-fn print_flow_list(plan: &ExecutionPlan, source: &str, error_stream: bool) {
+fn print_flow_list(plan: &ExecutionPlan, project: &LoadedProject, error_stream: bool) {
     let mut output = String::from("Available flows:\n");
     for flow in &plan.flows {
-        let (line, _) = source_location(source, flow.span.start);
+        let source = &project.sources[flow.span.source];
+        let (line, _) = source_location(&source.text, flow.span.start);
         let parameters = if flow.parameters.is_empty() {
             String::new()
         } else {
             format!(" ({})", flow.parameters.join(", "))
         };
-        writeln!(output, "  {line:>4}  {}{parameters}", flow.display_name)
-            .expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "  {}:{line:<4}  {}{parameters}",
+            source.path.display(),
+            flow.display_name
+        )
+        .expect("writing to a string cannot fail");
     }
     if error_stream {
         eprint!("{output}");
@@ -499,53 +509,157 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
             })
             .collect::<Result<Object, _>>()
             .map(Value::Object),
-        ExpressionKind::Call { .. } | ExpressionKind::Member { .. } => {
-            Err("flow arguments must be literal values")
+        ExpressionKind::Call { .. }
+        | ExpressionKind::Member { .. }
+        | ExpressionKind::Binary { .. } => Err("flow arguments must be literal values"),
+    }
+}
+
+struct SourceDocument {
+    path: PathBuf,
+    text: String,
+}
+
+struct LoadedProject {
+    program: flow_syntax::Program,
+    sources: Vec<SourceDocument>,
+    entry_source: usize,
+}
+
+fn load_project(path: &Path) -> Result<LoadedProject, CliError> {
+    if path == Path::new("-") {
+        let mut text = String::new();
+        io::stdin().read_to_string(&mut text).map_err(|error| {
+            eprintln!("error: could not read Flow source from standard input: {error}");
+            CliError::Failure
+        })?;
+        return load_sources(vec![(PathBuf::from("<stdin>"), text)], 0);
+    }
+
+    let entry = path.canonicalize().map_err(|error| {
+        eprintln!("error: could not open {}: {error}", path.display());
+        CliError::Failure
+    })?;
+    let project_root = entry.parent().and_then(find_project_root);
+    let mut paths = if let Some(root) = project_root {
+        let mut paths = Vec::new();
+        collect_flow_files(&root, &mut paths)?;
+        paths.sort();
+        paths
+    } else {
+        vec![entry.clone()]
+    };
+    if !paths.contains(&entry) {
+        paths.push(entry.clone());
+        paths.sort();
+    }
+    let entry_source = paths
+        .iter()
+        .position(|candidate| candidate == &entry)
+        .expect("entry source was inserted");
+    let sources = paths
+        .into_iter()
+        .map(|path| {
+            fs::read_to_string(&path)
+                .map(|text| (path.clone(), text))
+                .map_err(|error| {
+                    eprintln!("error: could not read {}: {error}", path.display());
+                    CliError::Failure
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    load_sources(sources, entry_source)
+}
+
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|directory| directory.join("flow.toml").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn collect_flow_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), CliError> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        eprintln!("error: could not inspect {}: {error}", directory.display());
+        CliError::Failure
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            eprintln!("error: could not inspect {}: {error}", directory.display());
+            CliError::Failure
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            let hidden = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with('.') || name == "target");
+            if !hidden {
+                collect_flow_files(&path, paths)?;
+            }
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "flow")
+        {
+            paths.push(path);
         }
     }
+    Ok(())
 }
 
-fn read_source(path: &Path) -> Result<String, CliError> {
-    if path == Path::new("-") {
-        let mut source = String::new();
-        return io::stdin()
-            .read_to_string(&mut source)
-            .map(|_| source)
-            .map_err(|error| {
-                eprintln!("error: could not read Flow source from standard input: {error}");
-                CliError::Failure
-            });
-    }
-    fs::read_to_string(path).map_err(|error| {
-        eprintln!("error: could not read {}: {error}", path.display());
-        CliError::Failure
-    })
-}
-
-fn parse_source(path: &Path, source: &str) -> Result<flow_syntax::Program, CliError> {
-    parse(source).map_err(|error: SyntaxError| {
-        eprintln!(
-            "{}",
-            render_diagnostic(path, source, &error.message, error.span)
-        );
-        CliError::Failure
-    })
-}
-
-fn compile_source(
-    path: &Path,
-    source: &str,
-    syntax: &flow_syntax::Program,
-) -> Result<ExecutionPlan, CliError> {
-    compile_with_capabilities(syntax, CAPABILITIES).map_err(|errors: Vec<CompileError>| {
-        for error in errors {
+fn load_sources(
+    sources: Vec<(PathBuf, String)>,
+    entry_source: usize,
+) -> Result<LoadedProject, CliError> {
+    let documents = sources
+        .into_iter()
+        .map(|(path, text)| SourceDocument { path, text })
+        .collect::<Vec<_>>();
+    let mut parsed = Vec::with_capacity(documents.len());
+    for (source_id, source) in documents.iter().enumerate() {
+        let mut program = parse(&source.text).map_err(|error: SyntaxError| {
             eprintln!(
                 "{}",
-                render_diagnostic(path, source, &error.message, error.span)
+                render_source_diagnostic(&source.path, &source.text, &error.message, error.span)
             );
+            CliError::Failure
+        })?;
+        program.set_source(source_id);
+        if source_id != entry_source {
+            program.flows.retain(|flow| flow.name.is_some());
+            program.file_contexts.clear();
         }
-        CliError::Failure
+        parsed.push(program);
+    }
+
+    let entry = &parsed[entry_source];
+    let mut program = flow_syntax::Program {
+        namespace: entry.namespace.clone(),
+        namespace_uses: entry.namespace_uses.clone(),
+        contexts: Vec::new(),
+        file_contexts: entry.file_contexts.clone(),
+        flows: Vec::new(),
+    };
+    for source in parsed {
+        program.contexts.extend(source.contexts);
+        program.flows.extend(source.flows);
+    }
+    Ok(LoadedProject {
+        program,
+        sources: documents,
+        entry_source,
     })
+}
+
+fn compile_project(project: &LoadedProject) -> Result<ExecutionPlan, CliError> {
+    compile_with_capabilities(&project.program, CAPABILITIES).map_err(
+        |errors: Vec<CompileError>| {
+            for error in errors {
+                eprintln!("{}", render_diagnostic(project, &error.message, error.span));
+            }
+            CliError::Failure
+        },
+    )
 }
 
 fn source_location(source: &str, byte: usize) -> (usize, usize) {
@@ -560,7 +674,17 @@ fn source_location(source: &str, byte: usize) -> (usize, usize) {
     (line, column)
 }
 
-fn render_diagnostic(path: &Path, source: &str, message: &str, span: Span) -> String {
+fn render_diagnostic(project: &LoadedProject, message: &str, span: Span) -> String {
+    let source = project.sources.get(span.source).unwrap_or_else(|| {
+        project
+            .sources
+            .get(project.entry_source)
+            .expect("a loaded project always has an entry source")
+    });
+    render_source_diagnostic(&source.path, &source.text, message, span)
+}
+
+fn render_source_diagnostic(path: &Path, source: &str, message: &str, span: Span) -> String {
     let start = span.start.min(source.len());
     let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
     let line_end = source[start..]

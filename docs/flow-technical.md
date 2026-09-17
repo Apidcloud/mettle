@@ -4,7 +4,7 @@ Status: exploratory implementation proposal and delivery plan
 Initial platform: Linux
 Initial capability: HTTP
 
-Current implementation: compiler foundation, VS Code editor integration, minimal HTTP vertical slice, and request-collection entry-flow model are complete. The root README is the authority for executable behavior.
+Current implementation: compiler foundation, VS Code editor integration, minimal HTTP vertical slice, request collections, and multi-file project composition are complete. The root README is the authority for executable behavior.
 
 ## 1. Purpose
 
@@ -282,7 +282,7 @@ The final command must print `Hello from Flow`. Editing the example to reference
 
 ### Editor tooling checkpoint
 
-Status: complete. Version 0.3.0 is packaged and installable from `util/plugin/vscode`. It retains declarative language support and adds a small compiler-backed CodeLens entry point without npm runtime dependencies.
+Status: complete. Version 0.4.0 is packaged and installable from `util/plugin/vscode`. It retains declarative language support and adds a small project-aware compiler-backed CodeLens entry point without npm runtime dependencies.
 
 Before HTTP work, deliver:
 
@@ -348,6 +348,8 @@ The acceptance run executes a bare anonymous HTTP flow by source line and a name
 
 ### Milestone 3: projects, composition, and assertions
 
+Status: complete.
+
 Deliver:
 
 - context extension/composition with deterministic precedence and cycle errors;
@@ -357,7 +359,9 @@ Deliver:
 - multiple files contributing to a namespace;
 - secrets redacted from normal diagnostics.
 
-User acceptance creates a temporary multi-file project, composes contexts, executes a flow against the local fixture, and demonstrates both a passing and failing assertion. A context cycle and an ambiguous name must fail before execution.
+User acceptance compiles a multi-file project, composes contexts, executes a flow against the local fixture, and demonstrates both a passing and failing assertion. A context cycle and an ambiguous name must fail before execution.
+
+Run `./scripts/acceptance-project.sh` to exercise these behaviors, including source-aware diagnostics across files and redaction of environment-derived values.
 
 ### Milestone 4: structured execution policies
 
