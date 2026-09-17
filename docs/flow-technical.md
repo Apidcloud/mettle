@@ -4,7 +4,7 @@ Status: exploratory implementation proposal and delivery plan
 Initial platform: Linux
 Initial capability: HTTP
 
-Current implementation: compiler foundation, VS Code editor integration, minimal HTTP vertical slice, request collections, and multi-file project composition are complete. The root README is the authority for executable behavior.
+Current implementation: compiler foundation, VS Code editor integration with definition navigation, minimal HTTP vertical slice, request collections, and multi-file project composition are complete. The root README is the authority for executable behavior.
 
 ## 1. Purpose
 
@@ -205,16 +205,16 @@ Errors intended for automation need stable categories and optional machine-reada
 
 ### 4.8 Editor tooling
 
-The repository contains a declarative VS Code extension in `util/plugin/vscode`. Its initial version provides `.flow` file recognition, TextMate syntax highlighting, editor configuration, and snippets without shipping executable extension code.
+The repository contains a VS Code extension in `util/plugin/vscode`. It provides `.flow` file recognition, TextMate syntax highlighting, editor configuration, snippets, Run Flow actions, and definition navigation.
 
-The full editor integration should be compiler-backed rather than an independent TypeScript implementation of the language. A future `flow lsp` process will expose the Language Server Protocol over standard input/output and reuse the same parser, name resolver, schemas, source spans, and project discovery as the CLI. The VS Code extension will remain a thin client responsible for starting that server and translating editor configuration.
+Editor intelligence is compiler-backed rather than an independent JavaScript implementation of the language. The `flow lsp` process exposes the Language Server Protocol over standard input/output and reuses project discovery, syntax trees, namespace visibility, and source spans from the Rust implementation. The VS Code extension contains a small dependency-free client that starts the server and maps LSP locations into VS Code. Full-document synchronization lets definition lookup use unsaved editor text.
 
-The intended language-server sequence is:
+The remaining language-server sequence is:
 
 1. Publish compiler diagnostics while a file is edited.
 2. Complete keywords, declarations, context names, capability operations, and schema fields.
 3. Provide hover information and effective capability configuration.
-4. Add document symbols, definition navigation, references, and safe rename.
+4. Add document symbols, references, and safe rename. Definition navigation is already available.
 5. Add formatting, semantic tokens, inlay hints, and code actions where they have clear value.
 
 TextMate highlighting remains useful as an immediate tokenizer and fallback even after semantic tokens exist. Grammar and snippets must be updated with each syntax milestone. Editor packages and the CLI must advertise compatible language versions once the language begins versioning.
@@ -362,6 +362,21 @@ Deliver:
 User acceptance compiles a multi-file project, composes contexts, executes a flow against the local fixture, and demonstrates both a passing and failing assertion. A context cycle and an ambiguous name must fail before execution.
 
 Run `./scripts/acceptance-project.sh` to exercise these behaviors, including source-aware diagnostics across files and redaction of environment-derived values.
+
+### Milestone 3.5: compiler-backed definition navigation
+
+Status: complete.
+
+Deliver:
+
+- a dependency-free `flow lsp` server using standard LSP framing over standard input/output;
+- full-document synchronization for unsaved `.flow` source;
+- compiler-backed definition lookup for named flow calls and `use context`;
+- local definition lookup for parameters and immutable bindings;
+- cross-file lookup through project discovery and the same namespace visibility rules used by compilation;
+- a small VS Code LSP client with Ctrl+Click, Go to Definition, and Peek Definition.
+
+The server deliberately returns no destination for ambiguous, unresolved, environment, capability-operation, or dynamic member names. Diagnostics, completion, hover, references, and rename remain later editor milestones.
 
 ### Milestone 4: structured execution policies
 

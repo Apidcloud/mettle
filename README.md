@@ -343,19 +343,20 @@ Runtime errors include the Flow call stack. The CLI writes the returned value to
 flow check <file>  Parse, resolve, and schema-check a Flow source file
 flow list <file>   List runnable flows and their source lines
 flow run <file> [flow-name] [--line <line>] [--arg <name=value>]... [--verbose | --raw]
+flow lsp           Start the editor language server over standard input/output
 flow --help        Show command help
 flow --version     Show the binary version
 ```
 
 ## VS Code support
 
-The included VS Code extension provides `.flow` file recognition, syntax highlighting, comments, brackets, indentation, folding, snippets, and compiler-backed **Run Flow** CodeLens actions above named and anonymous flows. It prompts for declared parameters and runs the selected flow with concise status output in a dedicated task terminal.
+The included VS Code extension provides `.flow` file recognition, syntax highlighting, comments, brackets, indentation, folding, snippets, and compiler-backed **Run Flow** CodeLens actions above named and anonymous flows. It prompts for declared parameters and runs the selected flow with concise status output in a dedicated task terminal. Its built-in language client starts `flow lsp` to provide Ctrl+Click, Go to Definition, and Peek Definition across project files for flow calls, context uses, parameters, and local bindings. Unsaved editor text is synchronized in memory.
 
 ```bash
 cargo install --path crates/flow-cli --locked
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/flow-language-0.4.0.vsix --force
+code --install-extension dist/flow-language-0.5.0.vsix --force
 ```
 
 See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md).

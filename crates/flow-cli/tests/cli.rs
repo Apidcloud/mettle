@@ -1,5 +1,6 @@
 use std::fs;
-use std::process::Command;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn source_file(contents: &str) -> std::path::PathBuf {
@@ -26,6 +27,39 @@ fn project_directory() -> std::path::PathBuf {
     ));
     fs::create_dir_all(&path).expect("project directory should be creatable");
     path
+}
+
+fn send_lsp(stdin: &mut ChildStdin, message: &serde_json::Value) {
+    let body = serde_json::to_vec(message).expect("LSP message should serialize");
+    write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("LSP header should be writable");
+    stdin.write_all(&body).expect("LSP body should be writable");
+    stdin.flush().expect("LSP message should flush");
+}
+
+fn receive_lsp(stdout: &mut BufReader<ChildStdout>) -> serde_json::Value {
+    let mut length = None;
+    loop {
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .expect("LSP header should be readable");
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.trim().strip_prefix("Content-Length:") {
+            length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .expect("content length should be numeric"),
+            );
+        }
+    }
+    let mut body = vec![0; length.expect("response should include a content length")];
+    stdout
+        .read_exact(&mut body)
+        .expect("LSP body should be readable");
+    serde_json::from_slice(&body).expect("LSP body should be JSON")
 }
 
 #[test]
@@ -255,4 +289,97 @@ fn lists_compiler_discovered_flows_as_json() {
     assert_eq!(result["flows"][0]["line"], 1);
     assert_eq!(result["flows"][1]["name"], "getUser");
     assert_eq!(result["flows"][1]["parameters"][0], "id");
+}
+
+#[test]
+fn lsp_navigates_from_an_unsaved_document_to_another_file() {
+    let directory = project_directory();
+    fs::write(directory.join("flow.toml"), "name = \"lsp\"\n")
+        .expect("manifest should be writable");
+    let declaration = directory.join("shared.flow");
+    fs::write(&declaration, "namespace shared\nflow helper() = true\n")
+        .expect("declaration should be writable");
+    let entry = directory.join("main.flow");
+    fs::write(&entry, "use namespace shared\nflow main() = false\n")
+        .expect("entry should be writable");
+    let entry_uri = format!("file://{}", entry.display());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flow"))
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("language server should start");
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("language server should have stdin");
+    let mut stdout = BufReader::new(
+        child
+            .stdout
+            .take()
+            .expect("language server should have stdout"),
+    );
+
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+    );
+    assert_eq!(receive_lsp(&mut stdout)["id"], 1);
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": entry_uri,
+                    "languageId": "flow",
+                    "version": 2,
+                    "text": "use namespace shared\nflow main() = helper()\n"
+                }
+            }
+        }),
+    );
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": format!("file://{}", entry.display()) },
+                "position": { "line": 1, "character": 16 }
+            }
+        }),
+    );
+    let definition = receive_lsp(&mut stdout);
+    assert_eq!(definition["id"], 2);
+    assert_eq!(
+        definition["result"]["uri"],
+        format!(
+            "file://{}",
+            declaration
+                .canonicalize()
+                .expect("declaration path should resolve")
+                .display()
+        )
+    );
+    assert_eq!(
+        definition["result"]["range"]["start"],
+        serde_json::json!({ "line": 1, "character": 5 })
+    );
+
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null }),
+    );
+    assert_eq!(receive_lsp(&mut stdout)["id"], 3);
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "jsonrpc": "2.0", "method": "exit", "params": null }),
+    );
+    drop(stdin);
+    assert!(child.wait().expect("language server should exit").success());
+    fs::remove_dir_all(directory).expect("project directory should be removable");
 }

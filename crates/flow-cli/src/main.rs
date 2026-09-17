@@ -21,6 +21,7 @@ Usage:
   flow check <file>
   flow list <file> [--json]
   flow run <file> [flow-name] [--line <line>] [--arg <name=value>]... [--verbose | --raw]
+  flow lsp
   flow --help
   flow --version
 
@@ -28,7 +29,10 @@ Commands:
   check   Parse and validate a Flow source file
   list    List compiler-discovered runnable flows
   run     Validate the source and execute a selected flow
+  lsp     Start the Flow language server over standard input/output
 ";
+
+mod lsp;
 
 const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR];
 
@@ -88,6 +92,7 @@ fn run_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             let options = parse_run_options(&arguments[2..])?;
             run(Path::new(&arguments[1]), &options)
         }
+        "lsp" if arguments.len() == 1 => lsp::run(),
         _ => Err(CliError::Usage(format!(
             "unknown command or invalid arguments: `{command}`"
         ))),
@@ -527,6 +532,13 @@ struct LoadedProject {
 }
 
 fn load_project(path: &Path) -> Result<LoadedProject, CliError> {
+    load_project_with_overlays(path, &HashMap::new())
+}
+
+fn load_project_with_overlays(
+    path: &Path,
+    overlays: &HashMap<PathBuf, String>,
+) -> Result<LoadedProject, CliError> {
     if path == Path::new("-") {
         let mut text = String::new();
         io::stdin().read_to_string(&mut text).map_err(|error| {
@@ -536,10 +548,19 @@ fn load_project(path: &Path) -> Result<LoadedProject, CliError> {
         return load_sources(vec![(PathBuf::from("<stdin>"), text)], 0);
     }
 
-    let entry = path.canonicalize().map_err(|error| {
-        eprintln!("error: could not open {}: {error}", path.display());
-        CliError::Failure
-    })?;
+    let entry = path
+        .canonicalize()
+        .or_else(|error| {
+            if path.is_absolute() && overlays.contains_key(path) {
+                Ok(path.to_path_buf())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| {
+            eprintln!("error: could not open {}: {error}", path.display());
+            CliError::Failure
+        })?;
     let project_root = entry.parent().and_then(find_project_root);
     let mut paths = if let Some(root) = project_root {
         let mut paths = Vec::new();
@@ -560,7 +581,10 @@ fn load_project(path: &Path) -> Result<LoadedProject, CliError> {
     let sources = paths
         .into_iter()
         .map(|path| {
-            fs::read_to_string(&path)
+            overlays
+                .get(&path)
+                .cloned()
+                .map_or_else(|| fs::read_to_string(&path), Ok)
                 .map(|text| (path.clone(), text))
                 .map_err(|error| {
                     eprintln!("error: could not read {}: {error}", path.display());

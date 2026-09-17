@@ -3,6 +3,7 @@ const { spawn } = require("node:child_process");
 const vscode = require("vscode");
 
 const MAX_DISCOVERY_OUTPUT = 1024 * 1024;
+const MAX_LSP_MESSAGE = 8 * 1024 * 1024;
 
 function flowExecutable() {
   return vscode.workspace
@@ -105,6 +106,247 @@ class FlowCodeLensProvider {
   }
 }
 
+class FlowLanguageServer {
+  constructor(output) {
+    this.output = output;
+    this.child = undefined;
+    this.starting = undefined;
+    this.buffer = Buffer.alloc(0);
+    this.nextId = 1;
+    this.pending = new Map();
+  }
+
+  async start() {
+    if (this.child) {
+      return;
+    }
+    if (this.starting) {
+      return this.starting;
+    }
+    this.starting = this.startProcess();
+    try {
+      await this.starting;
+    } finally {
+      this.starting = undefined;
+    }
+  }
+
+  async startProcess() {
+    const executable = flowExecutable();
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const child = spawn(executable, ["lsp"], {
+      cwd: folder?.uri.fsPath,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    this.child = child;
+    this.buffer = Buffer.alloc(0);
+    child.stdout.on("data", (chunk) => this.receive(chunk));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => this.output.append(chunk));
+    child.on("error", (error) => {
+      this.output.appendLine(`Could not start ${executable} lsp: ${error.message}`);
+      this.failPending(error);
+    });
+    child.on("close", (code) => {
+      if (this.child === child) {
+        this.child = undefined;
+      }
+      this.failPending(new Error(`Flow language server exited with status ${code}.`));
+    });
+
+    const folders = (vscode.workspace.workspaceFolders || []).map((workspace) => ({
+      uri: workspace.uri.toString(),
+      name: workspace.name,
+    }));
+    await this.requestRaw("initialize", {
+      processId: process.pid,
+      rootUri: folder?.uri.toString() || null,
+      workspaceFolders: folders,
+      capabilities: {},
+      clientInfo: { name: "Flow VS Code", version: "0.5.0" },
+    });
+    this.notify("initialized", {});
+    for (const document of vscode.workspace.textDocuments) {
+      if (document.languageId === "flow") {
+        this.open(document);
+      }
+    }
+  }
+
+  receive(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const headerEnd = this.buffer.indexOf("\r\n\r\n");
+      if (headerEnd < 0) {
+        return;
+      }
+      const header = this.buffer.subarray(0, headerEnd).toString("ascii");
+      const match = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
+      if (!match) {
+        this.output.appendLine("Flow language server sent a response without Content-Length.");
+        this.buffer = Buffer.alloc(0);
+        return;
+      }
+      const length = Number(match[1]);
+      if (length > MAX_LSP_MESSAGE) {
+        this.output.appendLine("Flow language server response exceeded 8 MiB.");
+        this.child?.kill();
+        return;
+      }
+      const messageStart = headerEnd + 4;
+      if (this.buffer.length < messageStart + length) {
+        return;
+      }
+      const body = this.buffer.subarray(messageStart, messageStart + length);
+      this.buffer = this.buffer.subarray(messageStart + length);
+      try {
+        this.handleMessage(JSON.parse(body.toString("utf8")));
+      } catch (error) {
+        this.output.appendLine(`Could not parse Flow language server response: ${error.message}`);
+      }
+    }
+  }
+
+  handleMessage(message) {
+    if (message.id === undefined) {
+      return;
+    }
+    const pending = this.pending.get(String(message.id));
+    if (!pending) {
+      return;
+    }
+    this.pending.delete(String(message.id));
+    if (message.error) {
+      pending.reject(new Error(message.error.message || "Flow language server request failed."));
+    } else {
+      pending.resolve(message.result);
+    }
+  }
+
+  send(message) {
+    if (!this.child?.stdin.writable) {
+      throw new Error("Flow language server is not running.");
+    }
+    const body = Buffer.from(JSON.stringify(message), "utf8");
+    this.child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
+    this.child.stdin.write(body);
+  }
+
+  requestRaw(method, params) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(String(id), { resolve, reject });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        this.pending.delete(String(id));
+        reject(error);
+      }
+    });
+  }
+
+  async request(method, params, token) {
+    await this.start();
+    const id = this.nextId++;
+    const promise = new Promise((resolve, reject) => {
+      this.pending.set(String(id), { resolve, reject });
+      this.send({ jsonrpc: "2.0", id, method, params });
+    });
+    const cancellation = token?.onCancellationRequested(() => {
+      this.notify("$/cancelRequest", { id });
+    });
+    try {
+      return await promise;
+    } finally {
+      cancellation?.dispose();
+    }
+  }
+
+  notify(method, params) {
+    if (this.child?.stdin.writable) {
+      this.send({ jsonrpc: "2.0", method, params });
+    }
+  }
+
+  open(document) {
+    this.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: document.uri.toString(),
+        languageId: "flow",
+        version: document.version,
+        text: document.getText(),
+      },
+    });
+  }
+
+  change(event) {
+    this.notify("textDocument/didChange", {
+      textDocument: {
+        uri: event.document.uri.toString(),
+        version: event.document.version,
+      },
+      contentChanges: [{ text: event.document.getText() }],
+    });
+  }
+
+  close(document) {
+    this.notify("textDocument/didClose", {
+      textDocument: { uri: document.uri.toString() },
+    });
+  }
+
+  async definition(document, position, token) {
+    try {
+      const result = await this.request(
+        "textDocument/definition",
+        {
+          textDocument: { uri: document.uri.toString() },
+          position: { line: position.line, character: position.character },
+        },
+        token,
+      );
+      if (!result) {
+        return undefined;
+      }
+      return new vscode.Location(
+        vscode.Uri.parse(result.uri),
+        new vscode.Range(
+          result.range.start.line,
+          result.range.start.character,
+          result.range.end.line,
+          result.range.end.character,
+        ),
+      );
+    } catch (error) {
+      this.output.appendLine(`Flow definition lookup failed: ${error.message}`);
+      return undefined;
+    }
+  }
+
+  failPending(error) {
+    for (const pending of this.pending.values()) {
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  async stop() {
+    if (!this.child) {
+      return;
+    }
+    try {
+      await this.requestRaw("shutdown", null);
+      this.notify("exit", null);
+    } catch (error) {
+      this.output.appendLine(`Could not stop Flow language server cleanly: ${error.message}`);
+    } finally {
+      this.child?.kill();
+      this.child = undefined;
+    }
+  }
+}
+
 async function runFlow(flow, output) {
   const uri = vscode.Uri.parse(flow.uri);
   const document = await vscode.workspace.openTextDocument(uri);
@@ -181,11 +423,35 @@ async function runFlow(flow, output) {
 function activate(context) {
   const output = vscode.window.createOutputChannel("Flow");
   const provider = new FlowCodeLensProvider(output);
+  const languageServer = new FlowLanguageServer(output);
   context.subscriptions.push(
     output,
     vscode.languages.registerCodeLensProvider({ language: "flow" }, provider),
+    vscode.languages.registerDefinitionProvider(
+      { language: "flow", scheme: "file" },
+      { provideDefinition: (document, position, token) => languageServer.definition(document, position, token) },
+    ),
+    vscode.workspace.onDidOpenTextDocument((document) => {
+      if (document.languageId === "flow") {
+        void languageServer.start().then(() => languageServer.open(document));
+      }
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document.languageId === "flow") {
+        languageServer.change(event);
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((document) => {
+      if (document.languageId === "flow") {
+        languageServer.close(document);
+      }
+    }),
     vscode.commands.registerCommand("flow.runFlow", (flow) => runFlow(flow, output)),
+    { dispose: () => void languageServer.stop() },
   );
+  if (vscode.workspace.textDocuments.some((document) => document.languageId === "flow")) {
+    void languageServer.start();
+  }
 }
 
 function deactivate() {}

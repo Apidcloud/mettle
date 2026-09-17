@@ -184,6 +184,252 @@ pub fn compile_with_capabilities(
     Compiler::new(program, capabilities).compile()
 }
 
+/// Find the declaration referenced at a source position.
+///
+/// This uses the same namespace visibility rules as compilation. It intentionally
+/// returns no target for ambiguous or unresolved names.
+#[must_use]
+pub fn find_definition(program: &Program, source: usize, byte: usize) -> Option<Span> {
+    DefinitionFinder::new(program, source, byte).find()
+}
+
+struct DefinitionFinder<'a> {
+    program: &'a Program,
+    source: usize,
+    byte: usize,
+    context_ids: HashMap<String, usize>,
+    flow_ids: HashMap<String, usize>,
+}
+
+impl<'a> DefinitionFinder<'a> {
+    fn new(program: &'a Program, source: usize, byte: usize) -> Self {
+        let context_ids = program
+            .contexts
+            .iter()
+            .enumerate()
+            .map(|(id, context)| (qualified_name(&context.namespace, &context.name.value), id))
+            .collect();
+        let flow_ids = program
+            .flows
+            .iter()
+            .enumerate()
+            .filter_map(|(id, flow)| {
+                flow.name
+                    .as_ref()
+                    .map(|name| (qualified_name(&flow.namespace, &name.value), id))
+            })
+            .collect();
+        Self {
+            program,
+            source,
+            byte,
+            context_ids,
+            flow_ids,
+        }
+    }
+
+    fn find(&self) -> Option<Span> {
+        for context in &self.program.contexts {
+            if self.at(context.name.span) {
+                return Some(context.name.span);
+            }
+            for member in &context.members {
+                match member {
+                    ContextMember::UseContext { name, .. } if self.at(name.span) => {
+                        return self.resolve_context(
+                            &name.value,
+                            &context.namespace,
+                            &context.namespace_uses,
+                        );
+                    }
+                    ContextMember::Field(field) => {
+                        if let Some(target) =
+                            self.find_in_expression(&field.expression, &HashMap::new(), None)
+                        {
+                            return Some(target);
+                        }
+                    }
+                    ContextMember::Defaults { fields, .. } => {
+                        for field in fields {
+                            if let Some(target) =
+                                self.find_in_expression(&field.expression, &HashMap::new(), None)
+                            {
+                                return Some(target);
+                            }
+                        }
+                    }
+                    ContextMember::UseContext { .. } => {}
+                }
+            }
+        }
+
+        for name in &self.program.file_contexts {
+            if self.at(name.span) {
+                let namespace = self
+                    .program
+                    .namespace
+                    .as_ref()
+                    .map_or("", |value| value.value.as_str());
+                return self.resolve_context(
+                    name.value.as_str(),
+                    namespace,
+                    &self.program.namespace_uses,
+                );
+            }
+        }
+
+        for flow in &self.program.flows {
+            if let Some(name) = &flow.name
+                && self.at(name.span)
+            {
+                return Some(name.span);
+            }
+            if let Some(target) = self.find_in_flow(flow) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    fn find_in_flow(&self, flow: &FlowDecl) -> Option<Span> {
+        let mut locals = flow
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.value.clone(), parameter.span))
+            .collect::<HashMap<_, _>>();
+        for parameter in &flow.parameters {
+            if self.at(parameter.span) {
+                return Some(parameter.span);
+            }
+        }
+        for statement in &flow.body {
+            match statement {
+                Statement::UseContext { name, .. } => {
+                    if self.at(name.span) {
+                        return self.resolve_context(
+                            &name.value,
+                            &flow.namespace,
+                            &flow.namespace_uses,
+                        );
+                    }
+                }
+                Statement::Bind {
+                    name, expression, ..
+                } => {
+                    if self.at(name.span) {
+                        return Some(name.span);
+                    }
+                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                        return Some(target);
+                    }
+                    locals.insert(name.value.clone(), name.span);
+                }
+                Statement::Return { expression, .. }
+                | Statement::Assert { expression, .. }
+                | Statement::Expression(expression) => {
+                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                        return Some(target);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn find_in_expression(
+        &self,
+        expression: &Expression,
+        locals: &HashMap<String, Span>,
+        flow: Option<&FlowDecl>,
+    ) -> Option<Span> {
+        match &expression.kind {
+            ExpressionKind::Name(name) => {
+                if self.at(expression.span) {
+                    let root = name.split('.').next().unwrap_or(name);
+                    return locals.get(root).copied();
+                }
+            }
+            ExpressionKind::Array(values) => {
+                for value in values {
+                    if let Some(target) = self.find_in_expression(value, locals, flow) {
+                        return Some(target);
+                    }
+                }
+            }
+            ExpressionKind::Object(fields) => {
+                for field in fields {
+                    if let Some(target) = self.find_in_expression(&field.expression, locals, flow) {
+                        return Some(target);
+                    }
+                }
+            }
+            ExpressionKind::Call {
+                callee,
+                arguments,
+                options,
+            } => {
+                if self.at(callee.span)
+                    && !callee.value.contains('.')
+                    && callee.value != "env"
+                    && let Some(flow) = flow
+                    && let NameResolution::Found(id) = resolve_visible_name(
+                        &self.flow_ids,
+                        &callee.value,
+                        &flow.namespace,
+                        &flow.namespace_uses,
+                    )
+                {
+                    return self.program.flows[id].name.as_ref().map(|name| name.span);
+                }
+                for argument in arguments {
+                    if let Some(target) = self.find_in_expression(argument, locals, flow) {
+                        return Some(target);
+                    }
+                }
+                for option in options {
+                    if let Some(target) = self.find_in_expression(&option.expression, locals, flow)
+                    {
+                        return Some(target);
+                    }
+                }
+            }
+            ExpressionKind::Member { value, .. } => {
+                return self.find_in_expression(value, locals, flow);
+            }
+            ExpressionKind::Binary { left, right, .. } => {
+                return self
+                    .find_in_expression(left, locals, flow)
+                    .or_else(|| self.find_in_expression(right, locals, flow));
+            }
+            ExpressionKind::Null
+            | ExpressionKind::Boolean(_)
+            | ExpressionKind::Integer(_)
+            | ExpressionKind::Float(_)
+            | ExpressionKind::String(_)
+            | ExpressionKind::DurationNanos(_) => {}
+        }
+        None
+    }
+
+    fn resolve_context(
+        &self,
+        name: &str,
+        namespace: &str,
+        uses: &[flow_syntax::Spanned<String>],
+    ) -> Option<Span> {
+        let NameResolution::Found(id) =
+            resolve_visible_name(&self.context_ids, name, namespace, uses)
+        else {
+            return None;
+        };
+        Some(self.program.contexts[id].name.span)
+    }
+
+    fn at(&self, span: Span) -> bool {
+        span.source == self.source && self.byte >= span.start && self.byte <= span.end
+    }
+}
+
 struct Compiler<'a> {
     program: &'a Program,
     capabilities: &'a [CapabilityDescriptor],
@@ -1287,9 +1533,9 @@ enum VisitState {
 #[cfg(test)]
 mod tests {
     use flow_capability::{CapabilityDescriptor, FieldSchema, OperationSchema, SchemaType};
-    use flow_syntax::parse;
+    use flow_syntax::{ExpressionKind, Statement, parse};
 
-    use super::{PlanExpressionKind, compile, compile_with_capabilities};
+    use super::{PlanExpressionKind, compile, compile_with_capabilities, find_definition};
 
     const TLS_OPTIONS: &[FieldSchema] = &[FieldSchema {
         name: "verifyCertificates",
@@ -1475,5 +1721,55 @@ mod tests {
                 ..
             }) if name == "API_URL"
         ));
+    }
+
+    #[test]
+    fn finds_cross_file_flow_and_context_definitions() {
+        let mut declarations =
+            parse("namespace shared\ncontext api {}\nflow helper(value) = value\n")
+                .expect("declarations should parse");
+        declarations.set_source(0);
+        let context_span = declarations.contexts[0].name.span;
+        let flow_span = declarations.flows[0]
+            .name
+            .as_ref()
+            .expect("helper is named")
+            .span;
+
+        let mut entry = parse(
+            "use namespace shared\nflow main(input) {\n use context api\n result = helper(input)\n return result\n}\n",
+        )
+        .expect("entry should parse");
+        entry.set_source(1);
+        let use_context = match &entry.flows[0].body[0] {
+            Statement::UseContext { name, .. } => name.span,
+            _ => panic!("expected context use"),
+        };
+        let call = match &entry.flows[0].body[1] {
+            Statement::Bind { expression, .. } => match &expression.kind {
+                ExpressionKind::Call { callee, .. } => callee.span,
+                _ => panic!("expected call"),
+            },
+            _ => panic!("expected binding"),
+        };
+        let local = match &entry.flows[0].body[2] {
+            Statement::Return { expression, .. } => expression.span,
+            _ => panic!("expected return"),
+        };
+        let binding = match &entry.flows[0].body[1] {
+            Statement::Bind { name, .. } => name.span,
+            _ => panic!("expected binding"),
+        };
+
+        let mut program = entry;
+        program.contexts.extend(declarations.contexts);
+        program.flows.extend(declarations.flows);
+
+        assert_eq!(
+            find_definition(&program, 1, use_context.start),
+            Some(context_span)
+        );
+        assert_eq!(find_definition(&program, 1, call.start), Some(flow_span));
+        assert_eq!(find_definition(&program, 1, local.start), Some(binding));
     }
 }

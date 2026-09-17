@@ -12,8 +12,22 @@ Basic language support for `.flow` source files.
 - snippets for named flows, anonymous flows, namespaces, assertions, contexts, HTTP GET, and HTTP POST;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - prompts for named flow parameters and execution in a dedicated task terminal.
+- Ctrl+Click, **Go to Definition**, and **Peek Definition** for flow calls,
+  context uses, parameters, and local bindings, including declarations in other
+  project files and references in unsaved editor text.
 
-The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Flow discovery comes from the Rust compiler through project-aware `flow list <file> --json`, so the editor does not maintain a second parser. Compiler diagnostics, completion, hover information, navigation, rename, formatting, and semantic highlighting require the planned Flow language server and are not available yet.
+The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Flow discovery comes from project-aware `flow list <file> --json`. Navigation uses the Language Server Protocol through `flow lsp`; both features reuse the Rust parser, project discovery, source spans, and namespace resolver, so the editor does not maintain a second language implementation. Compiler diagnostics, completion, hover information, references, rename, formatting, and semantic highlighting are planned but are not available yet.
+
+## Navigate source
+
+Hold Ctrl and click a flow call, a name in `use context`, or a local name to
+open its declaration. The usual **Go to Definition** (`F12`) and **Peek
+Definition** (`Alt+F12`) commands work as well. Cross-file lookup follows the
+same implicit-global, current-namespace, and `use namespace` rules as the
+compiler. Ambiguous and unresolved names deliberately have no destination.
+
+The extension starts `flow lsp` in the background and synchronizes complete
+in-memory documents, so a file does not need to be saved before navigation.
 
 ## Run flows
 
@@ -51,7 +65,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/flow-language-0.4.0.vsix
+dist/flow-language-0.5.0.vsix
 ```
 
 ## Install
@@ -59,7 +73,7 @@ dist/flow-language-0.4.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/flow-language-0.4.0.vsix --force
+code --install-extension dist/flow-language-0.5.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

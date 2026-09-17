@@ -1,5 +1,13 @@
 # Change Log
 
+## 0.5.0
+
+- Add a compiler-backed language server using LSP over standard input/output.
+- Add Ctrl+Click, Go to Definition, and Peek Definition for flows, contexts,
+  parameters, and local bindings.
+- Resolve declarations across project files and synchronize unsaved documents.
+- Keep the extension free of npm runtime dependencies.
+
 ## 0.4.0
 
 - Discover runnable flows through project-aware CLI compilation.
