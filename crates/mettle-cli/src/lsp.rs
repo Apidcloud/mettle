@@ -269,6 +269,8 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
             .is_some_and(u8::is_ascii_alphabetic)
     {
         decoded[1..].to_owned()
+    } else if !decoded.starts_with('/') {
+        format!(r"\\{}", decoded.replace('/', r"\"))
     } else {
         decoded
     };
@@ -285,9 +287,17 @@ fn hex(byte: u8) -> Option<u8> {
 }
 
 fn path_to_file_uri(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    let path = path.strip_prefix(r"\\?\UNC\").map_or_else(
+        || path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned(),
+        |path| format!(r"\\{path}"),
+    );
+    let path = path.replace('\\', "/");
     let mut uri = if path.as_bytes().get(1) == Some(&b':') {
         String::from("file:///")
+    } else if path.starts_with("//") {
+        String::from("file:")
     } else {
         String::from("file://")
     };
@@ -344,6 +354,21 @@ mod tests {
             assert_eq!(uri, "file:///tmp/flow%20project/main.mettle");
         }
         assert_eq!(file_uri_to_path(&uri).as_deref(), Some(path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalizes_windows_verbatim_and_unc_paths() {
+        let verbatim = Path::new(r"\\?\C:\flow project\main.mettle");
+        assert_eq!(
+            path_to_file_uri(verbatim),
+            "file:///C:/flow%20project/main.mettle"
+        );
+
+        let unc = Path::new(r"\\server\share\main.mettle");
+        let uri = path_to_file_uri(unc);
+        assert_eq!(uri, "file://server/share/main.mettle");
+        assert_eq!(file_uri_to_path(&uri).as_deref(), Some(unc));
     }
 
     #[test]
