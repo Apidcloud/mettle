@@ -1,0 +1,20 @@
+// The smallest form: a top-level call is an independently runnable anonymous flow.
+// JSONPlaceholder is a public test API; this needs only an internet connection.
+http.get("https://jsonplaceholder.typicode.com/posts/1")
+
+// Add a name and parameters only when the flow needs them.
+flow inspectRequest(baseUrl, requestId) =
+    http.get("${baseUrl}/posts/${requestId}")
+
+// Anonymous flows can still contain a complete multi-operation workflow.
+flow {
+    seed = http.get("https://jsonplaceholder.typicode.com/users/1")
+
+    return http.post("https://jsonplaceholder.typicode.com/posts") {
+        json: {
+            sourceId: seed.json.id
+            name: seed.json.name
+            active: true
+        }
+    }
+}

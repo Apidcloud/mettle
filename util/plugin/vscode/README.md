@@ -1,11 +1,11 @@
-# Flow Language for VS Code
+# Mettle Language for VS Code
 
-Basic language support for `.flow` source files.
+Basic language support for `.mettle` source files.
 
 ## Available editor features
 
-- `.flow` file recognition;
-- TextMate syntax highlighting for current and proposed Flow constructs;
+- `.mettle` file recognition;
+- TextMate syntax highlighting for current and proposed Mettle constructs;
 - `//` comment toggling;
 - matching and automatic closing of braces, brackets, parentheses, and strings;
 - indentation and region folding;
@@ -16,7 +16,7 @@ Basic language support for `.flow` source files.
   context uses, parameters, and local bindings, including declarations in other
   project files and references in unsaved editor text.
 
-The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Flow discovery comes from project-aware `flow list <file> --json`. Navigation uses the Language Server Protocol through `flow lsp`; both features reuse the Rust parser, project discovery, source spans, and namespace resolver, so the editor does not maintain a second language implementation. Compiler diagnostics, completion, hover information, references, rename, formatting, and semantic highlighting are planned but are not available yet.
+The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Mettle discovery comes from project-aware `mettle list <file> --json`. Navigation uses the Language Server Protocol through `mettle lsp`; both features reuse the Rust parser, project discovery, source spans, and namespace resolver, so the editor does not maintain a second language implementation. Compiler diagnostics, completion, hover information, references, rename, formatting, and semantic highlighting are planned but are not available yet.
 
 ## Navigate source
 
@@ -26,31 +26,31 @@ Definition** (`Alt+F12`) commands work as well. Cross-file lookup follows the
 same implicit-global, current-namespace, and `use namespace` rules as the
 compiler. Ambiguous and unresolved names deliberately have no destination.
 
-The extension starts `flow lsp` in the background and synchronizes complete
+The extension starts `mettle lsp` in the background and synchronizes complete
 in-memory documents, so a file does not need to be saved before navigation.
 
 ## Run flows
 
-The Flow CLI must be available on `PATH`. From the repository root:
+The Mettle CLI must be available on `PATH`. From the repository root:
 
 ```bash
-cargo install --path crates/flow-cli --locked
+cargo install --path crates/mettle-cli --locked
 ```
 
-Set **Flow: Executable Path** when the binary lives elsewhere.
+Set **Mettle: Executable Path** when the binary lives elsewhere.
 
-Open a `.flow` file and use the action shown above any declaration:
+Open a `.mettle` file and use the action shown above any declaration:
 
 ```text
-▶ Run GET https://postman-echo.com/get?demo=bare
-http.get("https://postman-echo.com/get?demo=bare")
+▶ Run GET https://jsonplaceholder.typicode.com/posts/1
+http.get("https://jsonplaceholder.typicode.com/posts/1")
 
 ▶ Run inspectRequest
 flow inspectRequest(baseUrl, requestId) =
     http.get("${baseUrl}/get?requestId=${requestId}")
 ```
 
-The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://postman-echo.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. Results default to method, URL, and status. Use `flow run --verbose` in a terminal when response data, headers, and the full response envelope are needed.
+The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. Results default to method, URL, and status. Use `mettle run --verbose` in a terminal when response data, headers, and the full response envelope are needed.
 
 ## Package
 
@@ -65,7 +65,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/flow-language-0.6.1.vsix
+dist/mettle-language-0.7.0.vsix
 ```
 
 ## Install
@@ -73,12 +73,12 @@ dist/flow-language-0.6.1.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/flow-language-0.6.1.vsix --force
+code --install-extension dist/mettle-language-0.7.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.
 
-Open any `.flow` file after installation. VS Code should show `Flow` as the language mode in the status bar. Reload the editor window if an already-open file does not update immediately.
+Open any `.mettle` file after installation. VS Code should show `Mettle` as the language mode in the status bar. Reload the editor window if an already-open file does not update immediately.
 
 ## Development
 

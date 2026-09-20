@@ -1,0 +1,24 @@
+namespace core
+
+context base {
+    baseUrl: env("METTLE_BASE_URL")
+    apiToken: env("METTLE_API_TOKEN")
+
+    defaults http {
+        baseUrl: baseUrl
+        headers: {
+            "Authorization": "Bearer ${apiToken}"
+        }
+    }
+}
+
+context api {
+    use context base
+
+    defaults http {
+        timeout: 2s
+        headers: {
+            "Accept": "application/json"
+        }
+    }
+}

@@ -1,0 +1,20 @@
+context localHttps {
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        timeout: 2s
+
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+
+        tls: {
+            verifyCertificates: false
+        }
+    }
+}
+
+flow main() {
+    use context localHttps
+    response = http.get("/seed")
+    return response.status
+}

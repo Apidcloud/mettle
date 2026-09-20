@@ -1,9 +1,14 @@
 # Change Log
 
+## 0.7.0
+
+- Rename the extension, language mode, CLI configuration, and VSIX package to Mettle.
+- Continue to use `flow` as the language keyword for reusable workflows.
+
 ## 0.6.1
 
 - Keep anonymous Run Flow actions valid when their request text changes.
-- Refresh Run Flow CodeLens actions after saving a `.flow` file.
+- Refresh Run Flow CodeLens actions after saving a `.mettle` file.
 - Avoid guessing when structural edits make an anonymous declaration ambiguous.
 
 ## 0.6.0
@@ -38,7 +43,7 @@
 
 ## 0.1.0
 
-- Recognize `.flow` files.
+- Recognize `.mettle` files.
 - Add TextMate syntax highlighting.
 - Configure comments, brackets, automatic closing, indentation, and folding.
 - Add `flow` and `flowmain` snippets.

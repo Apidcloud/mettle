@@ -1,8 +1,0 @@
-use namespace users
-
-flow main() {
-    response = inspectRequest("project-demo")
-    assert(response.status == 200)
-    assert(response.json.args.requestId == "project-demo")
-    return response.json.args
-}

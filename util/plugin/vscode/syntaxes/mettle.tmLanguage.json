@@ -1,0 +1,244 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mettle",
+  "scopeName": "source.mettle",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#directives" },
+    { "include": "#controlKeywords" },
+    { "include": "#constants" },
+    { "include": "#durations" },
+    { "include": "#numbers" },
+    { "include": "#qualifiedCalls" },
+    { "include": "#calls" },
+    { "include": "#bindings" },
+    { "include": "#properties" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.mettle",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.mettle",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.mettle" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.mettle" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.mettle",
+              "match": "\\\\(?:[\\\"nrt]|u\\{[0-9A-Fa-f]+\\})"
+            },
+            {
+              "name": "meta.interpolation.mettle",
+              "begin": "\\$\\{",
+              "beginCaptures": {
+                "0": { "name": "punctuation.section.interpolation.begin.mettle" }
+              },
+              "end": "\\}",
+              "endCaptures": {
+                "0": { "name": "punctuation.section.interpolation.end.mettle" }
+              },
+              "patterns": [
+                { "include": "$self" }
+              ]
+            },
+            {
+              "name": "invalid.illegal.newline.mettle",
+              "match": "\\n"
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(flow)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.mettle" },
+            "3": { "name": "entity.name.function.mettle" }
+          }
+        },
+        {
+          "name": "storage.type.function.mettle",
+          "match": "\\bflow\\b"
+        },
+        {
+          "match": "\\b(context)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.mettle" },
+            "3": { "name": "entity.name.type.context.mettle" }
+          }
+        },
+        {
+          "match": "\\b(namespace)(\\s+)([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "storage.type.namespace.mettle" },
+            "3": { "name": "entity.name.namespace.mettle" }
+          }
+        },
+        {
+          "match": "\\b(data)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.mettle" },
+            "3": { "name": "entity.name.variable.mettle" }
+          }
+        }
+      ]
+    },
+    "directives": {
+      "patterns": [
+        {
+          "match": "\\b(use)(\\s+)(context|namespace)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.import.mettle" },
+            "3": { "name": "storage.type.mettle" }
+          }
+        },
+        {
+          "match": "\\b(defaults)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.mettle" },
+            "3": { "name": "support.type.capability.mettle" }
+          }
+        }
+      ]
+    },
+    "controlKeywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.mettle",
+          "match": "\\b(?:return|assert|parallel|race|rate|repeat|retry|within)\\b"
+        },
+        {
+          "name": "storage.type.mettle",
+          "match": "\\b(?:test)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.mettle",
+          "match": "\\b(?:true|false|null)\\b"
+        }
+      ]
+    },
+    "durations": {
+      "patterns": [
+        {
+          "name": "constant.numeric.duration.mettle",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:ns|us|ms|s|m|h)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.mettle",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?\\b"
+        }
+      ]
+    },
+    "qualifiedCalls": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "support.type.capability.mettle" },
+            "2": { "name": "punctuation.accessor.mettle" },
+            "3": { "name": "support.function.mettle" }
+          }
+        }
+      ]
+    },
+    "calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.mettle",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "bindings": {
+      "patterns": [
+        {
+          "name": "variable.other.readwrite.mettle",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*=)"
+        }
+      ]
+    },
+    "properties": {
+      "patterns": [
+        {
+          "name": "variable.other.property.mettle",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.mettle",
+          "match": "(?:==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.assignment.mettle",
+          "match": "="
+        },
+        {
+          "name": "punctuation.accessor.mettle",
+          "match": "\\."
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.mettle",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.mettle",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.group.begin.mettle",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.group.end.mettle",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.mettle",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.mettle",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.separator.mettle",
+          "match": "[:,]"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "mettle-http"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+mettle-capability = { path = "../mettle-capability" }
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls = { workspace = true, features = ["http1", "ring", "tls12", "webpki-tokio"] }
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[lints]
+workspace = true

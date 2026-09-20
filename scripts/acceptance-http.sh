@@ -40,9 +40,9 @@ fi
 port="$(cat "$state_dir/port")"
 result="$(
   cd "$repository_dir"
-  FLOW_BASE_URL="http://127.0.0.1:$port" \
-    FLOW_API_TOKEN="local-test-token" \
-    cargo run --quiet -- run tests/fixtures/http.flow --raw
+  METTLE_BASE_URL="http://127.0.0.1:$port" \
+    METTLE_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/http.mettle --raw
 )"
 
 python3 - "$result" <<'PY'
@@ -59,16 +59,16 @@ PY
 
 anonymous_result="$(
   cd "$repository_dir"
-  FLOW_BASE_URL="http://127.0.0.1:$port" \
-    FLOW_API_TOKEN="local-test-token" \
-    cargo run --quiet -- run tests/fixtures/entry-flows.flow --line 12 --raw
+  METTLE_BASE_URL="http://127.0.0.1:$port" \
+    METTLE_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/entry-flows.mettle --line 12 --raw
 )"
 
 named_result="$(
   cd "$repository_dir"
-  FLOW_BASE_URL="http://127.0.0.1:$port" \
-    FLOW_API_TOKEN="local-test-token" \
-    cargo run --quiet -- run tests/fixtures/entry-flows.flow getSeed --raw \
+  METTLE_BASE_URL="http://127.0.0.1:$port" \
+    METTLE_API_TOKEN="local-test-token" \
+    cargo run --quiet -- run tests/fixtures/entry-flows.mettle getSeed --raw \
       --arg "baseUrl=http://127.0.0.1:$port" \
       --arg apiToken=local-test-token
 )"
@@ -86,7 +86,7 @@ assert named["json"]["id"] == "seed-42", named
 PY
 
 if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
-  check "$repository_dir/tests/fixtures/invalid-http-option.flow" \
+  check "$repository_dir/tests/fixtures/invalid-http-option.mettle" \
   >"$state_dir/invalid.out" 2>"$state_dir/invalid.err"; then
   echo "invalid HTTP option unexpectedly compiled" >&2
   exit 1
@@ -94,9 +94,9 @@ fi
 
 rg -q 'unknown option `banana`' "$state_dir/invalid.err"
 
-if FLOW_BASE_URL="http://127.0.0.1:$port" \
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
   cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
-  run "$repository_dir/tests/fixtures/http-timeout.flow" \
+  run "$repository_dir/tests/fixtures/http-timeout.mettle" \
   >"$state_dir/timeout.out" 2>"$state_dir/timeout.err"; then
   echo "slow HTTP request unexpectedly completed" >&2
   exit 1
@@ -133,12 +133,12 @@ tls_port="$(cat "$state_dir/tls-port")"
 tls_url="https://localhost:$tls_port"
 tls_result="$(
   cd "$repository_dir"
-  FLOW_BASE_URL="$tls_url" cargo run --quiet -- run tests/fixtures/https-insecure.flow --raw
+  METTLE_BASE_URL="$tls_url" cargo run --quiet -- run tests/fixtures/https-insecure.mettle --raw
 )"
 [[ "$tls_result" == "200" ]]
 
-if FLOW_BASE_URL="$tls_url" cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
-  run "$repository_dir/tests/fixtures/https-secure.flow" \
+if METTLE_BASE_URL="$tls_url" cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/https-secure.mettle" \
   >"$state_dir/tls-secure.out" 2>"$state_dir/tls-secure.err"; then
   echo "self-signed HTTPS unexpectedly passed secure verification" >&2
   exit 1

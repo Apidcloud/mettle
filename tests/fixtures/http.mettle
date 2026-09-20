@@ -1,0 +1,36 @@
+context localApi {
+    apiToken: env("METTLE_API_TOKEN")
+
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        timeout: 2s
+        maxResponseBytes: 1_048_576
+
+        headers: {
+            "Accept": "application/json"
+            "Authorization": "Bearer ${apiToken}"
+        }
+    }
+}
+
+flow createUserFromSeed() {
+    use context localApi
+
+    seed = http.get("/seed")
+
+    created = http.post("/users") {
+        json: {
+            sourceId: seed.json.id
+            name: seed.json.name
+            active: true
+            roles: ["tester"]
+            seedConnection: seed.json.connectionId
+        }
+    }
+
+    return created.json
+}
+
+flow main() {
+    return createUserFromSeed()
+}

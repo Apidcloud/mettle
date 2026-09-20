@@ -1,0 +1,12 @@
+namespace users
+use namespace core
+
+flow getSeed() {
+    use context api
+    return http.get("/seed")
+}
+
+flow invalidSecretUrl() {
+    secretHost = env("METTLE_TEST_SECRET")
+    return http.get("http://${secretHost}")
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small deterministic HTTP/1.1 fixture for Flow examples and acceptance tests."""
+"""Small deterministic HTTP/1.1 fixture for Mettle examples and acceptance tests."""
 
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ def main() -> None:
     if arguments.port_file:
         arguments.port_file.write_text(str(actual_port), encoding="utf-8")
     print(
-        f"Flow HTTP fixture listening on {scheme}://{arguments.host}:{actual_port}",
+        f"Mettle HTTP fixture listening on {scheme}://{arguments.host}:{actual_port}",
         flush=True,
     )
     server.serve_forever()

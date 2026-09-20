@@ -1,11 +1,11 @@
 [workspace]
 members = [
-    "crates/flow-capability",
-    "crates/flow-cli",
-    "crates/flow-compiler",
-    "crates/flow-http",
-    "crates/flow-runtime",
-    "crates/flow-syntax",
+    "crates/mettle-capability",
+    "crates/mettle-cli",
+    "crates/mettle-compiler",
+    "crates/mettle-http",
+    "crates/mettle-runtime",
+    "crates/mettle-syntax",
 ]
 resolver = "3"
 

@@ -35,8 +35,8 @@ port="$(<"$state_dir/port")"
 base_url="http://127.0.0.1:$port"
 cargo build --quiet --manifest-path "$repository_dir/Cargo.toml"
 
-result="$(FLOW_BASE_URL="$base_url" "$repository_dir/target/debug/flow" \
-  run "$repository_dir/tests/fixtures/execution-policies.flow" policies --raw)"
+result="$(METTLE_BASE_URL="$base_url" "$repository_dir/target/debug/mettle" \
+  run "$repository_dir/tests/fixtures/execution-policies.mettle" policies --raw)"
 python3 - "$result" <<'PY'
 import json
 import sys
@@ -47,16 +47,16 @@ assert len(result["resultCount"]) == 4, result
 assert result["maximumConcurrency"] == 2, result
 PY
 
-if FLOW_BASE_URL="$base_url" "$repository_dir/target/debug/flow" \
-  run "$repository_dir/tests/fixtures/execution-policies.flow" deadline \
+if METTLE_BASE_URL="$base_url" "$repository_dir/target/debug/mettle" \
+  run "$repository_dir/tests/fixtures/execution-policies.mettle" deadline \
   >"$state_dir/deadline.out" 2>"$state_dir/deadline.err"; then
   echo "deadline unexpectedly completed" >&2
   exit 1
 fi
 rg -q 'deadline exceeded after 50ms' "$state_dir/deadline.err"
 
-FLOW_BASE_URL="$base_url" "$repository_dir/target/debug/flow" \
-  run "$repository_dir/tests/fixtures/execution-policies.flow" cancellable \
+METTLE_BASE_URL="$base_url" "$repository_dir/target/debug/mettle" \
+  run "$repository_dir/tests/fixtures/execution-policies.mettle" cancellable \
   >"$state_dir/cancel.out" 2>"$state_dir/cancel.err" &
 flow_pid=$!
 sleep 0.1

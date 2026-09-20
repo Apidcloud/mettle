@@ -1,20 +1,20 @@
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const vscode = require("vscode");
-const { selectCurrentFlow } = require("./flow-selection");
+const { selectCurrentFlow } = require("./mettle-selection");
 
 const MAX_DISCOVERY_OUTPUT = 1024 * 1024;
 const MAX_LSP_MESSAGE = 8 * 1024 * 1024;
 
-function flowExecutable() {
+function mettleExecutable() {
   return vscode.workspace
-    .getConfiguration("flow")
-    .get("executablePath", "flow");
+    .getConfiguration("mettle")
+    .get("executablePath", "mettle");
 }
 
 function discoverFlows(document, output, token) {
   return new Promise((resolve) => {
-    const executable = flowExecutable();
+    const executable = mettleExecutable();
     const child = spawn(executable, ["list", document.uri.fsPath, "--json"], {
       cwd: path.dirname(document.uri.fsPath),
       stdio: ["ignore", "pipe", "pipe"],
@@ -49,12 +49,12 @@ function discoverFlows(document, output, token) {
         return;
       }
       if (oversized) {
-        output.appendLine("Flow discovery output exceeded 1 MiB.");
+        output.appendLine("Mettle discovery output exceeded 1 MiB.");
         resolve([]);
         return;
       }
       if (code !== 0) {
-        output.appendLine(stderr.trim() || `Flow discovery exited with status ${code}.`);
+        output.appendLine(stderr.trim() || `Mettle discovery exited with status ${code}.`);
         resolve([]);
         return;
       }
@@ -69,7 +69,7 @@ function discoverFlows(document, output, token) {
           ),
         );
       } catch (error) {
-        output.appendLine(`Could not parse Flow discovery output: ${error.message}`);
+        output.appendLine(`Could not parse Mettle discovery output: ${error.message}`);
         resolve([]);
       }
     });
@@ -101,7 +101,7 @@ class FlowCodeLensProvider {
         : `$(play) Run ${flow.displayName}`;
       return new vscode.CodeLens(range, {
         title: label,
-        command: "flow.runFlow",
+        command: "mettle.runFlow",
         arguments: [
           {
             uri: document.uri.toString(),
@@ -117,7 +117,7 @@ class FlowCodeLensProvider {
   }
 }
 
-class FlowLanguageServer {
+class MettleLanguageServer {
   constructor(output) {
     this.output = output;
     this.child = undefined;
@@ -143,7 +143,7 @@ class FlowLanguageServer {
   }
 
   async startProcess() {
-    const executable = flowExecutable();
+    const executable = mettleExecutable();
     const folder = vscode.workspace.workspaceFolders?.[0];
     const child = spawn(executable, ["lsp"], {
       cwd: folder?.uri.fsPath,
@@ -163,7 +163,7 @@ class FlowLanguageServer {
       if (this.child === child) {
         this.child = undefined;
       }
-      this.failPending(new Error(`Flow language server exited with status ${code}.`));
+      this.failPending(new Error(`Mettle language server exited with status ${code}.`));
     });
 
     const folders = (vscode.workspace.workspaceFolders || []).map((workspace) => ({
@@ -175,11 +175,11 @@ class FlowLanguageServer {
       rootUri: folder?.uri.toString() || null,
       workspaceFolders: folders,
       capabilities: {},
-      clientInfo: { name: "Flow VS Code", version: "0.6.1" },
+      clientInfo: { name: "Mettle VS Code", version: "0.6.1" },
     });
     this.notify("initialized", {});
     for (const document of vscode.workspace.textDocuments) {
-      if (document.languageId === "flow") {
+      if (document.languageId === "mettle") {
         this.open(document);
       }
     }
@@ -195,13 +195,13 @@ class FlowLanguageServer {
       const header = this.buffer.subarray(0, headerEnd).toString("ascii");
       const match = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
       if (!match) {
-        this.output.appendLine("Flow language server sent a response without Content-Length.");
+        this.output.appendLine("Mettle language server sent a response without Content-Length.");
         this.buffer = Buffer.alloc(0);
         return;
       }
       const length = Number(match[1]);
       if (length > MAX_LSP_MESSAGE) {
-        this.output.appendLine("Flow language server response exceeded 8 MiB.");
+        this.output.appendLine("Mettle language server response exceeded 8 MiB.");
         this.child?.kill();
         return;
       }
@@ -214,7 +214,7 @@ class FlowLanguageServer {
       try {
         this.handleMessage(JSON.parse(body.toString("utf8")));
       } catch (error) {
-        this.output.appendLine(`Could not parse Flow language server response: ${error.message}`);
+        this.output.appendLine(`Could not parse Mettle language server response: ${error.message}`);
       }
     }
   }
@@ -229,7 +229,7 @@ class FlowLanguageServer {
     }
     this.pending.delete(String(message.id));
     if (message.error) {
-      pending.reject(new Error(message.error.message || "Flow language server request failed."));
+      pending.reject(new Error(message.error.message || "Mettle language server request failed."));
     } else {
       pending.resolve(message.result);
     }
@@ -237,7 +237,7 @@ class FlowLanguageServer {
 
   send(message) {
     if (!this.child?.stdin.writable) {
-      throw new Error("Flow language server is not running.");
+      throw new Error("Mettle language server is not running.");
     }
     const body = Buffer.from(JSON.stringify(message), "utf8");
     this.child.stdin.write(`Content-Length: ${body.length}\r\n\r\n`);
@@ -284,7 +284,7 @@ class FlowLanguageServer {
     this.notify("textDocument/didOpen", {
       textDocument: {
         uri: document.uri.toString(),
-        languageId: "flow",
+        languageId: "mettle",
         version: document.version,
         text: document.getText(),
       },
@@ -330,7 +330,7 @@ class FlowLanguageServer {
         ),
       );
     } catch (error) {
-      this.output.appendLine(`Flow definition lookup failed: ${error.message}`);
+      this.output.appendLine(`Mettle definition lookup failed: ${error.message}`);
       return undefined;
     }
   }
@@ -350,7 +350,7 @@ class FlowLanguageServer {
       await this.requestRaw("shutdown", null);
       this.notify("exit", null);
     } catch (error) {
-      this.output.appendLine(`Could not stop Flow language server cleanly: ${error.message}`);
+      this.output.appendLine(`Could not stop Mettle language server cleanly: ${error.message}`);
     } finally {
       this.child?.kill();
       this.child = undefined;
@@ -362,7 +362,7 @@ async function runFlow(flow, output) {
   const uri = vscode.Uri.parse(flow.uri);
   const document = await vscode.workspace.openTextDocument(uri);
   if (document.isDirty && !(await document.save())) {
-    void vscode.window.showErrorMessage("Save the Flow file before running it.");
+    void vscode.window.showErrorMessage("Save the Mettle file before running it.");
     return;
   }
 
@@ -385,7 +385,7 @@ async function runFlow(flow, output) {
   for (const parameter of current.parameters) {
     const value = await vscode.window.showInputBox({
       title: `Run ${current.displayName}`,
-      prompt: `Value for ${parameter} (Flow literal or text)`,
+      prompt: `Value for ${parameter} (Mettle literal or text)`,
       ignoreFocusOut: true,
     });
     if (value === undefined) {
@@ -406,14 +406,14 @@ async function runFlow(flow, output) {
 
   const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
   const scope = workspaceFolder || vscode.TaskScope.Workspace;
-  const execution = new vscode.ProcessExecution(flowExecutable(), args, {
+  const execution = new vscode.ProcessExecution(mettleExecutable(), args, {
     cwd: path.dirname(uri.fsPath),
   });
   const task = new vscode.Task(
-    { type: "flow", flow: current.displayName },
+    { type: "mettle", flow: current.displayName },
     scope,
     `Run ${current.displayName}`,
-    "Flow",
+    "Mettle",
     execution,
   );
   task.presentationOptions = {
@@ -425,41 +425,41 @@ async function runFlow(flow, output) {
 }
 
 function activate(context) {
-  const output = vscode.window.createOutputChannel("Flow");
+  const output = vscode.window.createOutputChannel("Mettle");
   const provider = new FlowCodeLensProvider(output);
-  const languageServer = new FlowLanguageServer(output);
+  const languageServer = new MettleLanguageServer(output);
   context.subscriptions.push(
     output,
     provider,
-    vscode.languages.registerCodeLensProvider({ language: "flow" }, provider),
+    vscode.languages.registerCodeLensProvider({ language: "mettle" }, provider),
     vscode.languages.registerDefinitionProvider(
-      { language: "flow", scheme: "file" },
+      { language: "mettle", scheme: "file" },
       { provideDefinition: (document, position, token) => languageServer.definition(document, position, token) },
     ),
     vscode.workspace.onDidOpenTextDocument((document) => {
-      if (document.languageId === "flow") {
+      if (document.languageId === "mettle") {
         void languageServer.start().then(() => languageServer.open(document));
       }
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
-      if (event.document.languageId === "flow") {
+      if (event.document.languageId === "mettle") {
         languageServer.change(event);
       }
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
-      if (document.languageId === "flow") {
+      if (document.languageId === "mettle") {
         provider.refresh();
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
-      if (document.languageId === "flow") {
+      if (document.languageId === "mettle") {
         languageServer.close(document);
       }
     }),
-    vscode.commands.registerCommand("flow.runFlow", (flow) => runFlow(flow, output)),
+    vscode.commands.registerCommand("mettle.runFlow", (flow) => runFlow(flow, output)),
     { dispose: () => void languageServer.stop() },
   );
-  if (vscode.workspace.textDocuments.some((document) => document.languageId === "flow")) {
+  if (vscode.workspace.textDocuments.some((document) => document.languageId === "mettle")) {
     void languageServer.start();
   }
 }

@@ -1,6 +1,6 @@
 # Dependency policy and audit
 
-Flow keeps third-party code concentrated around networking, TLS, byte buffers, and JSON correctness. The parser, compiler, execution plan, runtime interpreter, capability interface, CLI, and VS Code extension are implemented within the repository.
+Mettle keeps third-party code concentrated around networking, TLS, byte buffers, and JSON correctness. The parser, compiler, execution plan, runtime interpreter, capability interface, CLI, and VS Code extension are implemented within the repository.
 
 ## Direct Rust dependencies
 

@@ -1,0 +1,32 @@
+context publicApi {
+    defaults http {
+        baseUrl: "https://jsonplaceholder.typicode.com"
+        timeout: 10s
+        maxResponseBytes: 1_048_576
+
+        headers: {
+            "Accept": "application/json"
+        }
+    }
+}
+
+flow createUserFromSeed() {
+    use context publicApi
+
+    seed = http.get("/users/1")
+
+    created = http.post("/posts") {
+        json: {
+            sourceId: seed.json.id
+            name: seed.json.name
+            active: true
+            roles: ["tester"]
+        }
+    }
+
+    return created.json
+}
+
+flow main() {
+    return createUserFromSeed()
+}

@@ -38,16 +38,16 @@ if [[ ! -s "$state_dir/port" ]]; then
 fi
 
 port="$(cat "$state_dir/port")"
-project="$repository_dir/tests/projects/basic/main.flow"
+project="$repository_dir/tests/projects/basic/main.mettle"
 result="$(
-  FLOW_BASE_URL="http://127.0.0.1:$port" \
-    FLOW_API_TOKEN="local-test-token" \
+  METTLE_BASE_URL="http://127.0.0.1:$port" \
+    METTLE_API_TOKEN="local-test-token" \
     cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- run "$project"
 )"
 [[ "$result" == "seed-42" ]]
 
-if FLOW_BASE_URL="http://127.0.0.1:$port" \
-  FLOW_API_TOKEN="local-test-token" \
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
+  METTLE_API_TOKEN="local-test-token" \
   cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
   run "$project" failingAssertion \
   >"$state_dir/assert.out" 2>"$state_dir/assert.err"; then
@@ -57,9 +57,9 @@ fi
 rg -q 'assertion failed' "$state_dir/assert.err"
 
 secret='token that must not appear'
-if FLOW_BASE_URL="http://127.0.0.1:$port" \
-  FLOW_API_TOKEN="local-test-token" \
-  FLOW_TEST_SECRET="$secret" \
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
+  METTLE_API_TOKEN="local-test-token" \
+  METTLE_TEST_SECRET="$secret" \
   cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
   run "$project" secretDiagnostic \
   >"$state_dir/secret.out" 2>"$state_dir/secret.err"; then
@@ -73,7 +73,7 @@ if rg -Fq "$secret" "$state_dir/secret.err"; then
 fi
 
 if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
-  check "$repository_dir/tests/projects/cycle/main.flow" \
+  check "$repository_dir/tests/projects/cycle/main.mettle" \
   >"$state_dir/cycle.out" 2>"$state_dir/cycle.err"; then
   echo "context cycle unexpectedly compiled" >&2
   exit 1
@@ -81,7 +81,7 @@ fi
 rg -q 'first -> second -> first' "$state_dir/cycle.err"
 
 if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
-  check "$repository_dir/tests/projects/ambiguous/main.flow" \
+  check "$repository_dir/tests/projects/ambiguous/main.mettle" \
   >"$state_dir/ambiguous.out" 2>"$state_dir/ambiguous.err"; then
   echo "ambiguous namespace reference unexpectedly compiled" >&2
   exit 1

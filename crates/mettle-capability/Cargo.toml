@@ -1,0 +1,12 @@
+[package]
+name = "mettle-capability"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mettle-syntax = { path = "../mettle-syntax" }
+
+[lints]
+workspace = true

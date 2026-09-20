@@ -1,74 +1,74 @@
 {
-  "name": "flow-language",
-  "displayName": "Flow Language",
-  "description": "Language support for the Flow I/O-oriented programming language.",
-  "version": "0.6.1",
-  "publisher": "flow-lang",
+  "name": "mettle-language",
+  "displayName": "Mettle Language",
+  "description": "Language support for the Mettle I/O-oriented programming language.",
+  "version": "0.7.0",
+  "publisher": "mettle-lang",
   "license": "UNLICENSED",
   "engines": {
     "vscode": ">=1.85.0"
   },
   "main": "./extension.js",
   "activationEvents": [
-    "onLanguage:flow",
-    "onCommand:flow.runFlow"
+    "onLanguage:mettle",
+    "onCommand:mettle.runFlow"
   ],
   "categories": [
     "Programming Languages",
     "Snippets"
   ],
   "keywords": [
-    "flow",
+    "mettle",
     "http",
     "load testing",
     "language"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/flow-language-0.6.1.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.7.0.vsix"
   },
   "contributes": {
     "commands": [
       {
-        "command": "flow.runFlow",
-        "title": "Flow: Run Flow",
+        "command": "mettle.runFlow",
+        "title": "Mettle: Run Flow",
         "icon": "$(play)"
       }
     ],
     "configuration": {
-      "title": "Flow",
+      "title": "Mettle",
       "properties": {
-        "flow.executablePath": {
+        "mettle.executablePath": {
           "type": "string",
-          "default": "flow",
-          "description": "Path or command name for the Flow CLI used by Run Flow CodeLens actions."
+          "default": "mettle",
+          "description": "Path or command name for the Mettle CLI used by Run Flow CodeLens actions."
         }
       }
     },
     "languages": [
       {
-        "id": "flow",
+        "id": "mettle",
         "aliases": [
-          "Flow",
-          "flow"
+          "Mettle",
+          "mettle"
         ],
         "extensions": [
-          ".flow"
+          ".mettle"
         ],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "flow",
-        "scopeName": "source.flow",
-        "path": "./syntaxes/flow.tmLanguage.json"
+        "language": "mettle",
+        "scopeName": "source.mettle",
+        "path": "./syntaxes/mettle.tmLanguage.json"
       }
     ],
     "snippets": [
       {
-        "language": "flow",
-        "path": "./snippets/flow.json"
+        "language": "mettle",
+        "path": "./snippets/mettle.json"
       }
     ]
   }

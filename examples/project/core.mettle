@@ -1,0 +1,20 @@
+namespace core
+
+context base {
+    baseUrl: "https://jsonplaceholder.typicode.com"
+
+    defaults http {
+        baseUrl: baseUrl
+        timeout: 10s
+    }
+}
+
+context api {
+    use context base
+
+    defaults http {
+        headers: {
+            "Accept": "application/json"
+        }
+    }
+}

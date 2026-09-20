@@ -1,26 +1,368 @@
-# Flow
+# Mettle
 
-Flow is an experimental language and native runtime for I/O-oriented workflows. It currently supports concise request collections, reusable parameterized flows, multi-file projects and namespaces, composable contexts, assertions, structured deadlines, retries and bounded parallel execution, environment configuration, HTTP/1.1 and HTTPS operations, JSON payloads and responses, and compiler-validated HTTP options.
+> [!WARNING]
+> **Mettle is under active development and is not ready for production use.** The language, command-line interface, capability APIs, and project format may change between revisions. Use it to experiment, test the current direction, and contribute feedback.
 
-The implementation compiles source into a resolved execution plan and interprets that plan on an asynchronous Rust runtime. HTTP clients and their connection pools are reused across operations.
+Mettle is an I/O-oriented programming language and native runtime for protocol workflows, functional checks, and high-performance load tests.
 
-The evolving language direction is in [`docs/language-proposal.md`](docs/language-proposal.md). The implementation and delivery strategy is in [`docs/flow-technical.md`](docs/flow-technical.md).
+The same flow can begin as a quick manual probe, grow into a multi-step integration workflow, and later run under concurrency or rate policies without rewriting its protocol logic. Mettle gives the runtime direct knowledge of I/O, time, cancellation, retries, parallel work, and measurement, so these concerns compose as language features.
 
-## Requirements
+Protocols are capabilities rather than syntax baked into the language. HTTP is the first implemented capability. SIP is planned next, and the same model is intended to support capabilities such as gRPC, WebSocket, Kafka, and user-provided protocols. Each capability owns its operations, configuration schema, result types, runtime behavior, metrics, and redaction rules.
 
-- Linux
-- Rust 1.98.1 through [rustup](https://rustup.rs/)
-- Python 3 for the local HTTP acceptance fixture
+This HTTP flow is executable today:
 
-The repository pins its Rust toolchain in `rust-toolchain.toml`. Cargo selects it automatically when rustup is installed.
+```mettle
+flow createUser() {
+    seed = http.get("https://jsonplaceholder.typicode.com/users/1")
 
-On Omarchy:
+    created = http.post("https://jsonplaceholder.typicode.com/posts") {
+        json: {
+            name: seed.json.name
+            active: true
+            roles: ["tester"]
+        }
+    }
 
-```bash
-omarchy install dev-env rust
+    assert(created.status == 201)
+    return created.json
+}
 ```
 
-## Build and verify
+```bash
+mettle run users.mettle createUser
+```
+
+Mettle compiles source into a validated execution plan before the runtime performs any I/O. Names, arguments, capability options, and bounded execution policies are checked up front. The native Rust runtime then executes that plan asynchronously and reuses resources such as HTTP connection pools.
+
+The project is experimental. Its compiler, runtime, and capability boundary are being built as production foundations, even while the available protocol surface remains intentionally small. The architecture targets Linux, macOS, and Windows; Linux is the platform exercised by the repository today.
+
+## One language, several jobs
+
+A Mettle project is made from a few general concepts:
+
+- **flows** name reusable sequences of operations;
+- **capabilities** provide protocol operations such as `http.get()` and the planned `sip.options()`;
+- **contexts** compose environment values and capability defaults;
+- **execution policies** control deadlines, retries, parallelism, concurrency, and rate;
+- **tests and results** make assertions and performance measurements explicit.
+
+I/O suspends lightweight runtime work automatically. Source code does not need `async` and `await` around every operation. Concurrency appears where it matters through structured forms such as `parallel`, and all child work remains owned by an enclosing scope for cancellation and cleanup.
+
+## Use Mettle
+
+Mettle is intended to be a single native executable. Once release packages are available, install the `mettle` binary for your platform and place it on `PATH`.
+
+Until then, build it from a checkout with Rust:
+
+```bash
+cargo install --path crates/mettle-cli --locked
+mettle --version
+```
+
+The included request collection uses the public JSONPlaceholder test API. It needs an internet connection but no account, credentials, environment variables, or local server.
+
+```bash
+mettle check examples/request-collection.mettle
+mettle list examples/request-collection.mettle
+mettle run examples/request-collection.mettle inspectRequest \
+  --arg baseUrl=https://jsonplaceholder.typicode.com \
+  --arg requestId=1
+```
+
+## Start with one operation
+
+A top-level capability call is a runnable anonymous flow. With the current HTTP capability, a file can be as small as one request:
+
+```mettle
+http.get("https://jsonplaceholder.typicode.com/posts/1")
+```
+
+Give the work a name only when it needs inputs or more than one step.
+
+```mettle
+flow getPost(baseUrl, postId) = http.get("${baseUrl}/posts/${postId}")
+
+flow inspectRequest(baseUrl, requestId) {
+    response = http.get("${baseUrl}/posts/${requestId}")
+    assert(response.status == 200)
+    return response.json.args
+}
+```
+
+Run a named flow directly:
+
+```bash
+mettle run requests.mettle getPost \
+  --arg baseUrl=https://jsonplaceholder.typicode.com \
+  --arg postId=1
+```
+
+`main` is the conventional default flow, but it is optional. If a file has exactly one runnable flow, Mettle runs it without a name. If there are several, select one by name or by a source line from `mettle list`.
+
+```bash
+mettle run examples/request-collection.mettle --line 3
+```
+
+## Build a workflow from operation results
+
+Capability operations return values. Bind one to a name, use its result to construct the next operation, then return what matters. Bindings are immutable, which keeps the data path easy to follow. The current HTTP capability exposes parsed JSON directly:
+
+```mettle
+context publicApi {
+    defaults http {
+        baseUrl: "https://jsonplaceholder.typicode.com"
+        timeout: 10s
+        headers: {
+            "Accept": "application/json"
+        }
+    }
+}
+
+flow createUserFromSeed() {
+    use context publicApi
+
+    seed = http.get("/users/1")
+
+    created = http.post("/posts") {
+        json: {
+            sourceId: seed.json.id
+            name: seed.json.name
+            active: true
+            roles: ["tester"]
+        }
+    }
+
+    assert(created.status == 201)
+    return created.json
+}
+```
+
+This is the complete shape used by [`examples/http.mettle`](examples/http.mettle):
+
+```bash
+mettle run examples/http.mettle
+```
+
+An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, and `url`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious.
+
+## Put shared setup in contexts
+
+Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
+
+```mettle
+context baseApi {
+    defaults http {
+        baseUrl: env("API_URL")
+        timeout: 5s
+        headers: {
+            "Accept": "application/json"
+        }
+    }
+}
+
+context authenticatedApi {
+    use context baseApi
+    apiToken: env("API_TOKEN")
+
+    defaults http {
+        headers: {
+            "Authorization": "Bearer ${apiToken}"
+        }
+    }
+}
+
+flow currentUser() {
+    use context authenticatedApi
+    return http.get("/me")
+}
+```
+
+`env("API_URL")` requires an environment variable. Within a string, `${API_URL}` first resolves a flow local, parameter, or context value, then falls back to the process environment. That keeps a one-off file pleasant to use:
+
+```mettle
+flow health() = http.get("${API_URL}/health")
+```
+
+## Control how work executes
+
+Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. The currently implemented policies are `within`, `retry`, and bounded `parallel`:
+
+```mettle
+flow probe(path) {
+    response = retry(attempts: 3, delay: 100ms) {
+        http.get("https://jsonplaceholder.typicode.com${path}")
+    }
+    return response.status
+}
+
+flow readiness() {
+    return within(timeout: 5s) {
+        parallel(limit: 2) {
+            probe("/posts/1")
+            probe("/users/1")
+            probe("/todos/1")
+        }
+    }
+}
+```
+
+`parallel` returns results in source order and never starts more branches than `limit`. If a branch fails, active siblings are cancelled and joined. `retry` counts the first execution as an attempt and returns the first successful result. `within` covers all nested work, including retry delays. Ctrl+C cancels the root execution and exits with status 130.
+
+This gives every operation an owner, a lifetime, and a cleanup path. Rate-driven execution and scoped performance results build on the same model. A flow that works as a functional check should be reusable inside a load test without duplicating its operations.
+
+The proposed load-test form keeps the result scoped and named:
+
+```mettle
+load = rate(target: 1_000, period: 1s, duration: 30s) {
+    readiness()
+}
+
+assert(load.successRate > 0.999)
+assert(load.latency.p95 < 200ms)
+```
+
+`rate` and performance result aggregation are part of the language direction and are not implemented yet.
+
+## Organize a project without import boilerplate
+
+A `mettle.toml` file marks a project root. Running an entry file below it discovers every `.mettle` file in that project. Files contribute declarations directly, so there are no import or export lists to maintain.
+
+```text
+service-checks/
+├── mettle.toml
+├── core.mettle
+├── users.mettle
+└── main.mettle
+```
+
+Files without a namespace are in the implicit global namespace. Use a namespace when the project needs a clear boundary, then make it visible explicitly.
+
+```mettle
+namespace users
+use namespace core
+
+flow getUser(id) {
+    use context api
+    return http.get("/users/${id}")
+}
+```
+
+```bash
+mettle run examples/project/main.mettle
+```
+
+## Protocol capabilities
+
+The core parser understands calls, values, flows, contexts, and execution policies. It does not need a special grammar rule for each protocol verb. The compiler resolves a qualified call such as `http.get()`, `sip.options()`, `grpc.call()`, or `kafka.publish()` through a registered capability.
+
+A capability contributes:
+
+- named operations and their signatures;
+- schemas for defaults, options, payloads, and results;
+- compile-time validation;
+- runtime execution and resource management;
+- protocol metrics and sensitive-data redaction.
+
+SIP is the next important test of this design because it introduces transactions, retransmission, provisional responses, dialogs, and cleanup. The planned source form uses the same language concepts as HTTP:
+
+```mettle
+context sipClient {
+    domain: env("SIP_DOMAIN")
+
+    defaults sip {
+        transport: udp
+        timeout: 3s
+        from: env("SIP_CALLER_URI")
+    }
+}
+
+flow probeSip() {
+    use context sipClient
+    response = sip.options("sip:${domain}")
+    assert(response.status == 200)
+    return response
+}
+```
+
+The SIP capability and this exact schema are planned work. HTTP is the only protocol capability included in the executable today. The capability contract already lives outside the parser and HTTP client implementation, so adding a protocol does not require turning its methods into language keywords.
+
+## HTTP support today
+
+Mettle currently supports HTTP/1.1 `GET` and `POST` over HTTP or HTTPS. Absolute URLs work anywhere. Relative URLs use `baseUrl` from the active HTTP defaults or the operation itself.
+
+```mettle
+response = http.post("/users") {
+    timeout: 2s
+    headers: {
+        "X-Request-Source": "smoke-test"
+    }
+    json: {
+        name: "Ada"
+        active: true
+    }
+}
+```
+
+Mettle validates options during `mettle check`, before it opens a connection.
+
+| Option | Type | Meaning |
+| --- | --- | --- |
+| `baseUrl` | String | Prefix for a relative URL |
+| `timeout` | Duration | Deadline for the complete request; default: 30 seconds |
+| `headers` | Object of strings | Request headers |
+| `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
+| `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
+| `json` | JSON value | Body for `http.post`; sets `Content-Type` when absent |
+
+HTTPS certificate and hostname validation is enabled by default. A controlled test system with an intentionally untrusted certificate can opt out explicitly:
+
+```mettle
+defaults http {
+    tls: {
+        verifyCertificates: false
+    }
+}
+```
+
+## CLI output and diagnostics
+
+Normal HTTP output is compact:
+
+```text
+GET https://jsonplaceholder.typicode.com/posts/1 200
+```
+
+Use `--verbose` to inspect the formatted response envelope, headers, response data, and body metadata. Use `--raw` for a one-line complete value in scripts.
+
+```bash
+mettle run examples/request-collection.mettle --line 10 --verbose
+```
+
+Syntax, validation, and runtime failures return a nonzero status with source context. Runtime failures include the Mettle flow stack.
+
+```text
+error: unknown option `banana`
+ --> tests/fixtures/invalid-http-option.mettle:3:9
+  |
+3 |         banana: true
+  |         ^^^^^^
+```
+
+## VS Code extension
+
+The included extension provides `.mettle` recognition, syntax highlighting, snippets, folding, CodeLens actions to run flows, and Ctrl+Click navigation for flows, contexts, parameters, and local bindings. Navigation is backed by `mettle lsp`, so it follows the same project and namespace rules as the CLI.
+
+```bash
+cd util/plugin/vscode
+npm run package
+code --install-extension dist/mettle-language-0.7.0.vsix --force
+```
+
+The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
+
+## For contributors
+
+The checked-in toolchain is Rust 1.98.1. Cargo picks it automatically when Rustup is installed. Python 3 is only required for the repository's local HTTP and HTTPS acceptance fixture.
 
 ```bash
 cargo build
@@ -33,400 +375,39 @@ cargo fmt --all -- --check
 ./scripts/acceptance-execution.sh
 ```
 
-The HTTP acceptance command starts isolated HTTP and HTTPS fixtures on random local ports. It verifies named and anonymous entry flows, CLI arguments, request chaining, JSON, environment configuration, connection reuse, whole-exchange timeouts (including response streaming), compile-time schema errors, secure certificate rejection, and the explicit certificate-verification override.
+The acceptance scripts use private HTTP and HTTPS fixtures on random loopback ports. They cover request chaining, JSON, environment configuration, connection reuse, timeouts, TLS, project resolution, context composition, assertions, retries, concurrency bounds, cancellation, and redaction without depending on public services.
 
-The project acceptance command verifies multi-file discovery, namespaces, context composition, assertions, ambiguity and cycle diagnostics, and environment-value redaction.
-
-Build the optimized binary with:
+Build an optimized executable with:
 
 ```bash
 cargo build --release
-./target/release/flow --version
+./target/release/mettle --version
 ```
 
-## Run a small flow
-
-```flow
-flow identity(value) {
-    return value
-}
-
-flow main() {
-    result = identity("Hello from Flow")
-    return result
-}
-```
-
-Validate and execute the included example:
-
-```bash
-cargo run -- check examples/hello.flow
-cargo run -- run examples/hello.flow
-```
-
-`main` is the default when no flow is selected. It is optional: a source with exactly one flow runs that flow automatically, while a source with multiple flows requires a name or source line.
-
-## Use Flow as a request collection
-
-A top-level call is an independently runnable anonymous flow:
-
-```flow
-http.get("https://postman-echo.com/get?demo=bare")
-
-flow inspectRequest(baseUrl, requestId) =
-    http.get("${baseUrl}/get?requestId=${requestId}")
-```
-
-The included request collection uses the public Postman Echo HTTPS service. It needs an internet connection, but no account, credentials, environment variables, or manually started server.
-
-Validate and inspect the included collection:
-
-```bash
-cargo run -- check examples/request-collection.flow
-cargo run -- list examples/request-collection.flow
-```
-
-Run a named flow with typed arguments:
-
-```bash
-cargo run -- run examples/request-collection.flow inspectRequest \
-  --arg baseUrl=https://postman-echo.com \
-  --arg requestId=42
-```
-
-Run an anonymous flow using the line reported by `flow list`:
-
-```bash
-cargo run -- run examples/request-collection.flow --line 3
-```
-
-The default output for a direct HTTP operation is concise: method, URL, and status. Use `--verbose` to inspect headers, response data, body metadata, and the complete response envelope:
-
-```bash
-cargo run -- run examples/request-collection.flow --line 10 --verbose
-```
-
-Use `--raw` for the original one-line complete value when a script needs it. Verbose output summarizes binary response bodies, avoids printing a duplicate body string when parsed JSON is available, and clearly marks very long string previews as truncated.
-
-The repository's automated acceptance suite does not depend on Postman Echo. `./scripts/acceptance-http.sh` starts private HTTP and HTTPS fixtures on random loopback ports, runs the checks, and stops the fixtures automatically. This makes tests repeatable and removes any manual server setup.
-
-Argument values accept Flow literals such as `42`, `true`, `2s`, arrays, and objects. Other command-line values are strings. Missing, duplicate, and unknown arguments fail before execution.
-
-## Run the HTTP example
-
-The complete HTTP example also uses Postman Echo, so it runs without local setup or environment variables:
-
-```bash
-cargo run -- run examples/http.flow
-```
-
-The example reads seed data with `GET`, uses that response to construct a `POST` JSON payload, and returns the echoed payload:
-
-```json
-{
-  "active": true,
-  "name": "Ada",
-  "roles": ["tester"],
-  "sourceId": "seed-42"
-}
-```
-
-## Language currently available
-
-### Projects, namespaces, and assertions
-
-A `flow.toml` file marks a project root. Running any `.flow` entry file below it discovers every `.flow` source in that project; files contribute declarations without import/export lists:
+## Repository map
 
 ```text
-project/
-├── flow.toml
-├── core.flow
-├── users.flow
-└── main.flow
+crates/mettle-syntax       Lexer, parser, AST, and source spans
+crates/mettle-capability   Capability schemas, values, and runtime interface
+crates/mettle-compiler     Resolution, validation, and execution-plan lowering
+crates/mettle-runtime      Async execution-plan interpreter and context scopes
+crates/mettle-http         HTTP schema, pooled client, JSON, timeouts, and TLS
+crates/mettle-cli          Native command-line interface and diagnostics
+examples/                  Runnable Mettle programs
+tests/fixtures/            Deterministic HTTP programs and local TLS material
+tests/projects/            Multi-file project fixtures
+util/plugin/vscode/        Installable VS Code extension
+util/test-server/          Local HTTP and HTTPS acceptance fixture
+docs/                      Language, runtime, and dependency documentation
 ```
 
-Files without a namespace belong to the implicit global namespace. Named namespaces can span multiple files and are made visible explicitly:
-
-```flow
-namespace users
-use namespace core
-
-flow getUser(id) {
-    use context api
-    return http.get("/users/${id}")
-}
-```
-
-Contexts compose in listed order, followed by local declarations. Later defaults override conflicting earlier defaults while unrelated settings and HTTP headers are retained:
-
-```flow
-context api {
-    use context base
-    use context identified
-
-    defaults http {
-        timeout: 5s
-    }
-}
-```
-
-Assertions accept equality and ordering comparisons and fail with their source location and Flow call stack:
-
-```flow
-assert(response.status == 200)
-assert(response.json.id != null)
-assert(elapsed < 500ms)
-```
-
-Run the included project example with:
-
-```bash
-cargo run -- run examples/project/main.flow
-```
-
-### Structured execution
-
-Execution policies are expressions, so their results can be bound, returned, or
-nested. Policy configuration uses named fields and compile-time bounded literals:
-
-```flow
-flow resilientRead() {
-    responses = within(timeout: 2s) {
-        retry(attempts: 3, delay: 50ms) {
-            parallel(limit: 2) {
-                http.get("/health")
-                http.get("/ready")
-            }
-        }
-    }
-
-    return responses
-}
-```
-
-`parallel` returns an array in source order. At most `limit` branches are active,
-and the first failure cancels and joins active siblings. `retry` counts the first
-execution as an attempt, optionally waits a fixed delay between failures, and
-returns the first success. Exhaustion reports the final failure. `within` covers
-all nested work, including retry delays, and cancels its child when the deadline
-expires. Ctrl+C cancels the root execution and exits with status 130.
-`within` and `retry` each contain one child expression; `parallel` contains one or
-more independent expression branches. Bindings remain in the surrounding flow,
-which avoids shared mutable locals between concurrent branches.
-
-The public policy example uses Postman Echo and needs an internet connection:
-
-```bash
-cargo run -- run examples/execution-policies.flow
-```
-
-For a repeatable local check of retry recovery, concurrency bounds, deadlines,
-and Ctrl+C cleanup, run `./scripts/acceptance-execution.sh`.
-
-### Values and flows
-
-Flow supports null, booleans, non-negative 64-bit integer literals, floating-point numbers, strings, durations, arrays, and objects:
-
-```flow
-flow describeUser(user) {
-    result = {
-        id: user.id
-        active: true
-        roles: ["tester", "developer"]
-        timeout: 500ms
-    }
-
-    return result
-}
-```
-
-Bindings are immutable. Named flows can use a block or a concise expression body. Flow calls are validated before execution, including name resolution and argument counts. Recursive calls are currently rejected.
-
-```flow
-flow health(baseUrl) = http.get("${baseUrl}/health")
-
-flow getUser(baseUrl, userId) =
-    http.get("${baseUrl}/users/${userId}")
-```
-
-`flow main()` remains the conventional default entry point but is not required. The CLI can execute any named flow, or an anonymous flow identified by its source line.
-
-Strings support interpolation of names and member paths:
-
-```flow
-path = "/users/${user.id}"
-```
-
-For a simple interpolation such as `${API_URL}`, resolution first checks flow parameters and locals, then active context fields, and finally the process environment. A missing fallback environment variable fails before its operation begins. `env("API_URL")` remains available when explicit environment access is clearer.
-
-### Contexts and environment variables
-
-A flow can apply one context in its preamble:
-
-```flow
-context api {
-    apiToken: env("API_TOKEN")
-
-    defaults http {
-        baseUrl: env("API_URL")
-        timeout: 5s
-
-        headers: {
-            "Accept": "application/json"
-            "Authorization": "Bearer ${apiToken}"
-        }
-    }
-}
-
-flow main() {
-    use context api
-    response = http.get("/health")
-    return response.status
-}
-```
-
-`env()` requires the named process environment variable. A missing variable fails before the first operation in that flow. Context values are immutable and scoped to the flow activation. Child flows inherit capability defaults from their caller; a child that declares its own context overlays those defaults.
-
-A file-level directive provides a default context for every flow in that file, including bare anonymous calls:
-
-```flow
-context api {
-    defaults http {
-        baseUrl: "${API_URL}"
-    }
-}
-
-use context api
-
-http.get("/health")
-flow ready() = http.get("/ready")
-```
-
-A context declared inside a named or anonymous block flow replaces the file default for that flow.
-
-Context composition is not available yet, so a flow may declare one `use context` directive. It must appear before executable statements.
-
-### HTTP
-
-Available operations:
-
-```flow
-response = http.get("/users/42")
-
-created = http.post("/users") {
-    json: {
-        name: "Ada"
-        active: true
-        roles: ["tester"]
-    }
-}
-```
-
-An absolute `http://` or `https://` URL can be passed directly. A relative URL requires `baseUrl` in the active HTTP defaults or operation block.
-
-HTTP defaults and operation options are compiler-validated:
-
-| Option | Type | Behavior |
-| --- | --- | --- |
-| `baseUrl` | String | Prefix for relative request URLs |
-| `timeout` | Duration | Whole-request deadline; defaults to 30 seconds |
-| `headers` | Object of strings | Request headers |
-| `maxResponseBytes` | Positive integer | Bounded response body; defaults to 10 MiB |
-| `tls.verifyCertificates` | Boolean | Certificate and hostname verification; defaults to `true` |
-| `json` | JSON value | `POST` request body; sets `Content-Type` when absent |
-
-`json` is accepted by `http.post` and rejected on `http.get`. Unknown fields and statically incorrect types fail during `flow check`.
-
-An HTTP response is an object with:
-
-| Member | Type |
-| --- | --- |
-| `status` | Integer HTTP status code |
-| `headers` | Object containing response header strings |
-| `body` | Response body decoded as text |
-| `bodyBytes` | Response body as raw bytes |
-| `json` | Parsed JSON value, or `null` when the body is not valid JSON |
-| `method` | Request method string |
-| `url` | Effective URL string |
-
-HTTP status codes remain response values. Transport errors, timeouts, invalid configuration, and oversized bodies fail the flow.
-
-HTTPS uses Rustls and Mozilla WebPKI roots. Certificate and hostname validation is enabled by default. Local systems with intentionally untrusted certificates can opt out explicitly:
-
-```flow
-defaults http {
-    tls: {
-        verifyCertificates: false
-    }
-}
-```
-
-This disables server authentication and should only be used for controlled test systems.
-
-## Diagnostics
-
-Syntax, compiler, and runtime errors return a nonzero status and point to the relevant source:
-
-```text
-error: unknown option `banana`
- --> tests/fixtures/invalid-http-option.flow:3:9
-  |
-3 |         banana: true
-  |         ^^^^^^
-```
-
-Runtime errors include the Flow call stack. The CLI writes the returned value to standard output and diagnostics to standard error. HTTP results default to a concise summary; `--verbose` shows the complete formatted envelope and `--raw` retains the single-line machine-oriented representation.
-
-## Commands
-
-```text
-flow check <file>  Parse, resolve, and schema-check a Flow source file
-flow list <file>   List runnable flows and their source lines
-flow run <file> [flow-name] [--line <line>] [--arg <name=value>]... [--verbose | --raw]
-flow lsp           Start the editor language server over standard input/output
-flow --help        Show command help
-flow --version     Show the binary version
-```
-
-## VS Code support
-
-The included VS Code extension provides `.flow` file recognition, syntax highlighting, comments, brackets, indentation, folding, snippets, and compiler-backed **Run Flow** CodeLens actions above named and anonymous flows. It prompts for declared parameters and runs the selected flow with concise status output in a dedicated task terminal. Its built-in language client starts `flow lsp` to provide Ctrl+Click, Go to Definition, and Peek Definition across project files for flow calls, context uses, parameters, and local bindings. Unsaved editor text is synchronized in memory.
-
-```bash
-cargo install --path crates/flow-cli --locked
-cd util/plugin/vscode
-npm run package
-code --install-extension dist/flow-language-0.6.1.vsix --force
-```
-
-See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md).
-
-## Repository layout
-
-```text
-crates/flow-syntax       Lexer, parser, AST, and source spans
-crates/flow-capability   Capability schemas, values, and runtime interface
-crates/flow-compiler     Resolution, validation, and execution-plan lowering
-crates/flow-runtime      Async execution-plan interpreter and context scopes
-crates/flow-http         HTTP schema, pooled client, JSON, timeouts, and TLS
-crates/flow-cli          Native command-line interface and diagnostics
-examples/                Runnable Flow programs
-tests/fixtures/          Deterministic HTTP programs, invalid programs, and local TLS material
-tests/projects/          Multi-file project acceptance fixtures
-util/plugin/vscode/      Installable VS Code language extension
-util/test-server/        Local HTTP/HTTPS acceptance fixture
-docs/                    Language, runtime, and dependency documentation
-```
-
-Third-party Rust dependencies and their licences are documented in [`docs/dependencies.md`](docs/dependencies.md). The full locked graph is checked in [`docs/third-party-licenses.md`](docs/third-party-licenses.md).
+The [language proposal](docs/language-proposal.md) describes the language direction. The [technical strategy](docs/mettle-technical.md) explains the runtime and compiler approach. Third-party Rust dependencies and licences are documented in [docs/dependencies.md](docs/dependencies.md) and [docs/third-party-licenses.md](docs/third-party-licenses.md).
 
 ## Current limits
 
-- HTTP/1.1 `GET` and `POST` only
+- HTTP/1.1 `GET` and `POST` are the only protocol operations implemented today
 - no redirects or proxy discovery
-- one directly applied context per flow; contexts themselves may compose
-- no rate/concurrency workloads or load generation
+- no rate-driven workload controller or load-test reporting yet
+- the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS
 - Linux is the tested release platform
-
-These limits are explicit so examples and documentation describe the executable language as it exists now.

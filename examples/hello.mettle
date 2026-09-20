@@ -1,0 +1,10 @@
+// Mettles are reusable functions. The parameter and local binding are immutable.
+flow greeting(message) {
+    return message
+}
+
+// A runnable file has one parameterless main flow.
+flow main() {
+    result = greeting("Hello from Mettle")
+    return result
+}

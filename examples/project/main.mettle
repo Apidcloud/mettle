@@ -1,0 +1,8 @@
+use namespace users
+
+flow main() {
+    response = inspectRequest(1)
+    assert(response.status == 200)
+    assert(response.json.id == 1)
+    return response.json
+}

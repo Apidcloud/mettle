@@ -8,7 +8,7 @@ We want to explore a small programming language for concurrent I/O workflows: ma
 
 The central idea is that the language and runtime understand I/O, time, concurrency, cancellation, and measurement directly. A protocol operation such as `GET` is observable; a `flow` gives one or more operations a reusable name; a `rate` block is a scheduling policy; and a `within` block establishes a deadline. These constructs should compose without requiring users to assemble futures, executors, timers, and metric collectors themselves.
 
-This is an evolving design, not a finished language specification. **Current direction** below means a design choice carried forward from the discussion. **Proposed semantics** identifies rules that make the examples precise but still require team agreement. **Future exploration** identifies features outside the initial implementation. `Flow`, `.flow`, and the `flow` command are working names only. Reusable and anonymous flows, direct CLI flow selection and arguments, contexts, environment interpolation, HTTP defaults, GET/POST operations, JSON payloads, response member access, durations, HTTPS, deadlines, retries, and bounded parallel execution are implemented; the root README is the authority for the exact executable subset. Other examples remain proposed syntax.
+This is an evolving design, not a finished language specification. **Current direction** below means a design choice carried forward from the discussion. **Proposed semantics** identifies rules that make the examples precise but still require team agreement. **Future exploration** identifies features outside the initial implementation. `Mettle`, `.mettle`, and the `flow` command are working names only. Reusable and anonymous flows, direct CLI flow selection and arguments, contexts, environment interpolation, HTTP defaults, GET/POST operations, JSON payloads, response member access, durations, HTTPS, deadlines, retries, and bounded parallel execution are implemented; the root README is the authority for the exact executable subset. Other examples remain proposed syntax.
 
 ## Goals and design principles
 
@@ -32,7 +32,7 @@ The language should have an explicit component model before it gains more syntax
 | **Project** | Root for source discovery, extensions, environment defaults, metadata, and tests |
 | **Namespace** | Logical grouping and visibility of declarations across physical files |
 | **Context** | Reusable values and capability-specific defaults |
-| **Flow** | Named reusable function containing one or more I/O operations or calls to other flows |
+| **Mettle** | Named reusable function containing one or more I/O operations or calls to other flows |
 | **Test** | Instrumented verification scope with assertions, reporting, and pass/fail semantics |
 | **Dataset** | Reusable or externally loaded iteration input |
 | **Operation result** | Result of one primitive protocol operation |
@@ -261,19 +261,19 @@ runtime defaults
     → operation-local fields
 ```
 
-This rule needs an explicit team decision. A caller selecting a `30s` timeout would not override a callee that reapplies `api` with a `5s` timeout. Intrinsic flow contexts improve local readability, but ambient caller configuration must not become an undocumented override mechanism. Flows needing variability should expose an argument or a documented context dependency. Tooling should show the effective configuration and the origin of each field.
+This rule needs an explicit team decision. A caller selecting a `30s` timeout would not override a callee that reapplies `api` with a `5s` timeout. Intrinsic flow contexts improve local readability, but ambient caller configuration must not become an undocumented override mechanism. Mettles needing variability should expose an argument or a documented context dependency. Tooling should show the effective configuration and the origin of each field.
 
 Immutable context snapshots provide task isolation; they do not prohibit safe connection-pool reuse underneath the runtime. Resource ownership, connection reuse, cookies, authentication sessions, and SIP dialogs need their own lifetimes rather than being treated as mutable context fields.
 
 ## Projects and namespaces
 
-A project is the boundary for source discovery, namespace indexing, extensions, default environment loading, test discovery, and optional metadata. A single `.flow` file must still run without a manifest:
+A project is the boundary for source discovery, namespace indexing, extensions, default environment loading, test discovery, and optional metadata. A single `.mettle` file must still run without a manifest:
 
 ```text
 http.get("https://example.com")
 ```
 
-When a directory needs project-level behavior, it may add a small optional `flow.toml`:
+When a directory needs project-level behavior, it may add a small optional `mettle.toml`:
 
 ```toml
 name = "payments-api"
@@ -303,19 +303,19 @@ The runner executes only the selected entry point. Other files contribute declar
 
 ```text
 api-project/
-├── flow.toml
-├── core.flow
+├── mettle.toml
+├── core.mettle
 ├── flows/
-│   └── users.flow
+│   └── users.mettle
 ├── data/
 │   └── user-ids.csv
-├── main.flow
+├── main.mettle
 ├── tests/
-│   └── users-load.flow
+│   └── users-load.mettle
 └── .env
 ```
 
-`core.flow` defines configuration:
+`core.mettle` defines configuration:
 
 ```text
 namespace core
@@ -339,7 +339,7 @@ context api {
 }
 ```
 
-`flows/users.flow` defines reusable flows:
+`flows/users.mettle` defines reusable flows:
 
 ```text
 namespace users
@@ -372,7 +372,7 @@ flow createUser(user) {
 }
 ```
 
-`main.flow` belongs to the implicit global namespace and runs a functional check:
+`main.mettle` belongs to the implicit global namespace and runs a functional check:
 
 ```text
 use namespace users
@@ -389,7 +389,7 @@ assert(user.json.name == "João")
 print(user.json)
 ```
 
-`tests/users-load.flow` reuses the same flow:
+`tests/users-load.mettle` reuses the same flow:
 
 ```text
 use namespace users
@@ -409,9 +409,9 @@ test("user lookup") {
 
 This load example selects IDs from known test data. Randomly generating identifiers would change the error distribution being measured unless missing users are intentionally part of the workload.
 
-Illustrative runner commands are `flow run main.flow` and `flow run tests/users-load.flow`. There are no `import` or `export` declarations, and loading `users` does not itself perform I/O.
+Illustrative runner commands are `mettle run main.mettle` and `mettle run tests/users-load.mettle`. There are no `import` or `export` declarations, and loading `users` does not itself perform I/O.
 
-## Flows and tests
+## Mettles and tests
 
 `flow` is the single reusable executable component. It may wrap one primitive protocol operation, contain a multi-step workflow, or call other flows. This deliberately avoids separate `request` and `scenario` declaration kinds:
 
@@ -511,7 +511,7 @@ test("user lookup load") {
 
 Tests may call flows or primitive operations and may contain execution primitives. Whether assertions fail immediately or are collected until the test ends is a test-runner decision that must be consistent; collecting independent assertion failures usually produces more useful diagnostics, while a failed prerequisite may need an explicit fatal assertion.
 
-## Flows and first class JSON
+## Mettles and first class JSON
 
 A `flow` receives arguments, performs I/O or calls other flows, and returns a value the caller can inspect. A flow may contain one operation or many. Explicit returns, inferred return types, failure values, and flows with no result still need a precise specification.
 
@@ -880,7 +880,7 @@ A JVM prototype using lightweight tasks or an asynchronous networking stack is o
 An incremental implementation could proceed as follows:
 
 1. **Values, calls, and results.** Define strings, numbers, booleans, null, percentages, arrays, objects, durations, errors, and result types. Parse qualified calls, named arguments, typed objects, and trailing blocks, then execute a single `http.get(...)` operation.
-2. **Flows.** Add named flows, stable instrumentation identities, arguments, explicit return semantics, nested flow calls, and reusable multi-operation workflows.
+2. **Mettles.** Add named flows, stable instrumentation identities, arguments, explicit return semantics, nested flow calls, and reusable multi-operation workflows.
 3. **Project and configuration model.** Add optional project manifests, namespace indexing, global declarations, `env()`, contexts, capability schemas, composition, and useful diagnostics.
 4. **Datasets and test lifecycle.** Add CSV and JSON inputs, deterministic iteration, test setup, bounded cleanup, assertion collection, discovery, and CI status.
 5. **Structured execution.** Add task scopes, parallel joining, deadline propagation, cancellation, retries, and bounded resource cleanup.
@@ -893,7 +893,7 @@ Distributed workers, remote command execution, synchronization barriers, streams
 
 | Area | Question to settle |
 | --- | --- |
-| Project model | How is the project root found without a manifest, and which `flow.toml` fields are part of the first version? |
+| Project model | How is the project root found without a manifest, and which `mettle.toml` fields are part of the first version? |
 | Context evaluation | When are expressions evaluated, and can a context intentionally depend on caller-provided values? |
 | Context precedence | Do callee contexts always override caller defaults, and how does a caller intentionally customize a reusable flow? |
 | Composition | How are nested objects, repeated protocol headers, removal, and collisions handled? |

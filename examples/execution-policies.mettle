@@ -1,0 +1,19 @@
+flow probe(path) {
+    response = retry(attempts: 3, delay: 100ms) {
+        http.get("https://jsonplaceholder.typicode.com${path}")
+    }
+
+    return response.status
+}
+
+flow main() {
+    responses = within(timeout: 5s) {
+        parallel(limit: 2) {
+            probe("/posts/1")
+            probe("/users/1")
+            probe("/todos/1")
+        }
+    }
+
+    return responses
+}

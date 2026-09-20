@@ -1,10 +1,10 @@
-# Flow: one language from API scratchpad to load test
+# Mettle: one language from API scratchpad to load test
 
 Today, a quick API call lives in a `.http` file or a collection. A real workflow moves into a script. Load testing moves again into another tool. The same API logic gets rewritten at every step.
 
-Flow keeps it in one place.
+Mettle keeps it in one place.
 
-```flow
+```mettle
 // Start as simply as a .http file.
 http.get("https://api.example.com/health")
 
@@ -23,7 +23,7 @@ flow createUser() {
 
 The same flow can become an integration check or a performance scenario—without translating it into a different DSL:
 
-```flow
+```mettle
 // Proposed test/load layer.
 test("user creation stays fast") {
     load = rate(target: 1_000, period: 1s, duration: 30s) {

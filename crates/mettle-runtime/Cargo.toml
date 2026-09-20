@@ -1,0 +1,17 @@
+[package]
+name = "mettle-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mettle-capability = { path = "../mettle-capability" }
+mettle-compiler = { path = "../mettle-compiler" }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+mettle-syntax = { path = "../mettle-syntax" }
+
+[lints]
+workspace = true
