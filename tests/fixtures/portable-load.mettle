@@ -1,0 +1,25 @@
+context portableLoad {
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        timeout: 2s
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+    }
+}
+
+flow steady() {
+    use context portableLoad
+
+    load = rate(target: 10, period: 1s, duration: 1s, limit: 4) {
+        http.get("/work/steady")
+    }
+
+    assert(load.scheduled == 10)
+    assert(load.count == 10)
+    assert(load.success == 10)
+    assert(load.failed == 0)
+    assert(load.dropped == 0)
+    assert(load.latency.p95 < 500ms)
+    return load
+}

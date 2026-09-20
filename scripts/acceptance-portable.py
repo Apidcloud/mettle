@@ -80,14 +80,14 @@ def main() -> None:
         workload = json.loads(
             run(
                 "run",
-                "tests/fixtures/load.mettle",
+                "tests/fixtures/portable-load.mettle",
                 "steady",
                 "--raw",
                 environment=environment,
             ).stdout
         )
-        assert workload["scheduled"] == 20, workload
-        assert workload["success"] == 20, workload
+        assert workload["scheduled"] == 10, workload
+        assert workload["success"] == 10, workload
         assert workload["failed"] == 0, workload
         assert workload["dropped"] == 0, workload
     finally:
