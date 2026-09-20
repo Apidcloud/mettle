@@ -76,6 +76,24 @@
       "}"
     ]
   },
+  "Rate workload": {
+    "prefix": "rate",
+    "description": "Start iterations at a fixed rate with bounded admission",
+    "body": [
+      "rate(target: ${1:100}, period: ${2:1s}, duration: ${3:30s}, limit: ${4:200}) {",
+      "    ${5:http.get(\"/health\")}",
+      "}"
+    ]
+  },
+  "Fixed concurrency workload": {
+    "prefix": "concurrency",
+    "description": "Keep a fixed number of iterations active",
+    "body": [
+      "concurrency(limit: ${1:20}, duration: ${2:30s}) {",
+      "    ${3:http.get(\"/health\")}",
+      "}"
+    ]
+  },
   "HTTP context": {
     "prefix": "flowcontext",
     "description": "Declare an HTTP context",

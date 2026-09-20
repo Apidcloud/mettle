@@ -1,0 +1,57 @@
+context localLoad {
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        timeout: 2s
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+    }
+}
+
+flow steady() {
+    use context localLoad
+
+    load = rate(target: 40, period: 1s, duration: 500ms, limit: 4) {
+        http.get("/work/steady")
+    }
+
+    assert(load.scheduled == 20)
+    assert(load.count == 20)
+    assert(load.success == 20)
+    assert(load.failed == 0)
+    assert(load.dropped == 0)
+    assert(load.latency.p95 < 200ms)
+    return load
+}
+
+flow saturated() {
+    use context localLoad
+
+    load = rate(target: 200, period: 1s, duration: 500ms, limit: 2) {
+        http.get("/work/saturated")
+    }
+
+    assert(load.scheduled == 100)
+    assert(load.dropped > 0)
+    assert(load.saturated == true)
+    return load
+}
+
+flow fixedConcurrency() {
+    use context localLoad
+
+    load = concurrency(limit: 4, duration: 250ms) {
+        http.get("/work/concurrency")
+    }
+
+    assert(load.count >= 4)
+    assert(load.success == load.count)
+    assert(load.failed == 0)
+    return load
+}
+
+flow serverMaximumConcurrency() {
+    use context localLoad
+    response = http.get("/parallel-stats")
+    return response.json.maximum
+}

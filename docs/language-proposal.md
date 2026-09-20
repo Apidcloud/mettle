@@ -690,21 +690,21 @@ test("service readiness") {
 
 **Current failure policy:** a failed child cancels its active siblings, joins their cleanup, and reports the failure. Successful results are returned as an array in source order. An eventual collect-all policy could support independent checks, but should be explicit. A received HTTP status is still a value; transport failures and failed assertions are errors.
 
-`parallel(limit: 20) { ... }` provides bounded fan-out. The implemented limit and branch count are positive compile-time integer literals, with at most 1,024 branches. Omitting `limit` admits all statically declared branches. A separate `concurrency(limit: 100) { ... }` workload would express a fixed number of active iterations or users, whereas `rate(target: 100, period: 1s) { ... }` expresses how frequently new iterations start. The exact duration control for sustained concurrency workloads remains open.
+`parallel(limit: 20) { ... }` provides bounded fan-out. The implemented limit and branch count are positive compile-time integer literals, with at most 1,024 branches. Omitting `limit` admits all statically declared branches. `concurrency(limit: 100, duration: 30s) { ... }` keeps a fixed number of iterations active, whereas `rate(target: 100, period: 1s, duration: 30s, limit: 200) { ... }` controls how frequently new iterations start and separately bounds active work.
 
 ### Rate is an arrival policy
 
 ```text
-load = rate(target: 100, period: 1s, duration: 30s) {
+load = rate(target: 100, period: 1s, duration: 30s, limit: 200) {
     getUser(42)
 }
 ```
 
-The proposed interpretation is 100 **iteration starts** per one-second period for 30 seconds. If each iteration issues two sequential HTTP operations, the target is still 100 iterations per second, not 100 HTTP requests per second. The target is requested scheduling behavior, not a throughput guarantee.
+The implemented interpretation is 100 **iteration starts** per one-second period for 30 seconds. If each iteration issues two sequential HTTP operations, the target is still 100 iterations per second, not 100 HTTP requests per second. The target is requested scheduling behavior, not a throughput guarantee.
 
 A rate workload requires sufficient concurrency to sustain its arrival target while I/O is pending. A fixed-concurrency workload instead slows its completion rate as response times grow. Rate and concurrency limits must therefore remain separate controls.
 
-The runtime needs a bounded overload policy: report delayed or dropped starts rather than allowing unbounded queues or silently redefining the requested workload. Measure achieved rate and scheduling delay. At the end of the scheduling window, stop launching iterations and drain active work under a documented deadline. Report drain time separately from the arrival window. Exact saturation and draining defaults remain design decisions.
+The runtime uses bounded admission. When `limit` active iterations are already running, the due start is counted as dropped rather than queued. Results report achieved rate, scheduling delay, dropped starts, and saturation. At the end of the scheduling window, the runtime stops launching iterations and drains active work for at most 30 seconds.
 
 Ramping can remain inside the same call grammar, for example `rate(target: ramp(from: 100, to: 1_000, over: 30s), period: 1s, duration: 1m) { ... }`. The exact ramp value type is a future extension.
 
@@ -756,19 +756,23 @@ test("lookup comparison") {
 
 `load` is a normal binding in the enclosing test. Its result is finalized when the workload, including its defined drain phase, completes. Subsequent workloads do not change it.
 
-The following is a **proposed result contract**, extending the explicit-result direction:
+The implemented local workload result contract is:
 
-| Field | Proposed meaning |
+| Field | Meaning |
 | --- | --- |
 | `load.latency.p95` | 95th percentile of iteration elapsed time from actual start to terminal outcome |
-| `load.errors` | Failed iteration count divided by completed iteration count; comparable to `1%` |
+| `load.errors` | Failed iteration count divided by completed iteration count; comparable to `0.01` |
 | `load.count` | Number of completed workload iterations |
-| `load.attempts` | Number of protocol attempts, including application retry attempts |
 | `load.success` | Number of successful iterations |
+| `load.failed` | Number of failed iterations |
+| `load.dropped` | Starts rejected because the active limit was full |
+| `load.saturated` | Whether starts were dropped or the drain deadline expired |
 | `load.rate.target` | Requested iteration starts per configured period |
 | `load.rate.period` | Period over which the target number of starts is scheduled |
 | `load.rate.actual` | Actual iteration starts per configured period during the scheduling window |
 | `load.duration` | Total workload elapsed time, including draining |
+
+`latency` and `schedulingDelay` expose `min`, `mean`, `max`, `p50`, `p90`, `p95`, and `p99`. Per-flow and per-operation breakdowns remain planned work.
 
 Multi-operation flows make the distinction important. Iteration latency includes the complete flow, including sequential operations, nested flow calls, parallel joins, and retry delays. It should not silently become a percentile over unrelated individual operations. Because flows have stable names, detailed measurements can be grouped by flow declaration:
 

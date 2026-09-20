@@ -296,6 +296,9 @@ fn concise_result(value: &Value) -> String {
     let Value::Object(fields) = value else {
         return pretty_result(value);
     };
+    if let Some(summary) = workload_summary(fields) {
+        return summary;
+    }
     let (Some(Value::String(method)), Some(Value::String(url)), Some(Value::Integer(status))) = (
         fields.get("method"),
         fields.get("url"),
@@ -305,6 +308,71 @@ fn concise_result(value: &Value) -> String {
     };
 
     format!("{method} {url} → {status}")
+}
+
+fn workload_summary(fields: &Object) -> Option<String> {
+    let Value::Integer(count) = fields.get("count")? else {
+        return None;
+    };
+    let Value::Integer(success) = fields.get("success")? else {
+        return None;
+    };
+    let Value::Integer(failed) = fields.get("failed")? else {
+        return None;
+    };
+    let Value::Integer(dropped) = fields.get("dropped")? else {
+        return None;
+    };
+    let Value::Object(latency) = fields.get("latency")? else {
+        return None;
+    };
+    let Value::Duration(p95) = latency.get("p95")? else {
+        return None;
+    };
+    let policy = if let Some(Value::Object(rate)) = fields.get("rate") {
+        let Value::Integer(target) = rate.get("target")? else {
+            return None;
+        };
+        let Value::Duration(period) = rate.get("period")? else {
+            return None;
+        };
+        format!("rate {target}/{}", display_duration(*period))
+    } else if let Some(Value::Object(concurrency)) = fields.get("concurrency") {
+        let Value::Integer(limit) = concurrency.get("limit")? else {
+            return None;
+        };
+        format!("concurrency {limit}")
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{policy} | {count} completed, {success} succeeded, {failed} failed, {dropped} dropped | p95 {}",
+        display_duration(*p95)
+    ))
+}
+
+fn display_duration(duration: std::time::Duration) -> String {
+    if duration >= std::time::Duration::from_secs(1) {
+        if duration.as_nanos().is_multiple_of(1_000_000_000) {
+            format!("{}s", duration.as_secs())
+        } else {
+            format!("{:.2}s", duration.as_secs_f64())
+        }
+    } else if duration >= std::time::Duration::from_millis(1) {
+        if duration.as_nanos().is_multiple_of(1_000_000) {
+            format!("{}ms", duration.as_millis())
+        } else {
+            format!("{:.2}ms", duration.as_secs_f64() * 1_000.0)
+        }
+    } else if duration >= std::time::Duration::from_micros(1) {
+        if duration.as_nanos().is_multiple_of(1_000) {
+            format!("{}us", duration.as_micros())
+        } else {
+            format!("{:.2}us", duration.as_secs_f64() * 1_000_000.0)
+        }
+    } else {
+        format!("{}ns", duration.as_nanos())
+    }
 }
 
 fn pretty_result(value: &Value) -> String {
@@ -540,7 +608,9 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
         | ExpressionKind::Binary { .. }
         | ExpressionKind::Within { .. }
         | ExpressionKind::Retry { .. }
-        | ExpressionKind::Parallel { .. } => Err("flow arguments must be literal values"),
+        | ExpressionKind::Parallel { .. }
+        | ExpressionKind::Rate { .. }
+        | ExpressionKind::Concurrency { .. } => Err("flow arguments must be literal values"),
     }
 }
 
@@ -765,10 +835,11 @@ enum CliError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use mettle_capability::{Object, Value};
 
-    use super::pretty_result;
+    use super::{concise_result, pretty_result};
 
     #[test]
     fn pretty_http_result_summarizes_duplicate_and_binary_bodies() {
@@ -792,5 +863,34 @@ mod tests {
         assert!(output.contains("<3 binary bytes>"));
         assert!(output.contains("\"active\": true"));
         assert!(!output.contains("[\n    1,"));
+    }
+
+    #[test]
+    fn concise_load_result_reports_policy_outcomes_and_latency() {
+        let value = Value::Object(Object::from([
+            ("count".to_owned(), Value::Integer(100)),
+            ("success".to_owned(), Value::Integer(98)),
+            ("failed".to_owned(), Value::Integer(2)),
+            ("dropped".to_owned(), Value::Integer(5)),
+            (
+                "latency".to_owned(),
+                Value::Object(Object::from([(
+                    "p95".to_owned(),
+                    Value::Duration(Duration::from_micros(42_500)),
+                )])),
+            ),
+            (
+                "rate".to_owned(),
+                Value::Object(Object::from([
+                    ("target".to_owned(), Value::Integer(100)),
+                    ("period".to_owned(), Value::Duration(Duration::from_secs(1))),
+                ])),
+            ),
+        ]));
+
+        assert_eq!(
+            concise_result(&value),
+            "rate 100/1s | 100 completed, 98 succeeded, 2 failed, 5 dropped | p95 42.50ms"
+        );
     }
 }

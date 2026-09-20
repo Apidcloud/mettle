@@ -195,7 +195,7 @@ The runtime should distinguish at least:
 
 A statement such as `load = rate(...) { ... }` returns a scoped result. Assertions such as `assert load.latency.p95 < 200ms` read that result rather than ambient global metrics.
 
-Latency histogram representation and any supporting crate will be selected through accuracy, memory, throughput, maintenance, and licence evaluation. No metrics crate is selected yet.
+Latency and scheduling delay use an internal fixed-size logarithmic histogram with 64 sub-buckets per power-of-two range. Each workload owns a bounded 4,097-counter distribution regardless of iteration count, with exact minimum, maximum, count, and sum alongside approximate percentiles. This avoids a metrics dependency and unbounded sample retention. The approximation and bucket layout remain internal until the report contract is stabilized.
 
 ### 4.7 Diagnostics
 
@@ -409,6 +409,8 @@ and verify sibling cleanup after a branch failure.
 
 ### Milestone 5: local load engine
 
+Status: complete.
+
 Deliver:
 
 - rate and concurrency policies;
@@ -420,6 +422,12 @@ Deliver:
 - connection-pool and scheduler tuning based on profiles.
 
 User acceptance runs a documented local load test against the fixture at several rates, verifies the number of admitted/completed iterations, checks a percentile assertion, and observes bounded memory when the requested rate exceeds capacity. Benchmark output records CPU, memory, OS, Mettle revision, fixture configuration, and command line.
+
+`rate(target, period, duration, limit)` schedules iteration starts across a fixed arrival window. Its active set never exceeds `limit`; starts that arrive while the set is full are counted as dropped rather than queued. `concurrency(limit, duration)` maintains a fixed active set until its scheduling window closes. Both policies then drain owned iterations for at most 30 seconds and report a drain timeout as saturation.
+
+The scoped result includes completed, successful, failed, started, and dropped counts; error ratio; total elapsed time; saturation state; latency and scheduling-delay distributions; and policy-specific configuration. Rate results additionally report planned starts and achieved start rate. Runtime errors inside a workload become failed iteration outcomes, so assertions inside a measured flow contribute to the workload error ratio without aborting metric finalization.
+
+Run `./scripts/acceptance-load.sh` to exercise steady-rate scheduling, overload drops, percentile assertions, fixed concurrency, and server-observed concurrency bounds against the local fixture.
 
 ### Milestone 6: MVP refinement and release readiness
 

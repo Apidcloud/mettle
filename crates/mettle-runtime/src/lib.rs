@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fmt};
 
 use mettle_capability::{Capability, Object, Span, Value};
@@ -14,11 +14,18 @@ use mettle_compiler::{
 };
 
 const MAX_CALL_DEPTH: usize = 1_024;
+const WORKLOAD_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+const HISTOGRAM_SUB_BUCKETS: usize = 64;
+const HISTOGRAM_BUCKETS: usize = 1 + 64 * HISTOGRAM_SUB_BUCKETS;
 
 pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 pub trait Clock: Send + Sync {
     fn sleep(&self, duration: Duration) -> ClockFuture;
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -480,6 +487,34 @@ impl Executor<'_> {
                     self.evaluate_parallel(branches, *limit, locals, context)
                         .await
                 }
+                PlanExpressionKind::Rate {
+                    target,
+                    period,
+                    duration,
+                    limit,
+                    body,
+                } => {
+                    self.evaluate_rate(
+                        body,
+                        RateSettings {
+                            target: *target,
+                            period: *period,
+                            duration: *duration,
+                            limit: *limit,
+                        },
+                        locals,
+                        context,
+                    )
+                    .await
+                }
+                PlanExpressionKind::Concurrency {
+                    limit,
+                    duration,
+                    body,
+                } => {
+                    self.evaluate_concurrency(body, *limit, *duration, locals, context)
+                        .await
+                }
             }
         })
     }
@@ -526,6 +561,206 @@ impl Executor<'_> {
         ))
     }
 
+    async fn evaluate_rate(
+        &mut self,
+        body: &PlanExpression,
+        settings: RateSettings,
+        locals: &[Option<Value>],
+        context: &ActiveContext,
+    ) -> Result<Value, RuntimeError> {
+        let planned = usize::try_from(
+            settings.duration.as_nanos() * settings.target as u128 / settings.period.as_nanos(),
+        )
+        .expect("compiler bounds rate iteration count");
+        let window_start = self.clock.now();
+        let mut metrics = WorkloadMetrics::new(window_start);
+        let mut active = Vec::with_capacity(settings.limit.min(planned));
+
+        for index in 0..planned {
+            let offset_nanos = settings.period.as_nanos() * index as u128 / settings.target as u128;
+            let offset = Duration::from_nanos(
+                u64::try_from(offset_nanos).expect("rate offset is within configured duration"),
+            );
+            let intended = window_start + offset;
+            self.wait_until(intended, &mut active, &mut metrics).await;
+            self.collect_ready(&mut active, &mut metrics).await;
+            if index.is_multiple_of(1_024) {
+                cooperative_yield().await;
+            }
+
+            if active.len() == settings.limit {
+                metrics.dropped += 1;
+                continue;
+            }
+            metrics.scheduling_delay.record(
+                self.clock
+                    .now()
+                    .checked_duration_since(intended)
+                    .unwrap_or_default(),
+            );
+            active.push(self.start_workload_iteration(body, locals, context));
+            metrics.started += 1;
+        }
+
+        let drain_timed_out = self.drain_workload(&mut active, &mut metrics).await;
+        Ok(metrics.into_value(
+            WorkloadPolicy::Rate {
+                target: settings.target,
+                period: settings.period,
+                limit: settings.limit,
+                window: settings.duration,
+                planned,
+            },
+            self.clock.now(),
+            drain_timed_out,
+        ))
+    }
+
+    async fn evaluate_concurrency(
+        &mut self,
+        body: &PlanExpression,
+        limit: usize,
+        duration: Duration,
+        locals: &[Option<Value>],
+        context: &ActiveContext,
+    ) -> Result<Value, RuntimeError> {
+        let window_start = self.clock.now();
+        let deadline = window_start + duration;
+        let mut metrics = WorkloadMetrics::new(window_start);
+        let mut active = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            active.push(self.start_workload_iteration(body, locals, context));
+            metrics.started += 1;
+        }
+
+        loop {
+            if self.clock.now() >= deadline {
+                break;
+            }
+            let completed = self
+                .wait_until_or_complete(deadline, &mut active, &mut metrics)
+                .await;
+            if !completed || self.clock.now() >= deadline {
+                break;
+            }
+            active.push(self.start_workload_iteration(body, locals, context));
+            metrics.started += 1;
+            if metrics.started.is_multiple_of(64) {
+                cooperative_yield().await;
+            }
+        }
+
+        let drain_timed_out = self.drain_workload(&mut active, &mut metrics).await;
+        Ok(metrics.into_value(
+            WorkloadPolicy::Concurrency { limit },
+            self.clock.now(),
+            drain_timed_out,
+        ))
+    }
+
+    fn start_workload_iteration<'b>(
+        &'b self,
+        body: &'b PlanExpression,
+        locals: &'b [Option<Value>],
+        context: &'b ActiveContext,
+    ) -> ActiveIteration<'b> {
+        let mut executor = self.clone();
+        let locals = locals.to_vec();
+        let context = context.clone();
+        let started = self.clock.now();
+        ActiveIteration {
+            started,
+            future: Box::pin(async move { executor.evaluate(body, &locals, &context).await }),
+        }
+    }
+
+    async fn wait_until_or_complete(
+        &self,
+        deadline: Instant,
+        active: &mut Vec<ActiveIteration<'_>>,
+        metrics: &mut WorkloadMetrics,
+    ) -> bool {
+        let now = self.clock.now();
+        if now >= deadline {
+            return false;
+        }
+        let mut timer = self.clock.sleep(deadline.duration_since(now));
+        let event = std::future::poll_fn(|task| {
+            for (position, iteration) in active.iter_mut().enumerate() {
+                if let Poll::Ready(result) = iteration.future.as_mut().poll(task) {
+                    return Poll::Ready(WorkloadEvent::Completed(position, result));
+                }
+            }
+            if timer.as_mut().poll(task).is_ready() {
+                return Poll::Ready(WorkloadEvent::Deadline);
+            }
+            Poll::Pending
+        })
+        .await;
+        match event {
+            WorkloadEvent::Completed(position, result) => {
+                let iteration = active.swap_remove(position);
+                metrics.record_completion(iteration.started, self.clock.now(), result.is_ok());
+                true
+            }
+            WorkloadEvent::Deadline => false,
+        }
+    }
+
+    async fn wait_until(
+        &self,
+        deadline: Instant,
+        active: &mut Vec<ActiveIteration<'_>>,
+        metrics: &mut WorkloadMetrics,
+    ) {
+        while self.clock.now() < deadline {
+            if !self.wait_until_or_complete(deadline, active, metrics).await {
+                break;
+            }
+        }
+    }
+
+    async fn collect_ready(
+        &self,
+        active: &mut Vec<ActiveIteration<'_>>,
+        metrics: &mut WorkloadMetrics,
+    ) {
+        loop {
+            let ready = std::future::poll_fn(|task| {
+                for (position, iteration) in active.iter_mut().enumerate() {
+                    if let Poll::Ready(result) = iteration.future.as_mut().poll(task) {
+                        return Poll::Ready(Some((position, result)));
+                    }
+                }
+                Poll::Ready(None)
+            })
+            .await;
+            let Some((position, result)) = ready else {
+                break;
+            };
+            let iteration = active.swap_remove(position);
+            metrics.record_completion(iteration.started, self.clock.now(), result.is_ok());
+        }
+    }
+
+    async fn drain_workload(
+        &self,
+        active: &mut Vec<ActiveIteration<'_>>,
+        metrics: &mut WorkloadMetrics,
+    ) -> bool {
+        let deadline = self.clock.now() + WORKLOAD_DRAIN_TIMEOUT;
+        while !active.is_empty() {
+            if !self.wait_until_or_complete(deadline, active, metrics).await {
+                let now = self.clock.now();
+                for iteration in active.drain(..) {
+                    metrics.record_completion(iteration.started, now, false);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     async fn evaluate_fields(
         &mut self,
         fields: &[PlanField],
@@ -551,6 +786,267 @@ impl Executor<'_> {
             flow_stack: self.flow_stack.clone(),
         }
     }
+}
+
+struct ActiveIteration<'a> {
+    started: Instant,
+    future: Pin<Box<dyn Future<Output = Result<Value, RuntimeError>> + Send + 'a>>,
+}
+
+enum WorkloadEvent {
+    Completed(usize, Result<Value, RuntimeError>),
+    Deadline,
+}
+
+#[derive(Clone, Copy)]
+struct RateSettings {
+    target: usize,
+    period: Duration,
+    duration: Duration,
+    limit: usize,
+}
+
+#[derive(Clone, Copy)]
+enum WorkloadPolicy {
+    Rate {
+        target: usize,
+        period: Duration,
+        limit: usize,
+        window: Duration,
+        planned: usize,
+    },
+    Concurrency {
+        limit: usize,
+    },
+}
+
+struct WorkloadMetrics {
+    started_at: Instant,
+    started: usize,
+    success: usize,
+    failed: usize,
+    dropped: usize,
+    latency: DurationHistogram,
+    scheduling_delay: DurationHistogram,
+}
+
+impl WorkloadMetrics {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            started: 0,
+            success: 0,
+            failed: 0,
+            dropped: 0,
+            latency: DurationHistogram::default(),
+            scheduling_delay: DurationHistogram::default(),
+        }
+    }
+
+    fn record_completion(&mut self, started: Instant, completed: Instant, succeeded: bool) {
+        self.latency.record(
+            completed
+                .checked_duration_since(started)
+                .unwrap_or_default(),
+        );
+        if succeeded {
+            self.success += 1;
+        } else {
+            self.failed += 1;
+        }
+    }
+
+    fn into_value(
+        self,
+        policy: WorkloadPolicy,
+        finished_at: Instant,
+        drain_timed_out: bool,
+    ) -> Value {
+        let completed = self.success + self.failed;
+        let errors = if completed == 0 {
+            0.0
+        } else {
+            count_f64(self.failed) / count_f64(completed)
+        };
+        let mut result = Object::from([
+            ("count".to_owned(), count_value(completed)),
+            ("started".to_owned(), count_value(self.started)),
+            ("success".to_owned(), count_value(self.success)),
+            ("failed".to_owned(), count_value(self.failed)),
+            ("errors".to_owned(), Value::Float(errors)),
+            ("dropped".to_owned(), count_value(self.dropped)),
+            (
+                "saturated".to_owned(),
+                Value::Boolean(self.dropped > 0 || drain_timed_out),
+            ),
+            ("drainTimedOut".to_owned(), Value::Boolean(drain_timed_out)),
+            ("latency".to_owned(), self.latency.into_value()),
+            (
+                "schedulingDelay".to_owned(),
+                self.scheduling_delay.into_value(),
+            ),
+            (
+                "duration".to_owned(),
+                Value::Duration(
+                    finished_at
+                        .checked_duration_since(self.started_at)
+                        .unwrap_or_default(),
+                ),
+            ),
+        ]);
+
+        match policy {
+            WorkloadPolicy::Rate {
+                target,
+                period,
+                limit,
+                window,
+                planned,
+            } => {
+                let actual = count_f64(self.started) * period.as_secs_f64() / window.as_secs_f64();
+                result.insert("scheduled".to_owned(), count_value(planned));
+                result.insert(
+                    "rate".to_owned(),
+                    Value::Object(Object::from([
+                        ("target".to_owned(), count_value(target)),
+                        ("period".to_owned(), Value::Duration(period)),
+                        ("actual".to_owned(), Value::Float(actual)),
+                        ("limit".to_owned(), count_value(limit)),
+                    ])),
+                );
+            }
+            WorkloadPolicy::Concurrency { limit } => {
+                result.insert(
+                    "concurrency".to_owned(),
+                    Value::Object(Object::from([("limit".to_owned(), count_value(limit))])),
+                );
+            }
+        }
+        Value::Object(result)
+    }
+}
+
+struct DurationHistogram {
+    buckets: Box<[u64]>,
+    count: u64,
+    sum_nanos: u128,
+    min: Option<Duration>,
+    max: Duration,
+}
+
+impl Default for DurationHistogram {
+    fn default() -> Self {
+        Self {
+            buckets: vec![0; HISTOGRAM_BUCKETS].into_boxed_slice(),
+            count: 0,
+            sum_nanos: 0,
+            min: None,
+            max: Duration::ZERO,
+        }
+    }
+}
+
+impl DurationHistogram {
+    fn record(&mut self, duration: Duration) {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        self.buckets[histogram_index(nanos)] += 1;
+        self.count += 1;
+        self.sum_nanos += u128::from(nanos);
+        self.min = Some(self.min.map_or(duration, |current| current.min(duration)));
+        self.max = self.max.max(duration);
+    }
+
+    fn percentile(&self, percentile: u64) -> Duration {
+        if self.count == 0 {
+            return Duration::ZERO;
+        }
+        let rank = self.count.saturating_mul(percentile).div_ceil(100);
+        let mut seen = 0;
+        for (index, count) in self.buckets.iter().enumerate() {
+            seen += count;
+            if seen >= rank {
+                return Duration::from_nanos(histogram_upper_bound(index));
+            }
+        }
+        self.max
+    }
+
+    fn into_value(self) -> Value {
+        let mean = if self.count == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos(
+                u64::try_from(self.sum_nanos / u128::from(self.count)).unwrap_or(u64::MAX),
+            )
+        };
+        Value::Object(Object::from([
+            (
+                "min".to_owned(),
+                Value::Duration(self.min.unwrap_or_default()),
+            ),
+            ("mean".to_owned(), Value::Duration(mean)),
+            ("max".to_owned(), Value::Duration(self.max)),
+            ("p50".to_owned(), Value::Duration(self.percentile(50))),
+            ("p90".to_owned(), Value::Duration(self.percentile(90))),
+            ("p95".to_owned(), Value::Duration(self.percentile(95))),
+            ("p99".to_owned(), Value::Duration(self.percentile(99))),
+        ]))
+    }
+}
+
+fn histogram_index(nanos: u64) -> usize {
+    if nanos == 0 {
+        return 0;
+    }
+    let exponent = 63 - nanos.leading_zeros() as usize;
+    let base = 1_u64 << exponent;
+    let sub_bucket = usize::try_from(
+        (u128::from(nanos - base) * HISTOGRAM_SUB_BUCKETS as u128) / u128::from(base),
+    )
+    .expect("histogram sub-bucket fits usize");
+    1 + exponent * HISTOGRAM_SUB_BUCKETS + sub_bucket.min(HISTOGRAM_SUB_BUCKETS - 1)
+}
+
+fn histogram_upper_bound(index: usize) -> u64 {
+    if index == 0 {
+        return 0;
+    }
+    let index = index - 1;
+    let exponent = index / HISTOGRAM_SUB_BUCKETS;
+    let sub_bucket = index % HISTOGRAM_SUB_BUCKETS;
+    let base = 1_u64 << exponent;
+    let width = u128::from(base)
+        .saturating_mul((sub_bucket + 1) as u128)
+        .div_ceil(HISTOGRAM_SUB_BUCKETS as u128);
+    u64::try_from(u128::from(base).saturating_add(width).saturating_sub(1)).unwrap_or(u64::MAX)
+}
+
+fn count_value(value: usize) -> Value {
+    Value::Integer(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+fn count_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+async fn cooperative_yield() {
+    struct YieldOnce(bool);
+
+    impl Future for YieldOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, task: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+            if self.0 {
+                Poll::Ready(())
+            } else {
+                self.0 = true;
+                task.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    YieldOnce(false).await;
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -635,6 +1131,14 @@ mod tests {
         fn sleep(&self, _duration: Duration) -> ClockFuture {
             self.sleeps.fetch_add(1, Ordering::SeqCst);
             Box::pin(std::future::ready(()))
+        }
+    }
+
+    struct PendingClock;
+
+    impl Clock for PendingClock {
+        fn sleep(&self, _duration: Duration) -> ClockFuture {
+            Box::pin(std::future::pending())
         }
     }
 
@@ -903,11 +1407,111 @@ mod tests {
         .expect("source should parse");
         let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
         let dropped = Arc::new(AtomicBool::new(false));
-        let runtime = Runtime::new(vec![Arc::new(PendingCapability {
-            dropped: Arc::clone(&dropped),
-        })]);
+        let runtime = Runtime::with_clock(
+            vec![Arc::new(PendingCapability {
+                dropped: Arc::clone(&dropped),
+            })],
+            Arc::new(PendingClock),
+        );
         let error = block_on(runtime.execute(&plan)).expect_err("one branch should fail");
         assert!(error.message.contains("required environment variable"));
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rate_returns_scoped_metrics_and_supports_assertions() {
+        let syntax = parse(
+            r"
+            flow main() {
+                load = rate(target: 4, period: 1s, duration: 1s, limit: 2) { true }
+                assert(load.count == 4)
+                assert(load.success == 4)
+                assert(load.failed == 0)
+                assert(load.dropped == 0)
+                assert(load.latency.p95 >= 0ms)
+                return load
+            }
+            ",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let clock = Arc::new(ImmediateClock::default());
+        let result = block_on(Runtime::with_clock(Vec::new(), clock).execute(&plan))
+            .expect("rate workload should complete");
+        let Value::Object(result) = result else {
+            panic!("rate should return an object");
+        };
+        assert_eq!(result.get("count"), Some(&Value::Integer(4)));
+        assert!(matches!(result.get("latency"), Some(Value::Object(_))));
+        assert!(matches!(result.get("rate"), Some(Value::Object(_))));
+    }
+
+    #[test]
+    fn rate_drops_starts_instead_of_growing_an_overload_queue() {
+        let syntax = parse(
+            "flow main() = rate(target: 4, period: 1s, duration: 1s, limit: 2) { probe.wait() }",
+        )
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(ImmediateClock::default());
+        let result = block_on(
+            Runtime::with_clock(
+                vec![Arc::new(PendingCapability {
+                    dropped: Arc::clone(&dropped),
+                })],
+                clock,
+            )
+            .execute(&plan),
+        )
+        .expect("saturated rate workload should return metrics");
+        let Value::Object(result) = result else {
+            panic!("rate should return an object");
+        };
+        assert_eq!(result.get("started"), Some(&Value::Integer(2)));
+        assert_eq!(result.get("dropped"), Some(&Value::Integer(2)));
+        assert_eq!(result.get("saturated"), Some(&Value::Boolean(true)));
+        assert_eq!(result.get("drainTimedOut"), Some(&Value::Boolean(true)));
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn cancelling_a_workload_drops_its_active_iterations() {
+        let syntax = parse(
+            "flow main() = rate(target: 1, period: 1s, duration: 1s, limit: 1) { probe.wait() }",
+        )
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let runtime = Runtime::with_clock(
+            vec![Arc::new(PendingCapability {
+                dropped: Arc::clone(&dropped),
+            })],
+            Arc::new(PendingClock),
+        );
+        let mut execution = Box::pin(runtime.execute(&plan));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(execution.as_mut().poll(&mut context).is_pending());
+        assert!(execution.as_mut().poll(&mut context).is_pending());
+        drop(execution);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn concurrency_owns_and_drains_its_fixed_active_set() {
+        let syntax = parse("flow main() = concurrency(limit: 3, duration: 1s) { probe.wait() }")
+            .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let capability = Arc::new(ProbeCapability::default());
+        let clock = Arc::new(ImmediateClock::default());
+        let result = block_on(Runtime::with_clock(vec![capability.clone()], clock).execute(&plan))
+            .expect("concurrency workload should complete");
+        let Value::Object(result) = result else {
+            panic!("concurrency should return an object");
+        };
+        assert_eq!(result.get("count"), Some(&Value::Integer(3)));
+        assert_eq!(capability.maximum.load(Ordering::SeqCst), 3);
+        assert_eq!(capability.active.load(Ordering::SeqCst), 0);
     }
 }

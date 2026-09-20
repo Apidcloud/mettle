@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.8.0
+
+- Highlight and provide snippets for `rate` and fixed `concurrency` workloads.
+- Support the local load engine and scoped workload result syntax.
+
 ## 0.7.0
 
 - Rename the extension, language mode, CLI configuration, and VSIX package to Mettle.

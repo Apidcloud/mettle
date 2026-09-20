@@ -124,7 +124,7 @@
       "patterns": [
         {
           "name": "keyword.control.mettle",
-          "match": "\\b(?:return|assert|parallel|race|rate|repeat|retry|within)\\b"
+          "match": "\\b(?:return|assert|concurrency|parallel|race|rate|repeat|retry|within)\\b"
         },
         {
           "name": "storage.type.mettle",

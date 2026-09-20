@@ -186,6 +186,30 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
                 set_expression_source(branch, source);
             }
         }
+        ExpressionKind::Rate {
+            target,
+            period,
+            duration,
+            limit,
+            body,
+        } => {
+            set_expression_source(target, source);
+            set_expression_source(period, source);
+            set_expression_source(duration, source);
+            if let Some(limit) = limit {
+                set_expression_source(limit, source);
+            }
+            set_expression_source(body, source);
+        }
+        ExpressionKind::Concurrency {
+            limit,
+            duration,
+            body,
+        } => {
+            set_expression_source(limit, source);
+            set_expression_source(duration, source);
+            set_expression_source(body, source);
+        }
         ExpressionKind::Null
         | ExpressionKind::Boolean(_)
         | ExpressionKind::Integer(_)
@@ -315,6 +339,18 @@ pub enum ExpressionKind {
         limit: Option<Box<Expression>>,
         branches: Vec<Expression>,
     },
+    Rate {
+        target: Box<Expression>,
+        period: Box<Expression>,
+        duration: Box<Expression>,
+        limit: Option<Box<Expression>>,
+        body: Box<Expression>,
+    },
+    Concurrency {
+        limit: Box<Expression>,
+        duration: Box<Expression>,
+        body: Box<Expression>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,6 +404,8 @@ enum TokenKind {
     Within,
     Retry,
     Parallel,
+    Rate,
+    Concurrency,
     True,
     False,
     Null,
@@ -515,6 +553,8 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
         "within" => TokenKind::Within,
         "retry" => TokenKind::Retry,
         "parallel" => TokenKind::Parallel,
+        "rate" => TokenKind::Rate,
+        "concurrency" => TokenKind::Concurrency,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
@@ -931,6 +971,8 @@ impl Parser {
             TokenKind::Within => return self.parse_within(token.span),
             TokenKind::Retry => return self.parse_retry(token.span),
             TokenKind::Parallel => return self.parse_parallel(token.span),
+            TokenKind::Rate => return self.parse_rate(token.span),
+            TokenKind::Concurrency => return self.parse_concurrency(token.span),
             TokenKind::Null => literal(ExpressionKind::Null, token.span),
             TokenKind::True => literal(ExpressionKind::Boolean(true), token.span),
             TokenKind::False => literal(ExpressionKind::Boolean(false), token.span),
@@ -1083,6 +1125,59 @@ impl Parser {
         })
     }
 
+    fn parse_rate(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        self.take_named_option("target")?;
+        let target = self.parse_expression()?;
+        self.take(&TokenKind::Comma)?;
+        self.take_named_option("period")?;
+        let period = self.parse_expression()?;
+        self.take(&TokenKind::Comma)?;
+        self.take_named_option("duration")?;
+        let duration = self.parse_expression()?;
+        let limit = if self.take_if(&TokenKind::Comma) {
+            self.take_named_option("limit")?;
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        self.take(&TokenKind::RightParen)?;
+        self.take(&TokenKind::LeftBrace)?;
+        let body = self.parse_expression()?;
+        let end = self.take(&TokenKind::RightBrace)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Rate {
+                target: Box::new(target),
+                period: Box::new(period),
+                duration: Box::new(duration),
+                limit,
+                body: Box::new(body),
+            },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_concurrency(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        self.take_named_option("limit")?;
+        let limit = self.parse_expression()?;
+        self.take(&TokenKind::Comma)?;
+        self.take_named_option("duration")?;
+        let duration = self.parse_expression()?;
+        self.take(&TokenKind::RightParen)?;
+        self.take(&TokenKind::LeftBrace)?;
+        let body = self.parse_expression()?;
+        let end = self.take(&TokenKind::RightBrace)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Concurrency {
+                limit: Box::new(limit),
+                duration: Box::new(duration),
+                body: Box::new(body),
+            },
+            span: start.join(end),
+        })
+    }
+
     fn take_named_option(&mut self, expected: &'static str) -> Result<(), SyntaxError> {
         let name = self.take_identifier("a policy option name")?;
         if name.value != expected {
@@ -1228,6 +1323,8 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::Within => "`within`",
         TokenKind::Retry => "`retry`",
         TokenKind::Parallel => "`parallel`",
+        TokenKind::Rate => "`rate`",
+        TokenKind::Concurrency => "`concurrency`",
         TokenKind::True => "`true`",
         TokenKind::False => "`false`",
         TokenKind::Null => "`null`",
@@ -1325,6 +1422,36 @@ mod tests {
         };
         assert!(limit.is_some());
         assert_eq!(branches.len(), 3);
+    }
+
+    #[test]
+    fn parses_load_execution_policies() {
+        let program = parse(
+            r"
+            flow probe() = true
+            flow main() {
+                load = rate(target: 100, period: 1s, duration: 10s, limit: 20) {
+                    probe()
+                }
+                return concurrency(limit: 5, duration: 2s) { probe() }
+            }
+            ",
+        )
+        .expect("load policies should parse");
+        let Statement::Bind { expression, .. } = &program.flows[1].body[0] else {
+            panic!("expected rate binding");
+        };
+        let ExpressionKind::Rate { limit, .. } = &expression.kind else {
+            panic!("expected rate");
+        };
+        assert!(limit.is_some());
+        let Statement::Return { expression, .. } = &program.flows[1].body[1] else {
+            panic!("expected concurrency return");
+        };
+        assert!(matches!(
+            expression.kind,
+            ExpressionKind::Concurrency { .. }
+        ));
     }
 
     #[test]

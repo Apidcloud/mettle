@@ -9,7 +9,7 @@ Basic language support for `.mettle` source files.
 - `//` comment toggling;
 - matching and automatic closing of braces, brackets, parentheses, and strings;
 - indentation and region folding;
-- snippets for named flows, anonymous flows, namespaces, assertions, contexts, structured execution policies, HTTP GET, and HTTP POST;
+- snippets for named flows, anonymous flows, namespaces, assertions, contexts, structured and load execution policies, HTTP GET, and HTTP POST;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - prompts for named flow parameters and execution in a dedicated task terminal.
 - Ctrl+Click, **Go to Definition**, and **Peek Definition** for flow calls,
@@ -65,7 +65,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/mettle-language-0.7.0.vsix
+dist/mettle-language-0.8.0.vsix
 ```
 
 ## Install
@@ -73,7 +73,7 @@ dist/mettle-language-0.7.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/mettle-language-0.7.0.vsix --force
+code --install-extension dist/mettle-language-0.8.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

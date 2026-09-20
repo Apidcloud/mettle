@@ -44,7 +44,7 @@ A Mettle project is made from a few general concepts:
 - **capabilities** provide protocol operations such as `http.get()` and the planned `sip.options()`;
 - **contexts** compose environment values and capability defaults;
 - **execution policies** control deadlines, retries, parallelism, concurrency, and rate;
-- **tests and results** make assertions and performance measurements explicit.
+- **scoped results** make assertions and performance measurements explicit.
 
 I/O suspends lightweight runtime work automatically. Source code does not need `async` and `await` around every operation. Concurrency appears where it matters through structured forms such as `parallel`, and all child work remains owned by an enclosing scope for cancellation and cleanup.
 
@@ -185,7 +185,7 @@ flow health() = http.get("${API_URL}/health")
 
 ## Control how work executes
 
-Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. The currently implemented policies are `within`, `retry`, and bounded `parallel`:
+Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. Mettle currently implements `within`, `retry`, bounded `parallel`, `rate`, and fixed `concurrency`:
 
 ```mettle
 flow probe(path) {
@@ -208,20 +208,29 @@ flow readiness() {
 
 `parallel` returns results in source order and never starts more branches than `limit`. If a branch fails, active siblings are cancelled and joined. `retry` counts the first execution as an attempt and returns the first successful result. `within` covers all nested work, including retry delays. Ctrl+C cancels the root execution and exits with status 130.
 
-This gives every operation an owner, a lifetime, and a cleanup path. Rate-driven execution and scoped performance results build on the same model. A flow that works as a functional check should be reusable inside a load test without duplicating its operations.
+This gives every operation an owner, a lifetime, and a cleanup path. A flow that works as a functional check can run inside a load test without duplicating its operations.
 
-The proposed load-test form keeps the result scoped and named:
+Rate-driven workloads use an arrival target. `limit` bounds active iterations; when that limit is full, Mettle records a dropped start instead of building an unbounded queue. The finalized result remains scoped to its binding:
 
 ```mettle
-load = rate(target: 1_000, period: 1s, duration: 30s) {
+load = rate(target: 1_000, period: 1s, duration: 30s, limit: 200) {
     readiness()
 }
 
-assert(load.successRate > 0.999)
+assert(load.errors < 0.001)
 assert(load.latency.p95 < 200ms)
+assert(load.dropped == 0)
 ```
 
-`rate` and performance result aggregation are part of the language direction and are not implemented yet.
+`concurrency(limit: 100, duration: 30s) { ... }` keeps a fixed number of iterations active during its scheduling window. Both policies stop admitting work when the window closes, drain owned iterations for up to 30 seconds, and expose whether that drain timed out.
+
+Workload results include `count`, `started`, `success`, `failed`, `errors`, `dropped`, `saturated`, total `duration`, and bounded-memory distributions for `latency` and `schedulingDelay`. Distributions expose `min`, `mean`, `max`, `p50`, `p90`, `p95`, and `p99`. Rate results also report `scheduled`, `rate.target`, `rate.period`, `rate.actual`, and `rate.limit`.
+
+Run the included public example with:
+
+```bash
+mettle run examples/load-test.mettle
+```
 
 ## Organize a project without import boilerplate
 
@@ -355,7 +364,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.7.0.vsix --force
+code --install-extension dist/mettle-language-0.8.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
@@ -373,6 +382,7 @@ cargo fmt --all -- --check
 ./scripts/acceptance-http.sh
 ./scripts/acceptance-project.sh
 ./scripts/acceptance-execution.sh
+./scripts/acceptance-load.sh
 ```
 
 The acceptance scripts use private HTTP and HTTPS fixtures on random loopback ports. They cover request chaining, JSON, environment configuration, connection reuse, timeouts, TLS, project resolution, context composition, assertions, retries, concurrency bounds, cancellation, and redaction without depending on public services.
@@ -383,6 +393,14 @@ Build an optimized executable with:
 cargo build --release
 ./target/release/mettle --version
 ```
+
+Run the reproducible local load benchmark with:
+
+```bash
+./scripts/benchmark-load.sh
+```
+
+It builds the release binary, starts an isolated fixture, executes 5,000 scheduled iterations, and writes the workload result, peak resident memory, CPU time, elapsed time, OS, CPU, Rust version, Git revision, fixture configuration, and exact command under `target/benchmarks/`. Allocation profiling can be layered onto the same command with a system profiler without adding instrumentation to the runtime hot path. See [docs/load-benchmarks.md](docs/load-benchmarks.md) for the baseline and comparison method.
 
 ## Repository map
 
@@ -407,7 +425,7 @@ The [language proposal](docs/language-proposal.md) describes the language direct
 
 - HTTP/1.1 `GET` and `POST` are the only protocol operations implemented today
 - no redirects or proxy discovery
-- no rate-driven workload controller or load-test reporting yet
+- no workload ramping, distributed workers, or per-operation metric breakdowns yet
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS
 - Linux is the tested release platform

@@ -107,6 +107,18 @@ pub enum PlanExpressionKind {
         limit: usize,
         branches: Vec<PlanExpression>,
     },
+    Rate {
+        target: usize,
+        period: Duration,
+        duration: Duration,
+        limit: usize,
+        body: Box<PlanExpression>,
+    },
+    Concurrency {
+        limit: usize,
+        duration: Duration,
+        body: Box<PlanExpression>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -350,6 +362,7 @@ impl<'a> DefinitionFinder<'a> {
         None
     }
 
+    #[allow(clippy::too_many_lines)]
     fn find_in_expression(
         &self,
         expression: &Expression,
@@ -446,6 +459,36 @@ impl<'a> DefinitionFinder<'a> {
                         return Some(target);
                     }
                 }
+            }
+            ExpressionKind::Rate {
+                target,
+                period,
+                duration,
+                limit,
+                body,
+            } => {
+                for value in [target.as_ref(), period.as_ref(), duration.as_ref()] {
+                    if let Some(target) = self.find_in_expression(value, locals, flow) {
+                        return Some(target);
+                    }
+                }
+                if let Some(target) = limit
+                    .as_deref()
+                    .and_then(|limit| self.find_in_expression(limit, locals, flow))
+                {
+                    return Some(target);
+                }
+                return self.find_in_expression(body, locals, flow);
+            }
+            ExpressionKind::Concurrency {
+                limit,
+                duration,
+                body,
+            } => {
+                return self
+                    .find_in_expression(limit, locals, flow)
+                    .or_else(|| self.find_in_expression(duration, locals, flow))
+                    .or_else(|| self.find_in_expression(body, locals, flow));
             }
             ExpressionKind::Null
             | ExpressionKind::Boolean(_)
@@ -1062,7 +1105,9 @@ impl<'a> Compiler<'a> {
             }
             ExpressionKind::Within { .. }
             | ExpressionKind::Retry { .. }
-            | ExpressionKind::Parallel { .. } => {
+            | ExpressionKind::Parallel { .. }
+            | ExpressionKind::Rate { .. }
+            | ExpressionKind::Concurrency { .. } => {
                 return self.compile_policy_expression(current_flow, expression, locals, context);
             }
         };
@@ -1073,6 +1118,7 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compile_policy_expression(
         &mut self,
         current_flow: Option<usize>,
@@ -1139,6 +1185,88 @@ impl<'a> Compiler<'a> {
                 (
                     PlanExpressionKind::Parallel { limit, branches },
                     ValueType::Array,
+                )
+            }
+            ExpressionKind::Rate {
+                target,
+                period,
+                duration,
+                limit,
+                body,
+            } => {
+                let target = self.positive_integer_literal(target, "`rate` target")?;
+                let period = self.duration_literal(period, "`rate` period")?;
+                let duration = self.duration_literal(duration, "`rate` duration")?;
+                let limit = match limit.as_deref() {
+                    Some(limit) => self.positive_integer_literal(limit, "`rate` limit")?,
+                    None => 1_024,
+                };
+                if target > 1_000_000 {
+                    self.errors.push(CompileError::new(
+                        "`rate` target supports at most 1,000,000 starts per period",
+                        expression.span,
+                    ));
+                    return None;
+                }
+                if limit > 100_000 {
+                    self.errors.push(CompileError::new(
+                        "`rate` limit supports at most 100,000 active iterations",
+                        expression.span,
+                    ));
+                    return None;
+                }
+                let Some(total) = duration
+                    .as_nanos()
+                    .checked_mul(target as u128)
+                    .map(|value| value / period.as_nanos())
+                else {
+                    self.errors.push(CompileError::new(
+                        "`rate` configuration exceeds the supported workload size",
+                        expression.span,
+                    ));
+                    return None;
+                };
+                if total == 0 || total > 100_000_000 {
+                    self.errors.push(CompileError::new(
+                        "`rate` must schedule between 1 and 100,000,000 iterations",
+                        expression.span,
+                    ));
+                    return None;
+                }
+                let body = self.compile_expression(current_flow, body, locals, context)?;
+                (
+                    PlanExpressionKind::Rate {
+                        target,
+                        period,
+                        duration,
+                        limit,
+                        body: Box::new(body),
+                    },
+                    ValueType::Object,
+                )
+            }
+            ExpressionKind::Concurrency {
+                limit,
+                duration,
+                body,
+            } => {
+                let limit = self.positive_integer_literal(limit, "`concurrency` limit")?;
+                let duration = self.duration_literal(duration, "`concurrency` duration")?;
+                if limit > 100_000 {
+                    self.errors.push(CompileError::new(
+                        "`concurrency` supports at most 100,000 active iterations",
+                        expression.span,
+                    ));
+                    return None;
+                }
+                let body = self.compile_expression(current_flow, body, locals, context)?;
+                (
+                    PlanExpressionKind::Concurrency {
+                        limit,
+                        duration,
+                        body: Box::new(body),
+                    },
+                    ValueType::Object,
                 )
             }
             _ => unreachable!("only policy expressions are delegated"),
@@ -1990,5 +2118,58 @@ mod tests {
                 .iter()
                 .any(|message| message.contains("greater than zero"))
         );
+    }
+
+    #[test]
+    fn lowers_bounded_load_policies() {
+        let program = parse(
+            r"
+            flow probe() = true
+            flow main() {
+                load = rate(target: 100, period: 1s, duration: 2s, limit: 10) { probe() }
+                return concurrency(limit: 4, duration: 1s) { probe() }
+            }
+            ",
+        )
+        .expect("source should parse");
+        let plan = compile(&program).expect("source should compile");
+        let Instruction::Bind { expression, .. } = &plan.flows[1].instructions[0] else {
+            panic!("expected rate binding");
+        };
+        let PlanExpressionKind::Rate {
+            target,
+            period,
+            duration,
+            limit,
+            ..
+        } = expression.kind
+        else {
+            panic!("expected rate plan");
+        };
+        assert_eq!(target, 100);
+        assert_eq!(period, Duration::from_secs(1));
+        assert_eq!(duration, Duration::from_secs(2));
+        assert_eq!(limit, 10);
+        let Instruction::Return(expression) = &plan.flows[1].instructions[1] else {
+            panic!("expected concurrency return");
+        };
+        assert!(matches!(
+            expression.kind,
+            PlanExpressionKind::Concurrency { limit: 4, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_load_policy_bounds() {
+        let messages =
+            errors("flow main() = rate(target: 1, period: 1s, duration: 1ms, limit: 0) { true }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("greater than zero"))
+        );
+
+        let messages = errors("flow main() = rate(target: 1, period: 1s, duration: 1ms) { true }");
+        assert!(messages.iter().any(|message| message.contains("between 1")));
     }
 }
