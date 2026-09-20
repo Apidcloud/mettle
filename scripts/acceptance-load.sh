@@ -32,7 +32,7 @@ cargo build --quiet --manifest-path "$repository_dir/Cargo.toml"
 
 run_load() {
   METTLE_BASE_URL="$base_url" "$repository_dir/target/debug/mettle" \
-    run "$repository_dir/tests/fixtures/load.mettle" "$1" --verbose
+    run "$repository_dir/tests/fixtures/load.mettle" "$1" --raw
 }
 
 steady="$(run_load steady)"

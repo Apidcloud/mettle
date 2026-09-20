@@ -54,11 +54,11 @@ cargo build --quiet --release --manifest-path "$repository_dir/Cargo.toml"
   echo "memoryKiB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)"
   echo "rustc=$(rustc --version)"
   echo "fixture=Python ThreadingHTTPServer on 127.0.0.1:$port"
-  echo "command=METTLE_BASE_URL=$base_url $binary run $workload --verbose"
+  echo "command=METTLE_BASE_URL=$base_url $binary run $workload --raw"
 } >"$output_dir/environment.txt"
 
 started_ns="$(date +%s%N)"
-METTLE_BASE_URL="$base_url" "$binary" run "$workload" --verbose \
+METTLE_BASE_URL="$base_url" "$binary" run "$workload" --raw \
   >"$output_dir/result.json" &
 benchmark_pid=$!
 peak_rss_kib=0

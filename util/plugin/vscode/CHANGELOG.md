@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.9.0
+
+- Show structured flow reports in the Run Flow task terminal.
+- Display live rate and concurrency progress when the CLI is attached to a terminal.
+- Keep raw and JSON output modes available for automation.
+
 ## 0.8.0
 
 - Highlight and provide snippets for `rate` and fixed `concurrency` workloads.

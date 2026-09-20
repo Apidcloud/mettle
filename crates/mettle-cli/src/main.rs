@@ -4,11 +4,12 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::future::Future as _;
-use std::io::{self, Read as _};
+use std::io::{self, IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Instant;
 
 use mettle_capability::{CapabilityDescriptor, Object, Value};
 use mettle_compiler::{CompileError, ExecutionPlan, MettlePlan, compile_with_capabilities};
@@ -22,7 +23,7 @@ Mettle language tools
 Usage:
   mettle check <file>
   mettle list <file> [--json]
-  mettle run <file> [flow-name] [--line <line>] [--arg <name=value>]... [--verbose | --raw]
+  mettle run <file> [flow-name] [--line <line>] [--arg <name=value>]... [output options]
   mettle lsp
   mettle --help
   mettle --version
@@ -32,25 +33,51 @@ Commands:
   list    List compiler-discovered runnable flows
   run     Validate the source and execute a selected flow
   lsp     Start the Mettle language server over standard input/output
+
+Run output options:
+  --verbose       Show the complete result and operation details
+  --quiet         Print only the final flow status
+  --raw           Print only the returned Mettle value
+  --output json   Print a structured execution report
+  --no-progress   Disable the interactive workload display
+  --no-color      Disable ANSI colors
 ";
 
 mod lsp;
+mod report;
+
+use report::{CliObserver, ExecutionReport, failure_summary, raw_value};
 
 const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR];
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RunOptions {
     selector: Option<MettleSelector>,
     arguments: Vec<(String, String)>,
     output: OutputMode,
+    progress: bool,
+    color: bool,
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            selector: None,
+            arguments: Vec::new(),
+            output: OutputMode::Human,
+            progress: true,
+            color: true,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum OutputMode {
-    #[default]
-    Concise,
+    Human,
     Verbose,
+    Quiet,
     Raw,
+    Json,
 }
 
 #[derive(Debug)]
@@ -161,6 +188,31 @@ fn parse_run_options(arguments: &[OsString]) -> Result<RunOptions, CliError> {
                 set_output_mode(&mut options, OutputMode::Raw, argument)?;
                 cursor += 1;
             }
+            "--quiet" => {
+                set_output_mode(&mut options, OutputMode::Quiet, argument)?;
+                cursor += 1;
+            }
+            "--output" => {
+                let value = arguments
+                    .get(cursor + 1)
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| CliError::Usage("`--output` requires `json`".to_owned()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(format!(
+                        "unsupported output format `{value}`; expected `json`"
+                    )));
+                }
+                set_output_mode(&mut options, OutputMode::Json, "--output json")?;
+                cursor += 2;
+            }
+            "--no-progress" => {
+                options.progress = false;
+                cursor += 1;
+            }
+            "--no-color" => {
+                options.color = false;
+                cursor += 1;
+            }
             value if value.starts_with('-') => {
                 return Err(CliError::Usage(format!("unknown run option `{value}`")));
             }
@@ -178,7 +230,7 @@ fn set_output_mode(
     output: OutputMode,
     flag: &str,
 ) -> Result<(), CliError> {
-    if options.output != OutputMode::Concise {
+    if options.output != OutputMode::Human {
         return Err(CliError::Usage(format!(
             "select only one output mode; `{flag}` conflicts with an earlier output option"
         )));
@@ -250,7 +302,12 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
             eprintln!("error: could not start the Mettle runtime: {error}");
             CliError::Failure
         })?;
-    let mettle_runtime = Runtime::new(vec![Arc::new(HttpCapability::new())]);
+    let observer = Arc::new(CliObserver::new(
+        options.progress && matches!(options.output, OutputMode::Human | OutputMode::Verbose),
+    ));
+    let mettle_runtime =
+        Runtime::new(vec![Arc::new(HttpCapability::new())]).with_observer(observer.clone());
+    let started = Instant::now();
     let outcome = async_runtime.block_on(async {
         let mut execution = Box::pin(mettle_runtime.execute_selected(&plan, flow_id, arguments));
         let mut interrupt = Box::pin(tokio::signal::ctrl_c());
@@ -266,20 +323,63 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
         .await
     });
     let Some(result) = outcome else {
+        observer.clear_progress();
         eprintln!("execution cancelled");
         return Err(CliError::Interrupted);
     };
+    observer.clear_progress();
     match result {
         Ok(value) => {
+            let operations = observer.take_operations();
+            let report = ExecutionReport {
+                flow: &plan.flows[flow_id].display_name,
+                duration: started.elapsed(),
+                result: &value,
+                operations: &operations,
+            };
+            let color =
+                options.color && io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
             let output = match options.output {
-                OutputMode::Concise => concise_result(&value),
-                OutputMode::Verbose => pretty_result(&value),
-                OutputMode::Raw => value.to_string(),
+                OutputMode::Human => report.human(false, color),
+                OutputMode::Verbose => report.human(true, color),
+                OutputMode::Quiet => report.quiet(color),
+                OutputMode::Raw => raw_value(&value),
+                OutputMode::Json => report.json(),
             };
             println!("{output}");
             Ok(())
         }
         Err(error) => {
+            if options.output == OutputMode::Json {
+                let source = project
+                    .sources
+                    .get(error.span.source)
+                    .unwrap_or_else(|| &project.sources[project.entry_source]);
+                let (line, column) = source_location(&source.text, error.span.start);
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "flow": plan.flows[flow_id].display_name,
+                        "durationNanos": u64::try_from(started.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX),
+                        "error": {
+                            "message": error.message,
+                            "path": source.path,
+                            "line": line,
+                            "column": column,
+                            "flowStack": error.flow_stack,
+                        }
+                    })
+                );
+                return Err(CliError::Failure);
+            }
+            let operations = observer.take_operations();
+            let color =
+                options.color && io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none();
+            eprintln!(
+                "{}\n",
+                failure_summary(&plan.flows[flow_id].display_name, &operations, color)
+            );
             eprintln!(
                 "{}",
                 render_diagnostic(&project, &error.message, error.span)
@@ -288,160 +388,6 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
                 eprintln!("flow stack: {}", error.flow_stack.join(" -> "));
             }
             Err(CliError::Failure)
-        }
-    }
-}
-
-fn concise_result(value: &Value) -> String {
-    let Value::Object(fields) = value else {
-        return pretty_result(value);
-    };
-    if let Some(summary) = workload_summary(fields) {
-        return summary;
-    }
-    let (Some(Value::String(method)), Some(Value::String(url)), Some(Value::Integer(status))) = (
-        fields.get("method"),
-        fields.get("url"),
-        fields.get("status"),
-    ) else {
-        return pretty_result(value);
-    };
-
-    format!("{method} {url} → {status}")
-}
-
-fn workload_summary(fields: &Object) -> Option<String> {
-    let Value::Integer(count) = fields.get("count")? else {
-        return None;
-    };
-    let Value::Integer(success) = fields.get("success")? else {
-        return None;
-    };
-    let Value::Integer(failed) = fields.get("failed")? else {
-        return None;
-    };
-    let Value::Integer(dropped) = fields.get("dropped")? else {
-        return None;
-    };
-    let Value::Object(latency) = fields.get("latency")? else {
-        return None;
-    };
-    let Value::Duration(p95) = latency.get("p95")? else {
-        return None;
-    };
-    let policy = if let Some(Value::Object(rate)) = fields.get("rate") {
-        let Value::Integer(target) = rate.get("target")? else {
-            return None;
-        };
-        let Value::Duration(period) = rate.get("period")? else {
-            return None;
-        };
-        format!("rate {target}/{}", display_duration(*period))
-    } else if let Some(Value::Object(concurrency)) = fields.get("concurrency") {
-        let Value::Integer(limit) = concurrency.get("limit")? else {
-            return None;
-        };
-        format!("concurrency {limit}")
-    } else {
-        return None;
-    };
-    Some(format!(
-        "{policy} | {count} completed, {success} succeeded, {failed} failed, {dropped} dropped | p95 {}",
-        display_duration(*p95)
-    ))
-}
-
-fn display_duration(duration: std::time::Duration) -> String {
-    if duration >= std::time::Duration::from_secs(1) {
-        if duration.as_nanos().is_multiple_of(1_000_000_000) {
-            format!("{}s", duration.as_secs())
-        } else {
-            format!("{:.2}s", duration.as_secs_f64())
-        }
-    } else if duration >= std::time::Duration::from_millis(1) {
-        if duration.as_nanos().is_multiple_of(1_000_000) {
-            format!("{}ms", duration.as_millis())
-        } else {
-            format!("{:.2}ms", duration.as_secs_f64() * 1_000.0)
-        }
-    } else if duration >= std::time::Duration::from_micros(1) {
-        if duration.as_nanos().is_multiple_of(1_000) {
-            format!("{}us", duration.as_micros())
-        } else {
-            format!("{:.2}us", duration.as_secs_f64() * 1_000_000.0)
-        }
-    } else {
-        format!("{}ns", duration.as_nanos())
-    }
-}
-
-fn pretty_result(value: &Value) -> String {
-    match value {
-        Value::Array(_) | Value::Object(_) | Value::Bytes(_) => {
-            serde_json::to_string_pretty(&human_readable_json(value, None, false))
-                .expect("Mettle values always convert to JSON")
-        }
-        _ => value.to_string(),
-    }
-}
-
-fn human_readable_json(
-    value: &Value,
-    field_name: Option<&str>,
-    parsed_json: bool,
-) -> serde_json::Value {
-    const STRING_PREVIEW_CHARS: usize = 4_096;
-
-    match value {
-        Value::Null => serde_json::Value::Null,
-        Value::Boolean(value) => serde_json::Value::Bool(*value),
-        Value::Integer(value) => serde_json::Value::Number((*value).into()),
-        Value::Float(value) => serde_json::Number::from_f64(*value)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
-        Value::String(value) => {
-            if field_name == Some("body") && parsed_json {
-                return serde_json::Value::String(format!(
-                    "<{} UTF-8 bytes; parsed content is in `json`>",
-                    value.len()
-                ));
-            }
-            let mut characters = value.chars();
-            let preview = characters
-                .by_ref()
-                .take(STRING_PREVIEW_CHARS)
-                .collect::<String>();
-            if characters.next().is_some() {
-                serde_json::Value::String(format!(
-                    "{preview}… <truncated; {} UTF-8 bytes total>",
-                    value.len()
-                ))
-            } else {
-                serde_json::Value::String(value.clone())
-            }
-        }
-        Value::Bytes(value) => serde_json::Value::String(format!("<{} binary bytes>", value.len())),
-        Value::Duration(value) => serde_json::Value::String(format!("{}ns", value.as_nanos())),
-        Value::Array(values) => serde_json::Value::Array(
-            values
-                .iter()
-                .map(|value| human_readable_json(value, None, false))
-                .collect(),
-        ),
-        Value::Object(values) => {
-            let has_parsed_json = values
-                .get("json")
-                .is_some_and(|value| !matches!(value, Value::Null));
-            serde_json::Value::Object(
-                values
-                    .iter()
-                    .map(|(name, value)| {
-                        (
-                            name.clone(),
-                            human_readable_json(value, Some(name), has_parsed_json),
-                        )
-                    })
-                    .collect(),
-            )
         }
     }
 }
@@ -830,67 +776,4 @@ enum CliError {
     Usage(String),
     Failure,
     Interrupted,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use mettle_capability::{Object, Value};
-
-    use super::{concise_result, pretty_result};
-
-    #[test]
-    fn pretty_http_result_summarizes_duplicate_and_binary_bodies() {
-        let value = Value::Object(Object::from([
-            (
-                "body".to_owned(),
-                Value::String("{\"active\":true}".to_owned()),
-            ),
-            (
-                "bodyBytes".to_owned(),
-                Value::Bytes(Arc::from([1_u8, 2, 3])),
-            ),
-            (
-                "json".to_owned(),
-                Value::Object(Object::from([("active".to_owned(), Value::Boolean(true))])),
-            ),
-        ]));
-
-        let output = pretty_result(&value);
-        assert!(output.contains("<15 UTF-8 bytes; parsed content is in `json`>"));
-        assert!(output.contains("<3 binary bytes>"));
-        assert!(output.contains("\"active\": true"));
-        assert!(!output.contains("[\n    1,"));
-    }
-
-    #[test]
-    fn concise_load_result_reports_policy_outcomes_and_latency() {
-        let value = Value::Object(Object::from([
-            ("count".to_owned(), Value::Integer(100)),
-            ("success".to_owned(), Value::Integer(98)),
-            ("failed".to_owned(), Value::Integer(2)),
-            ("dropped".to_owned(), Value::Integer(5)),
-            (
-                "latency".to_owned(),
-                Value::Object(Object::from([(
-                    "p95".to_owned(),
-                    Value::Duration(Duration::from_micros(42_500)),
-                )])),
-            ),
-            (
-                "rate".to_owned(),
-                Value::Object(Object::from([
-                    ("target".to_owned(), Value::Integer(100)),
-                    ("period".to_owned(), Value::Duration(Duration::from_secs(1))),
-                ])),
-            ),
-        ]));
-
-        assert_eq!(
-            concise_result(&value),
-            "rate 100/1s | 100 completed, 98 succeeded, 2 failed, 5 dropped | p95 42.50ms"
-        );
-    }
 }

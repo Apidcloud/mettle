@@ -333,8 +333,8 @@ Deliver:
 - source-line selection and machine-readable compiler discovery;
 - `${name}` lookup through local/context values followed by environment fallback;
 - an optional file-level `use context` default;
-- concise HTTP status output by default, with `mettle run --verbose` for complete formatted responses and `--raw` for scripts;
-- compiler-backed VS Code Run Mettle CodeLens actions with parameter prompts and concise output.
+- structured human output by default, with `--verbose`, `--quiet`, `--raw`, and `--output json` for explicit levels of detail;
+- compiler-backed VS Code Run Mettle CodeLens actions with parameter prompts and structured output.
 
 User acceptance:
 
@@ -344,7 +344,7 @@ cargo run -- list examples/request-collection.mettle
 ./scripts/acceptance-http.sh
 ```
 
-The acceptance run executes a bare anonymous HTTP flow by source line and a named parameterized HTTP flow by name. Editor packaging verifies that the CodeLens implementation ships without runtime npm dependencies. Default output is a concise HTTP status line; verbose output includes the formatted envelope, while raw output remains available for scripts.
+The acceptance run executes a bare anonymous HTTP flow by source line and a named parameterized HTTP flow by name. Editor packaging verifies that the CodeLens implementation ships without runtime npm dependencies. Human output presents the flow, its operations, useful response data, and completion status. Raw and JSON output remain available for scripts.
 
 ### Milestone 3: projects, composition, and assertions
 
@@ -428,6 +428,25 @@ User acceptance runs a documented local load test against the fixture at several
 The scoped result includes completed, successful, failed, started, and dropped counts; error ratio; total elapsed time; saturation state; latency and scheduling-delay distributions; and policy-specific configuration. Rate results additionally report planned starts and achieved start rate. Runtime errors inside a workload become failed iteration outcomes, so assertions inside a measured flow contribute to the workload error ratio without aborting metric finalization.
 
 Run `./scripts/acceptance-load.sh` to exercise steady-rate scheduling, overload drops, percentile assertions, fixed concurrency, and server-observed concurrency bounds against the local fixture.
+
+### Milestone 5.5: execution reporting
+
+Status: complete.
+
+The runtime exposes a protocol-neutral execution observer. It reports completed capability operations and workload snapshots without coupling execution to a terminal or output format. Workload snapshots are emitted at a bounded interval, and individual operations inside a load iteration are suppressed to protect throughput and memory.
+
+The CLI consumes these events to provide:
+
+- structured flow, operation, response, failure, and completion output;
+- an in-place terminal dashboard for rate and concurrency workloads;
+- default response previews with bounded large-payload rendering;
+- complete human output through `--verbose`;
+- final-status output through `--quiet`;
+- returned-value output through `--raw`;
+- a stable execution envelope through `--output json`;
+- automatic plain output for pipes and explicit `--no-color` and `--no-progress` controls.
+
+The VS Code Run Flow action launches the same CLI in a dedicated task terminal, so editor execution and direct terminal execution share one reporting implementation.
 
 ### Milestone 6: MVP refinement and release readiness
 

@@ -103,7 +103,10 @@ fn discovers_and_executes_a_multi_file_project() {
     fs::remove_dir_all(directory).expect("project directory should be removable");
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "project\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("main"));
+    assert!(stdout.contains("project"));
+    assert!(stdout.contains("Completed"));
 }
 
 #[test]
@@ -118,7 +121,10 @@ fn run_prints_the_main_flow_result() {
     fs::remove_file(path).expect("test source should be removable");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("main"));
+    assert!(stdout.contains("42"));
+    assert!(stdout.contains("Completed"));
 }
 
 #[test]
@@ -135,20 +141,12 @@ fn verbose_prints_nested_results_for_humans() {
     fs::remove_file(path).expect("test source should be removable");
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        concat!(
-            "{\n",
-            "  \"active\": true,\n",
-            "  \"user\": {\n",
-            "    \"name\": \"Ada\",\n",
-            "    \"roles\": [\n",
-            "      \"tester\"\n",
-            "    ]\n",
-            "  }\n",
-            "}\n"
-        )
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("main"));
+    assert!(stdout.contains("\"active\": true"));
+    assert!(stdout.contains("\"name\": \"Ada\""));
+    assert!(stdout.contains("\"roles\""));
+    assert!(stdout.contains("Completed"));
 }
 
 #[test]
@@ -165,7 +163,10 @@ fn default_output_summarizes_http_responses() {
 
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout, "GET https://example.test/users → 200\n");
+    assert!(stdout.contains("GET"));
+    assert!(stdout.contains("https://example.test/users"));
+    assert!(stdout.contains("200"));
+    assert!(stdout.contains("\"active\": true"));
     assert!(!stdout.contains("headers"));
     assert!(!stdout.contains("ignored"));
 }
@@ -207,16 +208,11 @@ fn runs_a_selected_parameterized_flow_with_typed_arguments() {
     fs::remove_file(path).expect("test source should be removable");
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        concat!(
-            "{\n",
-            "  \"active\": true,\n",
-            "  \"name\": \"Ada Lovelace\",\n",
-            "  \"timeout\": \"2000000000ns\"\n",
-            "}\n"
-        )
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("describe"));
+    assert!(stdout.contains("\"active\": true"));
+    assert!(stdout.contains("\"name\": \"Ada Lovelace\""));
+    assert!(stdout.contains("\"timeout\": \"2000000000ns\""));
 }
 
 #[test]
@@ -233,7 +229,9 @@ fn runs_anonymous_top_level_calls_by_compiler_id() {
     fs::remove_file(path).expect("test source should be removable");
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "second\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("identity"));
+    assert!(stdout.contains("second"));
 }
 
 #[test]
@@ -265,10 +263,50 @@ fn interpolation_falls_back_to_the_environment() {
     fs::remove_file(path).expect("test source should be removable");
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "http://localhost:4020/health\n"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("endpoint"));
+    assert!(stdout.contains("http://localhost:4020/health"));
+}
+
+#[test]
+fn json_output_is_a_stable_execution_envelope() {
+    let path = source_file("flow health() = { status: \"ok\" }");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("flow should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("run output should be JSON");
+    assert_eq!(result["flow"], "health");
+    assert_eq!(result["result"]["status"], "ok");
+    assert!(result["durationNanos"].is_number());
+}
+
+#[test]
+fn json_output_reports_failures_without_human_text() {
+    let path = source_file("flow health() { assert(false) return true }");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("flow should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let result: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("failure output should be JSON");
+    assert_eq!(result["flow"], "health");
+    assert_eq!(result["error"]["message"], "assertion failed");
+    assert_eq!(result["error"]["line"], 1);
 }
 
 #[test]

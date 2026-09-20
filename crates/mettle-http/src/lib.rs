@@ -306,6 +306,13 @@ impl Capability for HttpCapability {
         DESCRIPTOR.name
     }
 
+    fn operation_name(&self, operation: usize) -> &'static str {
+        DESCRIPTOR
+            .operations
+            .get(operation)
+            .map_or("request", |operation| operation.name)
+    }
+
     fn merge_options(&self, defaults: &mut Object, mut overrides: Object) {
         if let Some(Value::Object(incoming_headers)) = overrides.remove("headers") {
             let current_headers = defaults

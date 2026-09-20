@@ -335,16 +335,40 @@ defaults http {
 
 ## CLI output and diagnostics
 
-Normal HTTP output is compact:
+Mettle presents a flow as one execution rather than dumping its internal value. A normal HTTP workflow shows each operation, its status and timing, the useful response payload, and the total duration:
 
 ```text
-GET https://jsonplaceholder.typicode.com/posts/1 200
+createUser
+
+  ✓ GET    https://api.example.com/users/seed
+    200 · 48ms
+
+  ✓ POST   https://api.example.com/users
+    201 · 91ms
+
+  Response
+    {
+      "id": "created-seed-42",
+      "active": true
+    }
+
+✓ Completed in 141ms
 ```
 
-Use `--verbose` to inspect the formatted response envelope, headers, response data, and body metadata. Use `--raw` for a one-line complete value in scripts.
+Large payloads are formatted and capped in the default view. `--verbose` includes the complete returned value. `--quiet` prints only the final flow status, `--raw` prints only the returned value, and `--output json` produces a stable execution envelope for automation. `--no-color` disables ANSI colors.
 
 ```bash
 mettle run examples/request-collection.mettle --line 10 --verbose
+mettle run examples/request-collection.mettle --line 10 --output json
+```
+
+Rate and concurrency workloads use an in-place dashboard when stderr is attached to a terminal. It updates the execution phase, active iterations, achieved rate, outcomes, dropped starts, and latency percentiles while the workload is running. Redirected output and machine-readable modes remain deterministic. Use `--no-progress` to disable the dashboard explicitly.
+
+```text
+Mettle · rate 1,000/1s for 30s
+RUNNING   12.4s / 30s   active 87 / 200   achieved 998.2/s
+started 12,400   completed 12,313   ok 12,302   failed 11   dropped 0
+latency p50 38.2ms   p95 71.6ms   p99 104.8ms
 ```
 
 Syntax, validation, and runtime failures return a nonzero status with source context. Runtime failures include the Mettle flow stack.
@@ -364,7 +388,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.8.0.vsix --force
+code --install-extension dist/mettle-language-0.9.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.

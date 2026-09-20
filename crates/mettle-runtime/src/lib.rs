@@ -17,6 +17,7 @@ const MAX_CALL_DEPTH: usize = 1_024;
 const WORKLOAD_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HISTOGRAM_SUB_BUCKETS: usize = 64;
 const HISTOGRAM_BUCKETS: usize = 1 + 64 * HISTOGRAM_SUB_BUCKETS;
+const WORKLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
@@ -52,6 +53,65 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+#[derive(Clone, Debug)]
+pub struct OperationEvent {
+    pub capability: String,
+    pub operation: String,
+    pub duration: Duration,
+    pub span: Span,
+    pub result: Result<Value, String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkloadPhase {
+    Starting,
+    Running,
+    Draining,
+    Completed,
+}
+
+#[derive(Clone, Debug)]
+pub enum WorkloadKind {
+    Rate {
+        target: usize,
+        period: Duration,
+        duration: Duration,
+        limit: usize,
+        planned: usize,
+    },
+    Concurrency {
+        limit: usize,
+        duration: Duration,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkloadSnapshot {
+    pub kind: WorkloadKind,
+    pub phase: WorkloadPhase,
+    pub elapsed: Duration,
+    pub active: usize,
+    pub started: usize,
+    pub completed: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub dropped: usize,
+    pub latency_p50: Duration,
+    pub latency_p95: Duration,
+    pub latency_p99: Duration,
+}
+
+pub trait ExecutionObserver: Send + Sync {
+    fn operation_completed(&self, _event: OperationEvent) {}
+
+    fn workload_updated(&self, _snapshot: WorkloadSnapshot) {}
+}
+
+#[derive(Debug, Default)]
+struct NoopObserver;
+
+impl ExecutionObserver for NoopObserver {}
+
 #[derive(Clone, Default)]
 struct ActiveContext {
     values: Vec<Value>,
@@ -61,6 +121,7 @@ struct ActiveContext {
 pub struct Runtime {
     capabilities: Vec<Arc<dyn Capability>>,
     clock: Arc<dyn Clock>,
+    observer: Arc<dyn ExecutionObserver>,
 }
 
 impl Runtime {
@@ -69,6 +130,7 @@ impl Runtime {
         Self {
             capabilities,
             clock: Arc::new(TokioClock),
+            observer: Arc::new(NoopObserver),
         }
     }
 
@@ -77,7 +139,14 @@ impl Runtime {
         Self {
             capabilities,
             clock,
+            observer: Arc::new(NoopObserver),
         }
+    }
+
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn ExecutionObserver>) -> Self {
+        self.observer = observer;
+        self
     }
 
     /// Execute the program's default flow, or its only flow when unambiguous.
@@ -115,6 +184,8 @@ impl Runtime {
             plan,
             capabilities: &self.capabilities,
             clock: self.clock.as_ref(),
+            observer: self.observer.as_ref(),
+            inside_workload: false,
             flow_stack: Vec::new(),
             secrets: Vec::new(),
         }
@@ -157,6 +228,8 @@ struct Executor<'a> {
     plan: &'a ExecutionPlan,
     capabilities: &'a [Arc<dyn Capability>],
     clock: &'a dyn Clock,
+    observer: &'a dyn ExecutionObserver,
+    inside_workload: bool,
     flow_stack: Vec<String>,
     secrets: Vec<String>,
 }
@@ -438,10 +511,44 @@ impl Executor<'_> {
                         ));
                     };
                     capability.merge_options(&mut effective, local);
-                    capability
+                    let capability_name = capability.name();
+                    let operation_name = capability.operation_name(*operation);
+                    let started = self.clock.now();
+                    let result = capability
                         .invoke(*operation, values, effective, expression.span)
-                        .await
-                        .map_err(|error| self.error(error.message, error.span))
+                        .await;
+                    let duration = self
+                        .clock
+                        .now()
+                        .checked_duration_since(started)
+                        .unwrap_or_default();
+                    match result {
+                        Ok(value) => {
+                            if !self.inside_workload {
+                                self.observer.operation_completed(OperationEvent {
+                                    capability: capability_name.to_owned(),
+                                    operation: operation_name.to_owned(),
+                                    duration,
+                                    span: expression.span,
+                                    result: Ok(value.clone()),
+                                });
+                            }
+                            Ok(value)
+                        }
+                        Err(error) => {
+                            let error = self.error(error.message, error.span);
+                            if !self.inside_workload {
+                                self.observer.operation_completed(OperationEvent {
+                                    capability: capability_name.to_owned(),
+                                    operation: operation_name.to_owned(),
+                                    duration,
+                                    span: expression.span,
+                                    result: Err(error.message.clone()),
+                                });
+                            }
+                            Err(error)
+                        }
+                    }
                 }
                 PlanExpressionKind::Within { timeout, body } => {
                     let timeout_error = self.error(
@@ -575,6 +682,22 @@ impl Executor<'_> {
         let window_start = self.clock.now();
         let mut metrics = WorkloadMetrics::new(window_start);
         let mut active = Vec::with_capacity(settings.limit.min(planned));
+        let policy = WorkloadPolicy::Rate {
+            target: settings.target,
+            period: settings.period,
+            limit: settings.limit,
+            window: settings.duration,
+            planned,
+        };
+        let mut next_progress = window_start;
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Starting,
+            &mut next_progress,
+            true,
+        );
 
         for index in 0..planned {
             let offset_nanos = settings.period.as_nanos() * index as u128 / settings.target as u128;
@@ -582,8 +705,23 @@ impl Executor<'_> {
                 u64::try_from(offset_nanos).expect("rate offset is within configured duration"),
             );
             let intended = window_start + offset;
-            self.wait_until(intended, &mut active, &mut metrics).await;
+            self.wait_until(
+                intended,
+                &mut active,
+                &mut metrics,
+                &policy,
+                &mut next_progress,
+            )
+            .await;
             self.collect_ready(&mut active, &mut metrics).await;
+            self.report_workload(
+                &metrics,
+                &policy,
+                active.len(),
+                WorkloadPhase::Running,
+                &mut next_progress,
+                false,
+            );
             if index.is_multiple_of(1_024) {
                 cooperative_yield().await;
             }
@@ -602,18 +740,26 @@ impl Executor<'_> {
             metrics.started += 1;
         }
 
-        let drain_timed_out = self.drain_workload(&mut active, &mut metrics).await;
-        Ok(metrics.into_value(
-            WorkloadPolicy::Rate {
-                target: settings.target,
-                period: settings.period,
-                limit: settings.limit,
-                window: settings.duration,
-                planned,
-            },
-            self.clock.now(),
-            drain_timed_out,
-        ))
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Draining,
+            &mut next_progress,
+            true,
+        );
+        let drain_timed_out = self
+            .drain_workload(&mut active, &mut metrics, &policy, &mut next_progress)
+            .await;
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Completed,
+            &mut next_progress,
+            true,
+        );
+        Ok(metrics.into_value(policy, self.clock.now(), drain_timed_out))
     }
 
     async fn evaluate_concurrency(
@@ -628,6 +774,16 @@ impl Executor<'_> {
         let deadline = window_start + duration;
         let mut metrics = WorkloadMetrics::new(window_start);
         let mut active = Vec::with_capacity(limit);
+        let policy = WorkloadPolicy::Concurrency { limit, duration };
+        let mut next_progress = window_start;
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Starting,
+            &mut next_progress,
+            true,
+        );
         for _ in 0..limit {
             active.push(self.start_workload_iteration(body, locals, context));
             metrics.started += 1;
@@ -637,25 +793,62 @@ impl Executor<'_> {
             if self.clock.now() >= deadline {
                 break;
             }
+            let wake_at = deadline.min(next_progress);
             let completed = self
-                .wait_until_or_complete(deadline, &mut active, &mut metrics)
+                .wait_until_or_complete(wake_at, &mut active, &mut metrics)
                 .await;
-            if !completed || self.clock.now() >= deadline {
+            self.report_workload(
+                &metrics,
+                &policy,
+                active.len(),
+                WorkloadPhase::Running,
+                &mut next_progress,
+                false,
+            );
+            if self.clock.now() >= deadline {
                 break;
+            }
+            if !completed {
+                if self.clock.now() < wake_at {
+                    break;
+                }
+                continue;
             }
             active.push(self.start_workload_iteration(body, locals, context));
             metrics.started += 1;
+            self.report_workload(
+                &metrics,
+                &policy,
+                active.len(),
+                WorkloadPhase::Running,
+                &mut next_progress,
+                false,
+            );
             if metrics.started.is_multiple_of(64) {
                 cooperative_yield().await;
             }
         }
 
-        let drain_timed_out = self.drain_workload(&mut active, &mut metrics).await;
-        Ok(metrics.into_value(
-            WorkloadPolicy::Concurrency { limit },
-            self.clock.now(),
-            drain_timed_out,
-        ))
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Draining,
+            &mut next_progress,
+            true,
+        );
+        let drain_timed_out = self
+            .drain_workload(&mut active, &mut metrics, &policy, &mut next_progress)
+            .await;
+        self.report_workload(
+            &metrics,
+            &policy,
+            active.len(),
+            WorkloadPhase::Completed,
+            &mut next_progress,
+            true,
+        );
+        Ok(metrics.into_value(policy, self.clock.now(), drain_timed_out))
     }
 
     fn start_workload_iteration<'b>(
@@ -665,6 +858,7 @@ impl Executor<'_> {
         context: &'b ActiveContext,
     ) -> ActiveIteration<'b> {
         let mut executor = self.clone();
+        executor.inside_workload = true;
         let locals = locals.to_vec();
         let context = context.clone();
         let started = self.clock.now();
@@ -672,6 +866,24 @@ impl Executor<'_> {
             started,
             future: Box::pin(async move { executor.evaluate(body, &locals, &context).await }),
         }
+    }
+
+    fn report_workload(
+        &self,
+        metrics: &WorkloadMetrics,
+        policy: &WorkloadPolicy,
+        active: usize,
+        phase: WorkloadPhase,
+        next_progress: &mut Instant,
+        force: bool,
+    ) {
+        let now = self.clock.now();
+        if !force && now < *next_progress {
+            return;
+        }
+        *next_progress = now + WORKLOAD_PROGRESS_INTERVAL;
+        self.observer
+            .workload_updated(metrics.snapshot(policy, phase, active, now));
     }
 
     async fn wait_until_or_complete(
@@ -712,9 +924,21 @@ impl Executor<'_> {
         deadline: Instant,
         active: &mut Vec<ActiveIteration<'_>>,
         metrics: &mut WorkloadMetrics,
+        policy: &WorkloadPolicy,
+        next_progress: &mut Instant,
     ) {
         while self.clock.now() < deadline {
-            if !self.wait_until_or_complete(deadline, active, metrics).await {
+            let wake_at = deadline.min(*next_progress);
+            let completed = self.wait_until_or_complete(wake_at, active, metrics).await;
+            self.report_workload(
+                metrics,
+                policy,
+                active.len(),
+                WorkloadPhase::Running,
+                next_progress,
+                false,
+            );
+            if !completed && self.clock.now() < wake_at {
                 break;
             }
         }
@@ -747,10 +971,22 @@ impl Executor<'_> {
         &self,
         active: &mut Vec<ActiveIteration<'_>>,
         metrics: &mut WorkloadMetrics,
+        policy: &WorkloadPolicy,
+        next_progress: &mut Instant,
     ) -> bool {
         let deadline = self.clock.now() + WORKLOAD_DRAIN_TIMEOUT;
         while !active.is_empty() {
-            if !self.wait_until_or_complete(deadline, active, metrics).await {
+            let wake_at = deadline.min(*next_progress);
+            let completed = self.wait_until_or_complete(wake_at, active, metrics).await;
+            self.report_workload(
+                metrics,
+                policy,
+                active.len(),
+                WorkloadPhase::Draining,
+                next_progress,
+                false,
+            );
+            if !completed && (self.clock.now() >= deadline || self.clock.now() < wake_at) {
                 let now = self.clock.now();
                 for iteration in active.drain(..) {
                     metrics.record_completion(iteration.started, now, false);
@@ -817,6 +1053,7 @@ enum WorkloadPolicy {
     },
     Concurrency {
         limit: usize,
+        duration: Duration,
     },
 }
 
@@ -853,6 +1090,49 @@ impl WorkloadMetrics {
             self.success += 1;
         } else {
             self.failed += 1;
+        }
+    }
+
+    fn snapshot(
+        &self,
+        policy: &WorkloadPolicy,
+        phase: WorkloadPhase,
+        active: usize,
+        now: Instant,
+    ) -> WorkloadSnapshot {
+        let kind = match *policy {
+            WorkloadPolicy::Rate {
+                target,
+                period,
+                limit,
+                window,
+                planned,
+            } => WorkloadKind::Rate {
+                target,
+                period,
+                duration: window,
+                limit,
+                planned,
+            },
+            WorkloadPolicy::Concurrency { limit, duration } => {
+                WorkloadKind::Concurrency { limit, duration }
+            }
+        };
+        WorkloadSnapshot {
+            kind,
+            phase,
+            elapsed: now
+                .checked_duration_since(self.started_at)
+                .unwrap_or_default(),
+            active,
+            started: self.started,
+            completed: self.success + self.failed,
+            success: self.success,
+            failed: self.failed,
+            dropped: self.dropped,
+            latency_p50: self.latency.percentile(50),
+            latency_p95: self.latency.percentile(95),
+            latency_p99: self.latency.percentile(99),
         }
     }
 
@@ -915,7 +1195,7 @@ impl WorkloadMetrics {
                     ])),
                 );
             }
-            WorkloadPolicy::Concurrency { limit } => {
+            WorkloadPolicy::Concurrency { limit, .. } => {
                 result.insert(
                     "concurrency".to_owned(),
                     Value::Object(Object::from([("limit".to_owned(), count_value(limit))])),
@@ -1098,8 +1378,8 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
 mod tests {
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
@@ -1109,7 +1389,10 @@ mod tests {
     use mettle_compiler::{compile, compile_with_capabilities};
     use mettle_syntax::parse;
 
-    use super::{Clock, ClockFuture, Runtime, Value};
+    use super::{
+        Clock, ClockFuture, ExecutionObserver, OperationEvent, Runtime, Value, WorkloadPhase,
+        WorkloadSnapshot,
+    };
 
     const PROBE_OPERATIONS: &[OperationSchema] = &[OperationSchema {
         name: "wait",
@@ -1139,6 +1422,22 @@ mod tests {
     impl Clock for PendingClock {
         fn sleep(&self, _duration: Duration) -> ClockFuture {
             Box::pin(std::future::pending())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        operations: Mutex<Vec<OperationEvent>>,
+        workloads: Mutex<Vec<WorkloadSnapshot>>,
+    }
+
+    impl ExecutionObserver for RecordingObserver {
+        fn operation_completed(&self, event: OperationEvent) {
+            self.operations.lock().expect("observer lock").push(event);
+        }
+
+        fn workload_updated(&self, snapshot: WorkloadSnapshot) {
+            self.workloads.lock().expect("observer lock").push(snapshot);
         }
     }
 
@@ -1513,5 +1812,42 @@ mod tests {
         assert_eq!(result.get("count"), Some(&Value::Integer(3)));
         assert_eq!(capability.maximum.load(Ordering::SeqCst), 3);
         assert_eq!(capability.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn observer_receives_operations_and_bounded_workload_snapshots() {
+        let operation_source =
+            parse("flow main() = probe.wait()").expect("operation source should parse");
+        let operation_plan = compile_with_capabilities(&operation_source, &[PROBE])
+            .expect("operation source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        block_on(
+            Runtime::new(vec![Arc::new(ProbeCapability::default())])
+                .with_observer(observer.clone())
+                .execute(&operation_plan),
+        )
+        .expect("operation should complete");
+        assert_eq!(observer.operations.lock().expect("observer lock").len(), 1);
+
+        let workload_source =
+            parse("flow main() = rate(target: 4, period: 1s, duration: 1s, limit: 2) { true }")
+                .expect("workload source should parse");
+        let workload_plan = compile(&workload_source).expect("workload source should compile");
+        block_on(
+            Runtime::with_clock(Vec::new(), Arc::new(ImmediateClock::default()))
+                .with_observer(observer.clone())
+                .execute(&workload_plan),
+        )
+        .expect("workload should complete");
+        let workloads = observer.workloads.lock().expect("observer lock");
+        assert_eq!(
+            workloads.first().map(|value| value.phase),
+            Some(WorkloadPhase::Starting)
+        );
+        assert_eq!(
+            workloads.last().map(|value| value.phase),
+            Some(WorkloadPhase::Completed)
+        );
+        assert!(workloads.len() <= 8, "snapshots should remain bounded");
     }
 }

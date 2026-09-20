@@ -50,7 +50,7 @@ flow inspectRequest(baseUrl, requestId) =
     http.get("${baseUrl}/get?requestId=${requestId}")
 ```
 
-The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. Results default to method, URL, and status. Use `mettle run --verbose` in a terminal when response data, headers, and the full response envelope are needed.
+The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. The dedicated task terminal shows the same structured flow report and live workload dashboard as the CLI. Use `mettle run --verbose` when you need the complete returned value.
 
 ## Package
 
@@ -65,7 +65,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/mettle-language-0.8.0.vsix
+dist/mettle-language-0.9.0.vsix
 ```
 
 ## Install
@@ -73,7 +73,7 @@ dist/mettle-language-0.8.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/mettle-language-0.8.0.vsix --force
+code --install-extension dist/mettle-language-0.9.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

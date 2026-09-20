@@ -1,0 +1,535 @@
+use std::fmt::Write as _;
+use std::io::{self, IsTerminal as _, Write as _};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use mettle_capability::Value;
+use mettle_runtime::{
+    ExecutionObserver, OperationEvent, WorkloadKind, WorkloadPhase, WorkloadSnapshot,
+};
+
+const DEFAULT_PREVIEW_CHARS: usize = 8 * 1024;
+
+#[derive(Default)]
+struct ObserverState {
+    operations: Vec<OperationEvent>,
+    rendered_lines: usize,
+}
+
+pub struct CliObserver {
+    state: Mutex<ObserverState>,
+    progress: bool,
+    interactive: bool,
+}
+
+impl CliObserver {
+    pub fn new(progress: bool) -> Self {
+        Self {
+            state: Mutex::new(ObserverState::default()),
+            progress,
+            interactive: io::stderr().is_terminal(),
+        }
+    }
+
+    pub fn take_operations(&self) -> Vec<OperationEvent> {
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        std::mem::take(&mut state.operations)
+    }
+
+    pub fn clear_progress(&self) {
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        if state.rendered_lines == 0 {
+            return;
+        }
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\x1b[{}A", state.rendered_lines);
+        for _ in 0..state.rendered_lines {
+            let _ = write!(stderr, "\r\x1b[2K\n");
+        }
+        let _ = write!(stderr, "\x1b[{}A\r", state.rendered_lines);
+        let _ = stderr.flush();
+        state.rendered_lines = 0;
+    }
+
+    fn draw_workload(&self, snapshot: &WorkloadSnapshot) {
+        if !self.progress || !self.interactive {
+            return;
+        }
+        let lines = workload_progress_lines(snapshot);
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        let mut stderr = io::stderr().lock();
+        if state.rendered_lines > 0 {
+            let _ = write!(stderr, "\x1b[{}A", state.rendered_lines);
+        }
+        for line in &lines {
+            let _ = writeln!(stderr, "\r\x1b[2K{line}");
+        }
+        let _ = stderr.flush();
+        state.rendered_lines = lines.len();
+    }
+}
+
+impl ExecutionObserver for CliObserver {
+    fn operation_completed(&self, event: OperationEvent) {
+        self.state
+            .lock()
+            .expect("CLI observer lock was poisoned")
+            .operations
+            .push(event);
+    }
+
+    fn workload_updated(&self, snapshot: WorkloadSnapshot) {
+        self.draw_workload(&snapshot);
+    }
+}
+
+pub struct ExecutionReport<'a> {
+    pub flow: &'a str,
+    pub duration: Duration,
+    pub result: &'a Value,
+    pub operations: &'a [OperationEvent],
+}
+
+impl ExecutionReport<'_> {
+    pub fn human(&self, verbose: bool, color: bool) -> String {
+        if let Some(summary) = workload_result(self.result, color) {
+            return format!("{}\n\n{summary}", style(self.flow, "1", color));
+        }
+
+        let mut output = String::new();
+        writeln!(output, "{}\n", style(self.flow, "1", color))
+            .expect("writing to a string cannot fail");
+
+        for operation in self.operations {
+            render_operation(&mut output, operation, color);
+        }
+
+        if self.operations.is_empty()
+            && let Some((method, url, status)) = http_summary(self.result)
+        {
+            writeln!(
+                output,
+                "  {} {:<6} {}\n    {} · {}\n",
+                style("✓", "32", color),
+                method,
+                url,
+                style(&status.to_string(), status_color(status), color),
+                display_duration(self.duration)
+            )
+            .expect("writing to a string cannot fail");
+        }
+
+        let show_result = (self.operations.is_empty() && !is_http_response(self.result))
+            || verbose
+            || !is_http_response(self.result)
+            || response_payload(self.result).is_some();
+        if show_result {
+            let label = if self.operations.is_empty() {
+                "Result"
+            } else {
+                "Response"
+            };
+            writeln!(output, "  {}", style(label, "2", color))
+                .expect("writing to a string cannot fail");
+            let formatted = pretty_value(self.result, verbose);
+            for line in formatted.lines() {
+                writeln!(output, "    {line}").expect("writing to a string cannot fail");
+            }
+            output.push('\n');
+        }
+
+        write!(
+            output,
+            "{} Completed in {}",
+            style("✓", "32", color),
+            display_duration(self.duration)
+        )
+        .expect("writing to a string cannot fail");
+        output
+    }
+
+    pub fn quiet(&self, color: bool) -> String {
+        format!(
+            "{} {} · {}",
+            style("✓", "32", color),
+            self.flow,
+            display_duration(self.duration)
+        )
+    }
+
+    pub fn json(&self) -> String {
+        serde_json::json!({
+            "flow": self.flow,
+            "durationNanos": duration_nanos(self.duration),
+            "result": value_json(self.result),
+        })
+        .to_string()
+    }
+}
+
+fn render_operation(output: &mut String, event: &OperationEvent, color: bool) {
+    match &event.result {
+        Ok(value) => {
+            if let Some((method, url, status)) = http_summary(value) {
+                writeln!(
+                    output,
+                    "  {} {:<6} {}",
+                    style("✓", "32", color),
+                    method,
+                    url
+                )
+                .expect("writing to a string cannot fail");
+                writeln!(
+                    output,
+                    "    {} · {}\n",
+                    style(&status.to_string(), status_color(status), color),
+                    display_duration(event.duration)
+                )
+                .expect("writing to a string cannot fail");
+            } else {
+                writeln!(
+                    output,
+                    "  {} {}.{} · {}\n",
+                    style("✓", "32", color),
+                    event.capability,
+                    event.operation,
+                    display_duration(event.duration)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+        Err(message) => {
+            writeln!(
+                output,
+                "  {} {}.{} · {}\n    {}\n",
+                style("✗", "31", color),
+                event.capability,
+                event.operation,
+                display_duration(event.duration),
+                message
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+}
+
+fn workload_progress_lines(snapshot: &WorkloadSnapshot) -> Vec<String> {
+    let phase = match snapshot.phase {
+        WorkloadPhase::Starting => "STARTING",
+        WorkloadPhase::Running => "RUNNING",
+        WorkloadPhase::Draining => "DRAINING",
+        WorkloadPhase::Completed => "COMPLETED",
+    };
+    let (description, duration, limit, target_rate) = match snapshot.kind {
+        WorkloadKind::Rate {
+            target,
+            period,
+            duration,
+            limit,
+            ..
+        } => (
+            format!("rate {target}/{}", display_duration(period)),
+            duration,
+            limit,
+            Some(count_f64(target) / period.as_secs_f64()),
+        ),
+        WorkloadKind::Concurrency { limit, duration } => {
+            (format!("concurrency {limit}"), duration, limit, None)
+        }
+    };
+    let rate_window = snapshot.elapsed.min(duration);
+    let achieved = if rate_window.is_zero() {
+        0.0
+    } else {
+        count_f64(snapshot.started) / rate_window.as_secs_f64()
+    };
+    let rate = target_rate.map_or_else(
+        || format!("throughput {achieved:.1}/s"),
+        |_| format!("achieved {achieved:.1}/s"),
+    );
+    vec![
+        format!("Mettle · {description} for {}", display_duration(duration)),
+        format!(
+            "{phase:<9} {} / {}   active {} / {limit}   {rate}",
+            display_duration(snapshot.elapsed.min(duration)),
+            display_duration(duration),
+            snapshot.active
+        ),
+        format!(
+            "started {}   completed {}   ok {}   failed {}   dropped {}",
+            snapshot.started,
+            snapshot.completed,
+            snapshot.success,
+            snapshot.failed,
+            snapshot.dropped
+        ),
+        format!(
+            "latency p50 {}   p95 {}   p99 {}",
+            display_duration(snapshot.latency_p50),
+            display_duration(snapshot.latency_p95),
+            display_duration(snapshot.latency_p99)
+        ),
+    ]
+}
+
+fn workload_result(value: &Value, color: bool) -> Option<String> {
+    let fields = value.as_object()?;
+    let completed = integer(fields.get("count")?)?;
+    let started = integer(fields.get("started")?)?;
+    let success = integer(fields.get("success")?)?;
+    let failed = integer(fields.get("failed")?)?;
+    let dropped = integer(fields.get("dropped")?)?;
+    let elapsed = duration(fields.get("duration")?)?;
+    let latency = fields.get("latency")?.as_object()?;
+    let p50 = duration(latency.get("p50")?)?;
+    let p95 = duration(latency.get("p95")?)?;
+    let p99 = duration(latency.get("p99")?)?;
+    let max = duration(latency.get("max")?)?;
+
+    let mut output = String::new();
+    let saturated = matches!(fields.get("saturated"), Some(Value::Boolean(true)));
+    let status = if saturated {
+        "COMPLETED · SATURATED"
+    } else {
+        "COMPLETED"
+    };
+    writeln!(
+        output,
+        "{}  {}",
+        style(status, if saturated { "33;1" } else { "36;1" }, color),
+        display_duration(elapsed)
+    )
+    .expect("writing to a string cannot fail");
+    writeln!(
+        output,
+        "\n{started} started · {success} successful · {failed} failed · {dropped} dropped · {completed} completed"
+    )
+    .expect("writing to a string cannot fail");
+    if let Some(Value::Object(rate)) = fields.get("rate") {
+        let target = integer(rate.get("target")?)?;
+        let period = duration(rate.get("period")?)?;
+        let actual = number(rate.get("actual")?)?;
+        let target_per_second = integer_f64(target)? / period.as_secs_f64();
+        let actual_per_second = actual / period.as_secs_f64();
+        writeln!(
+            output,
+            "Rate {actual_per_second:.1}/s · target {target_per_second:.1}/s"
+        )
+        .expect("writing to a string cannot fail");
+    } else if let Some(Value::Object(concurrency)) = fields.get("concurrency") {
+        let limit = integer(concurrency.get("limit")?)?;
+        writeln!(output, "Concurrency {limit}").expect("writing to a string cannot fail");
+    }
+    write!(
+        output,
+        "Latency p50 {} · p95 {} · p99 {} · max {}",
+        display_duration(p50),
+        display_duration(p95),
+        display_duration(p99),
+        display_duration(max)
+    )
+    .expect("writing to a string cannot fail");
+    Some(output)
+}
+
+pub fn failure_summary(flow: &str, operations: &[OperationEvent], color: bool) -> String {
+    let mut output = String::new();
+    writeln!(output, "{}\n", style(flow, "1", color)).expect("writing to a string cannot fail");
+    for operation in operations {
+        render_operation(&mut output, operation, color);
+    }
+    write!(output, "{} Flow failed", style("✗", "31", color))
+        .expect("writing to a string cannot fail");
+    output
+}
+
+fn is_http_response(value: &Value) -> bool {
+    http_summary(value).is_some()
+}
+
+fn http_summary(value: &Value) -> Option<(&str, &str, i64)> {
+    let fields = value.as_object()?;
+    let Value::String(method) = fields.get("method")? else {
+        return None;
+    };
+    let Value::String(url) = fields.get("url")? else {
+        return None;
+    };
+    let status = integer(fields.get("status")?)?;
+    Some((method, url, status))
+}
+
+fn response_payload(value: &Value) -> Option<&Value> {
+    let fields = value.as_object()?;
+    match fields.get("json") {
+        Some(Value::Null) | None => fields.get("body"),
+        Some(json) => Some(json),
+    }
+}
+
+fn pretty_value(value: &Value, complete: bool) -> String {
+    let value = response_payload(value).unwrap_or(value);
+    let formatted = match value {
+        Value::Array(_) | Value::Object(_) | Value::Bytes(_) => {
+            serde_json::to_string_pretty(&value_json(value))
+                .expect("Mettle values always convert to JSON")
+        }
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    };
+    if complete {
+        return formatted;
+    }
+    truncate(&formatted, DEFAULT_PREVIEW_CHARS)
+}
+
+fn truncate(value: &str, limit: usize) -> String {
+    let mut characters = value.chars();
+    let preview = characters.by_ref().take(limit).collect::<String>();
+    if characters.next().is_none() {
+        return value.to_owned();
+    }
+    format!(
+        "{preview}\n… response truncated after {} KiB; use --verbose or --raw for the complete value",
+        limit / 1024
+    )
+}
+
+pub fn value_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Boolean(value) => serde_json::Value::Bool(*value),
+        Value::Integer(value) => serde_json::Value::Number((*value).into()),
+        Value::Float(value) => serde_json::Number::from_f64(*value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::Bytes(value) => serde_json::Value::Array(
+            value
+                .iter()
+                .map(|value| serde_json::Value::Number((*value).into()))
+                .collect(),
+        ),
+        Value::Duration(value) => serde_json::Value::String(format!("{}ns", value.as_nanos())),
+        Value::Array(values) => serde_json::Value::Array(values.iter().map(value_json).collect()),
+        Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(name, value)| (name.clone(), value_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+pub fn raw_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value_json(value).to_string(),
+    }
+}
+
+fn integer(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => integer_f64(*value),
+        Value::Float(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn count_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn integer_f64(value: i64) -> Option<f64> {
+    i32::try_from(value).ok().map(f64::from)
+}
+
+fn duration(value: &Value) -> Option<Duration> {
+    match value {
+        Value::Duration(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
+pub fn display_duration(duration: Duration) -> String {
+    if duration >= Duration::from_secs(1) {
+        if duration.as_nanos().is_multiple_of(1_000_000_000) {
+            format!("{}s", duration.as_secs())
+        } else {
+            format!("{:.2}s", duration.as_secs_f64())
+        }
+    } else if duration >= Duration::from_millis(1) {
+        if duration.as_nanos().is_multiple_of(1_000_000) {
+            format!("{}ms", duration.as_millis())
+        } else {
+            format!("{:.2}ms", duration.as_secs_f64() * 1_000.0)
+        }
+    } else if duration >= Duration::from_micros(1) {
+        if duration.as_nanos().is_multiple_of(1_000) {
+            format!("{}us", duration.as_micros())
+        } else {
+            format!("{:.2}us", duration.as_secs_f64() * 1_000_000.0)
+        }
+    } else {
+        format!("{}ns", duration.as_nanos())
+    }
+}
+
+fn status_color(status: i64) -> &'static str {
+    match status {
+        200..=399 => "32",
+        400..=499 => "33",
+        _ => "31",
+    }
+}
+
+fn style(value: &str, code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("\x1b[{code}m{value}\x1b[0m")
+    } else {
+        value.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{ExecutionReport, truncate};
+    use mettle_capability::Value;
+
+    #[test]
+    fn report_formats_a_named_value() {
+        let value = Value::Object(BTreeMap::from([(
+            "active".to_owned(),
+            Value::Boolean(true),
+        )]));
+        let output = ExecutionReport {
+            flow: "health",
+            duration: std::time::Duration::from_millis(12),
+            result: &value,
+            operations: &[],
+        }
+        .human(false, false);
+        assert!(output.contains("health"));
+        assert!(output.contains("\"active\": true"));
+        assert!(output.contains("✓ Completed in 12ms"));
+    }
+
+    #[test]
+    fn preview_reports_truncation() {
+        let output = truncate("abcdef", 3);
+        assert!(output.starts_with("abc"));
+        assert!(output.contains("truncated"));
+    }
+}

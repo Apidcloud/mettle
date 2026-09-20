@@ -198,6 +198,10 @@ pub type CapabilityFuture<'a> =
 pub trait Capability: Send + Sync {
     fn name(&self) -> &'static str;
 
+    fn operation_name(&self, _operation: usize) -> &'static str {
+        "operation"
+    }
+
     fn merge_options(&self, defaults: &mut Object, overrides: Object) {
         merge_objects(defaults, overrides);
     }
