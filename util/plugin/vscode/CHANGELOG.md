@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.6.1
+
+- Keep anonymous Run Flow actions valid when their request text changes.
+- Refresh Run Flow CodeLens actions after saving a `.flow` file.
+- Avoid guessing when structural edits make an anonymous declaration ambiguous.
+
+## 0.6.0
+
+- Highlight and provide snippets for `within`, `retry`, and bounded `parallel` expressions.
+
 ## 0.5.0
 
 - Add a compiler-backed language server using LSP over standard input/output.

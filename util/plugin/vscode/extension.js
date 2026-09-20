@@ -1,6 +1,7 @@
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const vscode = require("vscode");
+const { selectCurrentFlow } = require("./flow-selection");
 
 const MAX_DISCOVERY_OUTPUT = 1024 * 1024;
 const MAX_LSP_MESSAGE = 8 * 1024 * 1024;
@@ -78,6 +79,16 @@ function discoverFlows(document, output, token) {
 class FlowCodeLensProvider {
   constructor(output) {
     this.output = output;
+    this.changeEmitter = new vscode.EventEmitter();
+    this.onDidChangeCodeLenses = this.changeEmitter.event;
+  }
+
+  refresh() {
+    this.changeEmitter.fire();
+  }
+
+  dispose() {
+    this.changeEmitter.dispose();
   }
 
   async provideCodeLenses(document, token) {
@@ -164,7 +175,7 @@ class FlowLanguageServer {
       rootUri: folder?.uri.toString() || null,
       workspaceFolders: folders,
       capabilities: {},
-      clientInfo: { name: "Flow VS Code", version: "0.5.0" },
+      clientInfo: { name: "Flow VS Code", version: "0.6.1" },
     });
     this.notify("initialized", {});
     for (const document of vscode.workspace.textDocuments) {
@@ -362,14 +373,7 @@ async function runFlow(flow, output) {
     cancellationSource.token,
   );
   cancellationSource.dispose();
-  const current = flow.name
-    ? currentFlows.find((candidate) => candidate.name === flow.name)
-    : currentFlows.find(
-        (candidate) =>
-          candidate.name === null &&
-          Number(candidate.line) === flow.line &&
-          candidate.displayName === flow.displayName,
-      );
+  const current = selectCurrentFlow(flow, currentFlows);
   if (!current) {
     void vscode.window.showErrorMessage(
       "The selected flow changed. Use the refreshed Run Flow action.",
@@ -426,6 +430,7 @@ function activate(context) {
   const languageServer = new FlowLanguageServer(output);
   context.subscriptions.push(
     output,
+    provider,
     vscode.languages.registerCodeLensProvider({ language: "flow" }, provider),
     vscode.languages.registerDefinitionProvider(
       { language: "flow", scheme: "file" },
@@ -439,6 +444,11 @@ function activate(context) {
     vscode.workspace.onDidChangeTextDocument((event) => {
       if (event.document.languageId === "flow") {
         languageServer.change(event);
+      }
+    }),
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (document.languageId === "flow") {
+        provider.refresh();
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {

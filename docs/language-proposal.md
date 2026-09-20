@@ -8,7 +8,7 @@ We want to explore a small programming language for concurrent I/O workflows: ma
 
 The central idea is that the language and runtime understand I/O, time, concurrency, cancellation, and measurement directly. A protocol operation such as `GET` is observable; a `flow` gives one or more operations a reusable name; a `rate` block is a scheduling policy; and a `within` block establishes a deadline. These constructs should compose without requiring users to assemble futures, executors, timers, and metric collectors themselves.
 
-This is an evolving design, not a finished language specification. **Current direction** below means a design choice carried forward from the discussion. **Proposed semantics** identifies rules that make the examples precise but still require team agreement. **Future exploration** identifies features outside the initial implementation. `Flow`, `.flow`, and the `flow` command are working names only. Reusable and anonymous flows, direct CLI flow selection and arguments, contexts, environment interpolation, HTTP defaults, GET/POST operations, JSON payloads, response member access, durations, and HTTPS are implemented; the root README is the authority for the exact executable subset. Other examples remain proposed syntax.
+This is an evolving design, not a finished language specification. **Current direction** below means a design choice carried forward from the discussion. **Proposed semantics** identifies rules that make the examples precise but still require team agreement. **Future exploration** identifies features outside the initial implementation. `Flow`, `.flow`, and the `flow` command are working names only. Reusable and anonymous flows, direct CLI flow selection and arguments, contexts, environment interpolation, HTTP defaults, GET/POST operations, JSON payloads, response member access, durations, HTTPS, deadlines, retries, and bounded parallel execution are implemented; the root README is the authority for the exact executable subset. Other examples remain proposed syntax.
 
 ## Goals and design principles
 
@@ -673,6 +673,8 @@ This could support commands such as `flow test --tag smoke`. The project manifes
 
 `parallel` starts child work concurrently and joins it before the enclosing scope proceeds. The runtime retains the parent-child task relationship for deadlines, cancellation, traces, and metrics.
 
+In the implemented grammar, `within` and `retry` each govern one child expression, while `parallel` accepts one or more expression branches. Policy expressions can be nested, bound, or returned. Branches do not declare shared mutable locals.
+
 ```text
 test("service readiness") {
     use context api
@@ -686,9 +688,9 @@ test("service readiness") {
 }
 ```
 
-**Proposed failure policy:** a failed child cancels its siblings, joins their cleanup, and reports the failure. An eventual collect-all policy could support independent checks, but should be explicit. A received HTTP status becomes a task failure only according to the capability's declared success policy or an assertion.
+**Current failure policy:** a failed child cancels its active siblings, joins their cleanup, and reports the failure. Successful results are returned as an array in source order. An eventual collect-all policy could support independent checks, but should be explicit. A received HTTP status is still a value; transport failures and failed assertions are errors.
 
-`parallel(limit: 20) { ... }` provides bounded fan-out. A separate `concurrency(limit: 100) { ... }` workload would express a fixed number of active iterations or users, whereas `rate(target: 100, period: 1s) { ... }` expresses how frequently new iterations start. The exact duration control for sustained concurrency workloads remains open.
+`parallel(limit: 20) { ... }` provides bounded fan-out. The implemented limit and branch count are positive compile-time integer literals, with at most 1,024 branches. Omitting `limit` admits all statically declared branches. A separate `concurrency(limit: 100) { ... }` workload would express a fixed number of active iterations or users, whereas `rate(target: 100, period: 1s) { ... }` expresses how frequently new iterations start. The exact duration control for sustained concurrency workloads remains open.
 
 ### Rate is an arrival policy
 
@@ -722,9 +724,9 @@ flow resilientLookup(id) {
 }
 ```
 
-**Proposed semantics:** `retry(attempts: 3)` permits at most three total attempts. The outer deadline covers all attempts and any backoff. An inner operation timeout cannot extend the outer deadline. A deadline should cancel pending work and perform bounded cleanup rather than merely stop waiting for the result.
+**Current semantics:** `retry(attempts: 3)` permits at most three total attempts. `delay: 50ms` optionally adds a fixed delay between failed attempts. Attempts and delay are positive compile-time literals. The first success is returned; exhaustion reports the final error with the attempt count. The outer deadline covers all attempts and delays. An inner operation timeout cannot extend the outer deadline, and expiry cancels and joins pending child work.
 
-Retry conditions, backoff, jitter, and result propagation through policy blocks still need specification. A sensible initial policy retries explicitly classified transient failures. Retrying side-effecting operations may duplicate effects; a general retry block must not claim exactly-once execution. Protocol retransmission, especially in SIP, must also be distinguished from replaying the whole application operation.
+The current explicit retry block retries any runtime error produced by its single child expression. Predicate filtering, exponential backoff, and jitter remain to be specified. Retrying side-effecting operations may duplicate effects; the block does not claim exactly-once execution. Protocol retransmission, especially in SIP, must also be distinguished from replaying the whole application operation.
 
 ## Operation and execution results
 

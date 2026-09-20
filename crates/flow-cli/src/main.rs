@@ -3,10 +3,12 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::future::Future as _;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::task::Poll;
 
 use flow_capability::{CapabilityDescriptor, Object, Value};
 use flow_compiler::{CompileError, ExecutionPlan, FlowPlan, compile_with_capabilities};
@@ -66,6 +68,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Err(CliError::Failure) => ExitCode::FAILURE,
+        Err(CliError::Interrupted) => ExitCode::from(130),
     }
 }
 
@@ -248,7 +251,25 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
             CliError::Failure
         })?;
     let flow_runtime = Runtime::new(vec![Arc::new(HttpCapability::new())]);
-    match async_runtime.block_on(flow_runtime.execute_selected(&plan, flow_id, arguments)) {
+    let outcome = async_runtime.block_on(async {
+        let mut execution = Box::pin(flow_runtime.execute_selected(&plan, flow_id, arguments));
+        let mut interrupt = Box::pin(tokio::signal::ctrl_c());
+        std::future::poll_fn(|task| {
+            if let Poll::Ready(result) = execution.as_mut().poll(task) {
+                return Poll::Ready(Some(result));
+            }
+            if interrupt.as_mut().poll(task).is_ready() {
+                return Poll::Ready(None);
+            }
+            Poll::Pending
+        })
+        .await
+    });
+    let Some(result) = outcome else {
+        eprintln!("execution cancelled");
+        return Err(CliError::Interrupted);
+    };
+    match result {
         Ok(value) => {
             let output = match options.output {
                 OutputMode::Concise => concise_result(&value),
@@ -516,7 +537,10 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
             .map(Value::Object),
         ExpressionKind::Call { .. }
         | ExpressionKind::Member { .. }
-        | ExpressionKind::Binary { .. } => Err("flow arguments must be literal values"),
+        | ExpressionKind::Binary { .. }
+        | ExpressionKind::Within { .. }
+        | ExpressionKind::Retry { .. }
+        | ExpressionKind::Parallel { .. } => Err("flow arguments must be literal values"),
     }
 }
 
@@ -735,6 +759,7 @@ fn render_source_diagnostic(path: &Path, source: &str, message: &str, span: Span
 enum CliError {
     Usage(String),
     Failure,
+    Interrupted,
 }
 
 #[cfg(test)]

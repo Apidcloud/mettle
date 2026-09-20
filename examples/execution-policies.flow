@@ -1,0 +1,19 @@
+flow probe(path) {
+    response = retry(attempts: 3, delay: 100ms) {
+        http.get("https://postman-echo.com${path}")
+    }
+
+    return response.status
+}
+
+flow main() {
+    responses = within(timeout: 5s) {
+        parallel(limit: 2) {
+            probe("/get?check=health")
+            probe("/get?check=ready")
+            probe("/get?check=version")
+        }
+    }
+
+    return responses
+}

@@ -8,6 +8,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `bytes` | `1.12.1` | `MIT` |
 | `cc` | `1.4.6` | `MIT OR Apache-2.0` |
 | `cfg-if` | `1.0.5` | `MIT OR Apache-2.0` |
+| `errno` | `0.3.14` | `MIT OR Apache-2.0` |
 | `find-msvc-tools` | `0.1.12` | `MIT OR Apache-2.0` |
 | `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` |
 | `futures-core` | `0.3.34` | `MIT OR Apache-2.0` |
@@ -38,6 +39,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `serde_derive` | `1.0.229` | `MIT OR Apache-2.0` |
 | `serde_json` | `1.0.151` | `MIT OR Apache-2.0` |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` |
+| `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` |
 | `smallvec` | `1.16.1` | `MIT OR Apache-2.0` |
 | `socket2` | `0.6.5` | `MIT OR Apache-2.0` |
 | `subtle` | `2.6.1` | `BSD-3-Clause` |

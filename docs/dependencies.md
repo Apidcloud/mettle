@@ -6,7 +6,7 @@ Flow keeps third-party code concentrated around networking, TLS, byte buffers, a
 
 | Package | Use | Licence | Selection notes |
 | --- | --- | --- | --- |
-| Tokio | Async runtime, sockets, timers | MIT | Cross-platform runtime; only `net`, runtime, and time features are enabled |
+| Tokio | Async runtime, sockets, timers, Ctrl+C handling | MIT | Cross-platform runtime; only `net`, runtime, signal, and time features are enabled |
 | Hyper | HTTP/1.1 protocol implementation | MIT | Low-level client without a web framework |
 | Hyper-util | Tokio adapter and pooled legacy client | MIT | Provides maintained client pooling for Hyper 1.x |
 | HTTP-body-util | Request body and response frame helpers | MIT | Used for bounded streaming response reads |

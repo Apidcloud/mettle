@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::time::Duration;
 
 use flow_capability::{CapabilityDescriptor, FieldSchema, SchemaType};
 pub use flow_syntax::BinaryOperator;
@@ -92,6 +93,19 @@ pub enum PlanExpressionKind {
         operation: usize,
         arguments: Vec<PlanExpression>,
         options: Vec<PlanField>,
+    },
+    Within {
+        timeout: Duration,
+        body: Box<PlanExpression>,
+    },
+    Retry {
+        attempts: usize,
+        delay: Duration,
+        body: Box<PlanExpression>,
+    },
+    Parallel {
+        limit: usize,
+        branches: Vec<PlanExpression>,
     },
 }
 
@@ -400,6 +414,38 @@ impl<'a> DefinitionFinder<'a> {
                 return self
                     .find_in_expression(left, locals, flow)
                     .or_else(|| self.find_in_expression(right, locals, flow));
+            }
+            ExpressionKind::Within { timeout, body } => {
+                return self
+                    .find_in_expression(timeout, locals, flow)
+                    .or_else(|| self.find_in_expression(body, locals, flow));
+            }
+            ExpressionKind::Retry {
+                attempts,
+                delay,
+                body,
+            } => {
+                return self
+                    .find_in_expression(attempts, locals, flow)
+                    .or_else(|| {
+                        delay
+                            .as_deref()
+                            .and_then(|delay| self.find_in_expression(delay, locals, flow))
+                    })
+                    .or_else(|| self.find_in_expression(body, locals, flow));
+            }
+            ExpressionKind::Parallel { limit, branches } => {
+                if let Some(target) = limit
+                    .as_deref()
+                    .and_then(|limit| self.find_in_expression(limit, locals, flow))
+                {
+                    return Some(target);
+                }
+                for branch in branches {
+                    if let Some(target) = self.find_in_expression(branch, locals, flow) {
+                        return Some(target);
+                    }
+                }
             }
             ExpressionKind::Null
             | ExpressionKind::Boolean(_)
@@ -1014,12 +1060,132 @@ impl<'a> Compiler<'a> {
                     context,
                 );
             }
+            ExpressionKind::Within { .. }
+            | ExpressionKind::Retry { .. }
+            | ExpressionKind::Parallel { .. } => {
+                return self.compile_policy_expression(current_flow, expression, locals, context);
+            }
         };
         Some(PlanExpression {
             kind,
             value_type,
             span: expression.span,
         })
+    }
+
+    fn compile_policy_expression(
+        &mut self,
+        current_flow: Option<usize>,
+        expression: &Expression,
+        locals: &HashMap<String, usize>,
+        context: Option<usize>,
+    ) -> Option<PlanExpression> {
+        let (kind, value_type) = match &expression.kind {
+            ExpressionKind::Within { timeout, body } => {
+                let timeout = self.duration_literal(timeout, "`within` timeout")?;
+                let body = self.compile_expression(current_flow, body, locals, context)?;
+                let value_type = body.value_type;
+                (
+                    PlanExpressionKind::Within {
+                        timeout,
+                        body: Box::new(body),
+                    },
+                    value_type,
+                )
+            }
+            ExpressionKind::Retry {
+                attempts,
+                delay,
+                body,
+            } => {
+                let attempts = self.positive_integer_literal(attempts, "`retry` attempts")?;
+                let delay = match delay.as_deref() {
+                    Some(delay) => self.duration_literal(delay, "`retry` delay")?,
+                    None => Duration::default(),
+                };
+                let body = self.compile_expression(current_flow, body, locals, context)?;
+                let value_type = body.value_type;
+                (
+                    PlanExpressionKind::Retry {
+                        attempts,
+                        delay,
+                        body: Box::new(body),
+                    },
+                    value_type,
+                )
+            }
+            ExpressionKind::Parallel { limit, branches } => {
+                if branches.is_empty() || branches.len() > 1_024 {
+                    let message = if branches.is_empty() {
+                        "`parallel` requires at least one branch"
+                    } else {
+                        "`parallel` supports at most 1024 branches"
+                    };
+                    self.errors
+                        .push(CompileError::new(message, expression.span));
+                    return None;
+                }
+                let limit = match limit.as_deref() {
+                    Some(limit) => self.positive_integer_literal(limit, "`parallel` limit")?,
+                    None => branches.len(),
+                }
+                .min(branches.len());
+                let branches = branches
+                    .iter()
+                    .filter_map(|branch| {
+                        self.compile_expression(current_flow, branch, locals, context)
+                    })
+                    .collect();
+                (
+                    PlanExpressionKind::Parallel { limit, branches },
+                    ValueType::Array,
+                )
+            }
+            _ => unreachable!("only policy expressions are delegated"),
+        };
+        Some(PlanExpression {
+            kind,
+            value_type,
+            span: expression.span,
+        })
+    }
+
+    fn positive_integer_literal(&mut self, expression: &Expression, label: &str) -> Option<usize> {
+        let ExpressionKind::Integer(value) = expression.kind else {
+            self.errors.push(CompileError::new(
+                format!("{label} must be a positive integer literal"),
+                expression.span,
+            ));
+            return None;
+        };
+        usize::try_from(value)
+            .ok()
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                self.errors.push(CompileError::new(
+                    format!("{label} must be greater than zero"),
+                    expression.span,
+                ));
+                None
+            })
+    }
+
+    fn duration_literal(&mut self, expression: &Expression, label: &str) -> Option<Duration> {
+        let ExpressionKind::DurationNanos(value) = expression.kind else {
+            self.errors.push(CompileError::new(
+                format!("{label} must be a duration literal"),
+                expression.span,
+            ));
+            return None;
+        };
+        if value == 0 {
+            self.errors.push(CompileError::new(
+                format!("{label} must be greater than zero"),
+                expression.span,
+            ));
+            return None;
+        }
+        Some(Duration::from_nanos(value))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1532,10 +1698,14 @@ enum VisitState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use flow_capability::{CapabilityDescriptor, FieldSchema, OperationSchema, SchemaType};
     use flow_syntax::{ExpressionKind, Statement, parse};
 
-    use super::{PlanExpressionKind, compile, compile_with_capabilities, find_definition};
+    use super::{
+        Instruction, PlanExpressionKind, compile, compile_with_capabilities, find_definition,
+    };
 
     const TLS_OPTIONS: &[FieldSchema] = &[FieldSchema {
         name: "verifyCertificates",
@@ -1771,5 +1941,54 @@ mod tests {
         );
         assert_eq!(find_definition(&program, 1, call.start), Some(flow_span));
         assert_eq!(find_definition(&program, 1, local.start), Some(binding));
+    }
+
+    #[test]
+    fn lowers_bounded_structured_execution_policies() {
+        let program = parse(
+            r"
+            flow first() = 1
+            flow second() = 2
+            flow main() = within(timeout: 2s) {
+                retry(attempts: 3, delay: 10ms) {
+                    parallel(limit: 1) { first() second() }
+                }
+            }
+            ",
+        )
+        .expect("source should parse");
+        let plan = compile(&program).expect("source should compile");
+        let Instruction::Return(expression) = &plan.flows[2].instructions[0] else {
+            panic!("expected return");
+        };
+        let PlanExpressionKind::Within { timeout, body } = &expression.kind else {
+            panic!("expected deadline plan");
+        };
+        assert_eq!(*timeout, Duration::from_secs(2));
+        let PlanExpressionKind::Retry {
+            attempts,
+            delay,
+            body,
+        } = &body.kind
+        else {
+            panic!("expected retry plan");
+        };
+        assert_eq!(*attempts, 3);
+        assert_eq!(*delay, Duration::from_millis(10));
+        let PlanExpressionKind::Parallel { limit, branches } = &body.kind else {
+            panic!("expected parallel plan");
+        };
+        assert_eq!(*limit, 1);
+        assert_eq!(branches.len(), 2);
+    }
+
+    #[test]
+    fn rejects_unbounded_or_invalid_policy_configuration() {
+        let messages = errors("flow main() = parallel(limit: 0) { within(timeout: 0s) { true } }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("greater than zero"))
+        );
     }
 }

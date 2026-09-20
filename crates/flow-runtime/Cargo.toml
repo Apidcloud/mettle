@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 flow-capability = { path = "../flow-capability" }
 flow-compiler = { path = "../flow-compiler" }
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 flow-syntax = { path = "../flow-syntax" }

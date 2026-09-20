@@ -380,6 +380,8 @@ The server deliberately returns no destination for ambiguous, unresolved, enviro
 
 ### Milestone 4: structured execution policies
 
+Status: complete.
+
 Deliver:
 
 - `within`, retry, and `parallel` plan nodes;
@@ -390,6 +392,20 @@ Deliver:
 - explicit timeout and retry result semantics.
 
 User acceptance runs parallel fixture requests, cancels an in-progress run, verifies prompt shutdown, and confirms that a deadline cancels its child operation. Stress tests must prove queues remain within configured bounds.
+
+`parallel` uses a fixed-size active set and a statically bounded branch list; no
+runtime task queue grows with completion latency. Results retain source order.
+Failure drops active sibling futures before returning, which cancels HTTP work
+without detached tasks. `within` races its complete child future against the
+runtime clock, so nested operations and retry delays inherit the same deadline.
+The clock is injectable for deterministic deadline and backoff tests. The CLI
+races root execution against SIGINT and returns status 130 after dropping the
+owned execution tree.
+
+Run `./scripts/acceptance-execution.sh` to verify retry recovery, bounded HTTP
+fan-out, deadline cancellation, and graceful Ctrl+C behavior against the local
+fixture. Runtime tests additionally exercise 100 branches under a limit of seven
+and verify sibling cleanup after a branch failure.
 
 ### Milestone 5: local load engine
 

@@ -48,6 +48,34 @@
       "assert(${1:response.status == 200})"
     ]
   },
+  "Deadline scope": {
+    "prefix": "within",
+    "description": "Run one expression within a deadline",
+    "body": [
+      "within(timeout: ${1:2s}) {",
+      "    ${2:http.get(\"/path\")}",
+      "}"
+    ]
+  },
+  "Retry scope": {
+    "prefix": "retry",
+    "description": "Retry one failing expression",
+    "body": [
+      "retry(attempts: ${1:3}, delay: ${2:50ms}) {",
+      "    ${3:http.get(\"/path\")}",
+      "}"
+    ]
+  },
+  "Bounded parallel scope": {
+    "prefix": "parallel",
+    "description": "Run expressions concurrently with bounded fan-out",
+    "body": [
+      "parallel(limit: ${1:4}) {",
+      "    ${2:http.get(\"/first\")}",
+      "    ${3:http.get(\"/second\")}",
+      "}"
+    ]
+  },
   "HTTP context": {
     "prefix": "flowcontext",
     "description": "Declare an HTTP context",

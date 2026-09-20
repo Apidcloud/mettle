@@ -19,12 +19,34 @@ class FixtureServer(ThreadingHTTPServer):
         super().__init__(address, FixtureHandler)
         self._connection_ids: dict[int, int] = {}
         self._connection_lock = threading.Lock()
+        self._policy_lock = threading.Lock()
+        self._flaky_attempts = 0
+        self._active_work = 0
+        self._maximum_work = 0
 
     def connection_id(self, socket_id: int) -> int:
         with self._connection_lock:
             if socket_id not in self._connection_ids:
                 self._connection_ids[socket_id] = len(self._connection_ids) + 1
             return self._connection_ids[socket_id]
+
+    def flaky_attempt(self) -> int:
+        with self._policy_lock:
+            self._flaky_attempts += 1
+            return self._flaky_attempts
+
+    def work_started(self) -> None:
+        with self._policy_lock:
+            self._active_work += 1
+            self._maximum_work = max(self._maximum_work, self._active_work)
+
+    def work_finished(self) -> None:
+        with self._policy_lock:
+            self._active_work -= 1
+
+    def work_stats(self) -> dict[str, int]:
+        with self._policy_lock:
+            return {"active": self._active_work, "maximum": self._maximum_work}
 
 
 class FixtureHandler(BaseHTTPRequestHandler):
@@ -47,6 +69,30 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if self.path == "/slow":
             time.sleep(0.2)
             self._json(200, {"completed": True})
+            return
+        if self.path == "/hang":
+            time.sleep(10)
+            self._json(200, {"completed": True})
+            return
+        if self.path == "/flaky":
+            attempt = self.server.flaky_attempt()
+            if attempt < 3:
+                self.close_connection = True
+                self.connection.shutdown(2)
+                self.connection.close()
+                return
+            self._json(200, {"attempt": attempt})
+            return
+        if self.path.startswith("/work/"):
+            self.server.work_started()
+            try:
+                time.sleep(0.05)
+                self._json(200, {"path": self.path})
+            finally:
+                self.server.work_finished()
+            return
+        if self.path == "/parallel-stats":
+            self._json(200, self.server.work_stats())
             return
         if self.path == "/slow-body":
             body = b'{"completed":true}'

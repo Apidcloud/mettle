@@ -3,6 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 use std::{env, fmt};
 
 use flow_capability::{Capability, Object, Span, Value};
@@ -12,6 +14,21 @@ use flow_compiler::{
 };
 
 const MAX_CALL_DEPTH: usize = 1_024;
+
+pub type ClockFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+pub trait Clock: Send + Sync {
+    fn sleep(&self, duration: Duration) -> ClockFuture;
+}
+
+#[derive(Debug, Default)]
+pub struct TokioClock;
+
+impl Clock for TokioClock {
+    fn sleep(&self, duration: Duration) -> ClockFuture {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeError {
@@ -36,12 +53,24 @@ struct ActiveContext {
 
 pub struct Runtime {
     capabilities: Vec<Arc<dyn Capability>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new(capabilities: Vec<Arc<dyn Capability>>) -> Self {
-        Self { capabilities }
+        Self {
+            capabilities,
+            clock: Arc::new(TokioClock),
+        }
+    }
+
+    #[must_use]
+    pub fn with_clock(capabilities: Vec<Arc<dyn Capability>>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            capabilities,
+            clock,
+        }
     }
 
     /// Execute the program's default flow, or its only flow when unambiguous.
@@ -78,6 +107,7 @@ impl Runtime {
         Executor {
             plan,
             capabilities: &self.capabilities,
+            clock: self.clock.as_ref(),
             flow_stack: Vec::new(),
             secrets: Vec::new(),
         }
@@ -115,9 +145,11 @@ impl Default for Runtime {
     }
 }
 
+#[derive(Clone)]
 struct Executor<'a> {
     plan: &'a ExecutionPlan,
     capabilities: &'a [Arc<dyn Capability>],
+    clock: &'a dyn Clock,
     flow_stack: Vec<String>,
     secrets: Vec<String>,
 }
@@ -404,8 +436,94 @@ impl Executor<'_> {
                         .await
                         .map_err(|error| self.error(error.message, error.span))
                 }
+                PlanExpressionKind::Within { timeout, body } => {
+                    let timeout_error = self.error(
+                        format!("deadline exceeded after {}", format_duration(*timeout)),
+                        expression.span,
+                    );
+                    let mut timer = self.clock.sleep(*timeout);
+                    let mut work = self.evaluate(body, locals, context);
+                    std::future::poll_fn(|task| {
+                        if let Poll::Ready(result) = work.as_mut().poll(task) {
+                            return Poll::Ready(result);
+                        }
+                        if timer.as_mut().poll(task).is_ready() {
+                            return Poll::Ready(Err(timeout_error.clone()));
+                        }
+                        Poll::Pending
+                    })
+                    .await
+                }
+                PlanExpressionKind::Retry {
+                    attempts,
+                    delay,
+                    body,
+                } => {
+                    let mut last_error = None;
+                    for attempt in 0..*attempts {
+                        match self.evaluate(body, locals, context).await {
+                            Ok(value) => return Ok(value),
+                            Err(error) => last_error = Some(error),
+                        }
+                        if attempt + 1 < *attempts && !delay.is_zero() {
+                            self.clock.sleep(*delay).await;
+                        }
+                    }
+                    let mut error = last_error.expect("retry always has at least one attempt");
+                    error.message = format!(
+                        "retry exhausted after {attempts} attempts: {}",
+                        error.message
+                    );
+                    Err(error)
+                }
+                PlanExpressionKind::Parallel { limit, branches } => {
+                    self.evaluate_parallel(branches, *limit, locals, context)
+                        .await
+                }
             }
         })
+    }
+
+    async fn evaluate_parallel(
+        &mut self,
+        branches: &[PlanExpression],
+        limit: usize,
+        locals: &[Option<Value>],
+        context: &ActiveContext,
+    ) -> Result<Value, RuntimeError> {
+        let mut results = vec![None; branches.len()];
+        let mut futures = Vec::with_capacity(limit);
+        let mut next = 0;
+        while next < branches.len() || !futures.is_empty() {
+            while next < branches.len() && futures.len() < limit {
+                let index = next;
+                let branch = &branches[index];
+                let mut executor = self.clone();
+                let locals = locals.to_vec();
+                let context = context.clone();
+                let future: Pin<Box<dyn Future<Output = Result<Value, RuntimeError>> + Send + '_>> =
+                    Box::pin(async move { executor.evaluate(branch, &locals, &context).await });
+                futures.push((index, future));
+                next += 1;
+            }
+            let (completed, result) = std::future::poll_fn(|task| {
+                for (position, (_, future)) in futures.iter_mut().enumerate() {
+                    if let Poll::Ready(result) = future.as_mut().poll(task) {
+                        return Poll::Ready((position, result));
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+            let (index, _) = futures.swap_remove(completed);
+            results[index] = Some(result?);
+        }
+        Ok(Value::Array(
+            results
+                .into_iter()
+                .map(|value| value.expect("every parallel branch completed"))
+                .collect(),
+        ))
     }
 
     async fn evaluate_fields(
@@ -432,6 +550,18 @@ impl Executor<'_> {
             span,
             flow_stack: self.flow_stack.clone(),
         }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_nanos().is_multiple_of(1_000_000_000) {
+        format!("{}s", duration.as_secs())
+    } else if duration.as_nanos().is_multiple_of(1_000_000) {
+        format!("{}ms", duration.as_millis())
+    } else if duration.as_nanos().is_multiple_of(1_000) {
+        format!("{}us", duration.as_micros())
+    } else {
+        format!("{}ns", duration.as_nanos())
     }
 }
 
@@ -471,12 +601,140 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
-    use flow_compiler::compile;
+    use flow_capability::{
+        Capability, CapabilityDescriptor, CapabilityFuture, Object, OperationSchema, Span,
+    };
+    use flow_compiler::{compile, compile_with_capabilities};
     use flow_syntax::parse;
 
-    use super::{Runtime, Value};
+    use super::{Clock, ClockFuture, Runtime, Value};
+
+    const PROBE_OPERATIONS: &[OperationSchema] = &[OperationSchema {
+        name: "wait",
+        parameters: &[],
+        options: &[],
+    }];
+    const PROBE: CapabilityDescriptor = CapabilityDescriptor {
+        name: "probe",
+        defaults: &[],
+        operations: PROBE_OPERATIONS,
+    };
+
+    #[derive(Default)]
+    struct ImmediateClock {
+        sleeps: AtomicUsize,
+    }
+
+    impl Clock for ImmediateClock {
+        fn sleep(&self, _duration: Duration) -> ClockFuture {
+            self.sleeps.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::ready(()))
+        }
+    }
+
+    struct PendingCapability {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Capability for PendingCapability {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+
+        fn invoke(
+            &self,
+            _operation: usize,
+            _arguments: Vec<Value>,
+            _options: Object,
+            _span: Span,
+        ) -> CapabilityFuture<'_> {
+            Box::pin(PendingOperation {
+                dropped: Arc::clone(&self.dropped),
+            })
+        }
+    }
+
+    struct PendingOperation {
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[derive(Default)]
+    struct ProbeCapability {
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+    }
+
+    impl Capability for ProbeCapability {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+
+        fn invoke(
+            &self,
+            _operation: usize,
+            _arguments: Vec<Value>,
+            _options: Object,
+            _span: Span,
+        ) -> CapabilityFuture<'_> {
+            Box::pin(ProbeOperation {
+                active: Arc::clone(&self.active),
+                maximum: Arc::clone(&self.maximum),
+                started: false,
+            })
+        }
+    }
+
+    struct ProbeOperation {
+        active: Arc<AtomicUsize>,
+        maximum: Arc<AtomicUsize>,
+        started: bool,
+    }
+
+    impl Future for ProbeOperation {
+        type Output = Result<Value, flow_capability::CapabilityError>;
+
+        fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.started {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                self.started = false;
+                Poll::Ready(Ok(Value::Null))
+            } else {
+                self.started = true;
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.maximum.fetch_max(active, Ordering::SeqCst);
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for ProbeOperation {
+        fn drop(&mut self) {
+            if self.started {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    impl Future for PendingOperation {
+        type Output = Result<Value, flow_capability::CapabilityError>;
+
+        fn poll(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingOperation {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::noop();
@@ -554,5 +812,102 @@ mod tests {
             block_on(Runtime::default().execute(&plan)).expect("program should run"),
             Value::String("Flow".to_owned())
         );
+    }
+
+    #[test]
+    fn parallel_preserves_source_order() {
+        let syntax = parse(
+            r"
+            flow first() = 1
+            flow second() = 2
+            flow third() = 3
+            flow main() = parallel(limit: 2) { third() first() second() }
+            ",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        assert_eq!(
+            block_on(Runtime::default().execute(&plan)).expect("parallel work should complete"),
+            Value::Array(vec![
+                Value::Integer(3),
+                Value::Integer(1),
+                Value::Integer(2)
+            ])
+        );
+    }
+
+    #[test]
+    fn deadline_drops_pending_child_work() {
+        let syntax = parse("flow main() = within(timeout: 1s) { probe.wait() }")
+            .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let clock = Arc::new(ImmediateClock::default());
+        let runtime = Runtime::with_clock(
+            vec![Arc::new(PendingCapability {
+                dropped: Arc::clone(&dropped),
+            })],
+            clock,
+        );
+        let error = block_on(runtime.execute(&plan)).expect_err("deadline should expire");
+        assert_eq!(error.message, "deadline exceeded after 1s");
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn retry_uses_the_injected_clock_and_reports_exhaustion() {
+        let variable = format!("FLOW_RETRY_MISSING_{}", std::process::id());
+        let syntax = parse(&format!(
+            "flow main() = retry(attempts: 3, delay: 10ms) {{ env(\"{variable}\") }}"
+        ))
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let clock = Arc::new(ImmediateClock::default());
+        let runtime = Runtime::with_clock(Vec::new(), clock.clone());
+        let error = block_on(runtime.execute(&plan)).expect_err("retry should exhaust");
+        assert!(
+            error
+                .message
+                .starts_with("retry exhausted after 3 attempts:")
+        );
+        assert_eq!(clock.sleeps.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn parallel_admission_never_exceeds_its_limit() {
+        let branches = std::iter::repeat_n("probe.wait()", 100)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let syntax = parse(&format!(
+            "flow main() = parallel(limit: 7) {{ {branches} }}"
+        ))
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let capability = Arc::new(ProbeCapability::default());
+        let runtime = Runtime::new(vec![capability.clone()]);
+        let result = block_on(runtime.execute(&plan)).expect("parallel work should complete");
+        let Value::Array(values) = result else {
+            panic!("parallel should return an array");
+        };
+        assert_eq!(values.len(), 100);
+        assert_eq!(capability.maximum.load(Ordering::SeqCst), 7);
+        assert_eq!(capability.active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_parallel_branch_cancels_and_joins_its_siblings() {
+        let variable = format!("FLOW_PARALLEL_MISSING_{}", std::process::id());
+        let syntax = parse(&format!(
+            "flow main() = parallel() {{ probe.wait() env(\"{variable}\") }}"
+        ))
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let runtime = Runtime::new(vec![Arc::new(PendingCapability {
+            dropped: Arc::clone(&dropped),
+        })]);
+        let error = block_on(runtime.execute(&plan)).expect_err("one branch should fail");
+        assert!(error.message.contains("required environment variable"));
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

@@ -1,0 +1,44 @@
+context localApi {
+    defaults http {
+        baseUrl: env("FLOW_BASE_URL")
+        timeout: 2s
+
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+    }
+}
+
+flow policies() {
+    use context localApi
+
+    recovered = retry(attempts: 3, delay: 10ms) {
+        http.get("/flaky")
+    }
+
+    responses = within(timeout: 1s) {
+        parallel(limit: 2) {
+            http.get("/work/1")
+            http.get("/work/2")
+            http.get("/work/3")
+            http.get("/work/4")
+        }
+    }
+
+    stats = http.get("/parallel-stats")
+    return {
+        retryAttempt: recovered.json.attempt
+        resultCount: responses
+        maximumConcurrency: stats.json.maximum
+    }
+}
+
+flow deadline() {
+    use context localApi
+    return within(timeout: 50ms) { http.get("/slow") }
+}
+
+flow cancellable() {
+    use context localApi
+    return http.get("/hang")
+}

@@ -1,6 +1,6 @@
 # Flow
 
-Flow is an experimental language and native runtime for I/O-oriented workflows. It currently supports concise request collections, reusable parameterized flows, multi-file projects and namespaces, composable contexts, assertions, environment configuration, HTTP/1.1 and HTTPS operations, JSON payloads and responses, and compiler-validated HTTP options.
+Flow is an experimental language and native runtime for I/O-oriented workflows. It currently supports concise request collections, reusable parameterized flows, multi-file projects and namespaces, composable contexts, assertions, structured deadlines, retries and bounded parallel execution, environment configuration, HTTP/1.1 and HTTPS operations, JSON payloads and responses, and compiler-validated HTTP options.
 
 The implementation compiles source into a resolved execution plan and interprets that plan on an asynchronous Rust runtime. HTTP clients and their connection pools are reused across operations.
 
@@ -30,6 +30,7 @@ cargo fmt --all -- --check
 ./scripts/check-licenses.py
 ./scripts/acceptance-http.sh
 ./scripts/acceptance-project.sh
+./scripts/acceptance-execution.sh
 ```
 
 The HTTP acceptance command starts isolated HTTP and HTTPS fixtures on random local ports. It verifies named and anonymous entry flows, CLI arguments, request chaining, JSON, environment configuration, connection reuse, whole-exchange timeouts (including response streaming), compile-time schema errors, secure certificate rejection, and the explicit certificate-verification override.
@@ -182,6 +183,45 @@ Run the included project example with:
 ```bash
 cargo run -- run examples/project/main.flow
 ```
+
+### Structured execution
+
+Execution policies are expressions, so their results can be bound, returned, or
+nested. Policy configuration uses named fields and compile-time bounded literals:
+
+```flow
+flow resilientRead() {
+    responses = within(timeout: 2s) {
+        retry(attempts: 3, delay: 50ms) {
+            parallel(limit: 2) {
+                http.get("/health")
+                http.get("/ready")
+            }
+        }
+    }
+
+    return responses
+}
+```
+
+`parallel` returns an array in source order. At most `limit` branches are active,
+and the first failure cancels and joins active siblings. `retry` counts the first
+execution as an attempt, optionally waits a fixed delay between failures, and
+returns the first success. Exhaustion reports the final failure. `within` covers
+all nested work, including retry delays, and cancels its child when the deadline
+expires. Ctrl+C cancels the root execution and exits with status 130.
+`within` and `retry` each contain one child expression; `parallel` contains one or
+more independent expression branches. Bindings remain in the surrounding flow,
+which avoids shared mutable locals between concurrent branches.
+
+The public policy example uses Postman Echo and needs an internet connection:
+
+```bash
+cargo run -- run examples/execution-policies.flow
+```
+
+For a repeatable local check of retry recovery, concurrency bounds, deadlines,
+and Ctrl+C cleanup, run `./scripts/acceptance-execution.sh`.
 
 ### Values and flows
 
@@ -356,7 +396,7 @@ The included VS Code extension provides `.flow` file recognition, syntax highlig
 cargo install --path crates/flow-cli --locked
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/flow-language-0.5.0.vsix --force
+code --install-extension dist/flow-language-0.6.1.vsix --force
 ```
 
 See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md).
@@ -385,7 +425,7 @@ Third-party Rust dependencies and their licences are documented in [`docs/depend
 - HTTP/1.1 `GET` and `POST` only
 - no redirects or proxy discovery
 - one directly applied context per flow; contexts themselves may compose
-- no retries, deadline scopes, parallel execution, or load generation
+- no rate/concurrency workloads or load generation
 - no custom CA bundles, client certificates, or mutual TLS
 - Linux is the tested release platform
 

@@ -163,6 +163,29 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
             set_expression_source(left, source);
             set_expression_source(right, source);
         }
+        ExpressionKind::Within { timeout, body } => {
+            set_expression_source(timeout, source);
+            set_expression_source(body, source);
+        }
+        ExpressionKind::Retry {
+            attempts,
+            delay,
+            body,
+        } => {
+            set_expression_source(attempts, source);
+            if let Some(delay) = delay {
+                set_expression_source(delay, source);
+            }
+            set_expression_source(body, source);
+        }
+        ExpressionKind::Parallel { limit, branches } => {
+            if let Some(limit) = limit {
+                set_expression_source(limit, source);
+            }
+            for branch in branches {
+                set_expression_source(branch, source);
+            }
+        }
         ExpressionKind::Null
         | ExpressionKind::Boolean(_)
         | ExpressionKind::Integer(_)
@@ -279,6 +302,19 @@ pub enum ExpressionKind {
         operator: BinaryOperator,
         right: Box<Expression>,
     },
+    Within {
+        timeout: Box<Expression>,
+        body: Box<Expression>,
+    },
+    Retry {
+        attempts: Box<Expression>,
+        delay: Option<Box<Expression>>,
+        body: Box<Expression>,
+    },
+    Parallel {
+        limit: Option<Box<Expression>>,
+        branches: Vec<Expression>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +365,9 @@ enum TokenKind {
     Use,
     Return,
     Assert,
+    Within,
+    Retry,
+    Parallel,
     True,
     False,
     Null,
@@ -473,6 +512,9 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
         "use" => TokenKind::Use,
         "return" => TokenKind::Return,
         "assert" => TokenKind::Assert,
+        "within" => TokenKind::Within,
+        "retry" => TokenKind::Retry,
+        "parallel" => TokenKind::Parallel,
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "null" => TokenKind::Null,
@@ -886,6 +928,9 @@ impl Parser {
     fn parse_primary_expression(&mut self) -> Result<Expression, SyntaxError> {
         let token = self.advance();
         let mut expression = match token.kind {
+            TokenKind::Within => return self.parse_within(token.span),
+            TokenKind::Retry => return self.parse_retry(token.span),
+            TokenKind::Parallel => return self.parse_parallel(token.span),
             TokenKind::Null => literal(ExpressionKind::Null, token.span),
             TokenKind::True => literal(ExpressionKind::Boolean(true), token.span),
             TokenKind::False => literal(ExpressionKind::Boolean(false), token.span),
@@ -971,6 +1016,83 @@ impl Parser {
         }
 
         Ok(expression)
+    }
+
+    fn parse_within(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        self.take_named_option("timeout")?;
+        let timeout = self.parse_expression()?;
+        self.take(&TokenKind::RightParen)?;
+        self.take(&TokenKind::LeftBrace)?;
+        let body = self.parse_expression()?;
+        let end = self.take(&TokenKind::RightBrace)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Within {
+                timeout: Box::new(timeout),
+                body: Box::new(body),
+            },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_retry(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        self.take_named_option("attempts")?;
+        let attempts = self.parse_expression()?;
+        let delay = if self.take_if(&TokenKind::Comma) {
+            self.take_named_option("delay")?;
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        self.take(&TokenKind::RightParen)?;
+        self.take(&TokenKind::LeftBrace)?;
+        let body = self.parse_expression()?;
+        let end = self.take(&TokenKind::RightBrace)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Retry {
+                attempts: Box::new(attempts),
+                delay,
+                body: Box::new(body),
+            },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_parallel(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        let limit = if self.at(&TokenKind::RightParen) {
+            None
+        } else {
+            self.take_named_option("limit")?;
+            Some(Box::new(self.parse_expression()?))
+        };
+        self.take(&TokenKind::RightParen)?;
+        self.take(&TokenKind::LeftBrace)?;
+        let mut branches = Vec::new();
+        while !self.at(&TokenKind::RightBrace) {
+            if self.at(&TokenKind::End) {
+                return Err(self.expected("a parallel branch or `}`"));
+            }
+            branches.push(self.parse_expression()?);
+        }
+        let end = self.take(&TokenKind::RightBrace)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Parallel { limit, branches },
+            span: start.join(end),
+        })
+    }
+
+    fn take_named_option(&mut self, expected: &'static str) -> Result<(), SyntaxError> {
+        let name = self.take_identifier("a policy option name")?;
+        if name.value != expected {
+            return Err(SyntaxError::new(
+                format!("expected `{expected}` policy option"),
+                name.span,
+            ));
+        }
+        self.take(&TokenKind::Colon)?;
+        Ok(())
     }
 
     fn parse_array(&mut self, start: Span) -> Result<Expression, SyntaxError> {
@@ -1103,6 +1225,9 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::Use => "`use`",
         TokenKind::Return => "`return`",
         TokenKind::Assert => "`assert`",
+        TokenKind::Within => "`within`",
+        TokenKind::Retry => "`retry`",
+        TokenKind::Parallel => "`parallel`",
         TokenKind::True => "`true`",
         TokenKind::False => "`false`",
         TokenKind::Null => "`null`",
@@ -1169,6 +1294,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_structured_execution_policies() {
+        let program = parse(
+            r"
+            flow main() {
+                return within(timeout: 2s) {
+                    retry(attempts: 3, delay: 10ms) {
+                        parallel(limit: 2) { first() second() third() }
+                    }
+                }
+            }
+            ",
+        )
+        .expect("policies should parse");
+        let Statement::Return { expression, .. } = &program.flows[0].body[0] else {
+            panic!("expected return");
+        };
+        let ExpressionKind::Within { body, .. } = &expression.kind else {
+            panic!("expected within");
+        };
+        let ExpressionKind::Retry { body, delay, .. } = &body.kind else {
+            panic!("expected retry");
+        };
+        assert!(delay.is_some());
+        let ExpressionKind::Parallel { limit, branches } = &body.kind else {
+            panic!("expected parallel");
+        };
+        assert!(limit.is_some());
+        assert_eq!(branches.len(), 3);
     }
 
     #[test]
