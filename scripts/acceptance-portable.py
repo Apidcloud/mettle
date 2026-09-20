@@ -17,14 +17,24 @@ EXECUTABLE = ROOT / "target" / "debug" / ("mettle.exe" if os.name == "nt" else "
 
 
 def run(*arguments: str, environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(EXECUTABLE), *arguments],
+    command = [str(EXECUTABLE), *arguments]
+    result = subprocess.run(
+        command,
         cwd=ROOT,
         env=environment,
-        check=True,
         capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        print(f"Command failed with exit code {result.returncode}: {' '.join(command)}", file=sys.stderr)
+        if result.stdout:
+            print("stdout:", file=sys.stderr)
+            print(result.stdout, file=sys.stderr)
+        if result.stderr:
+            print("stderr:", file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+        result.check_returncode()
+    return result
 
 
 def fixture_server() -> object:
