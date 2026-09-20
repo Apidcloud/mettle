@@ -34,7 +34,7 @@ mettle run users.mettle createUser
 
 Mettle compiles source into a validated execution plan before the runtime performs any I/O. Names, arguments, capability options, and bounded execution policies are checked up front. The native Rust runtime then executes that plan asynchronously and reuses resources such as HTTP connection pools.
 
-The project is experimental. Its compiler, runtime, and capability boundary are being built as production foundations, even while the available protocol surface remains intentionally small. The architecture targets Linux, macOS, and Windows; Linux is the platform exercised by the repository today.
+The project is experimental. Its compiler, runtime, and capability boundary are being built as production foundations, even while the available protocol surface remains intentionally small. The architecture targets Linux, macOS, and Windows, with native checks for each operating system.
 
 ## One language, several jobs
 
@@ -60,6 +60,14 @@ mettle --version
 ```
 
 The included request collection uses the public JSONPlaceholder test API. It needs an internet connection but no account, credentials, environment variables, or local server.
+
+### Platform support
+
+The Mettle compiler, runtime, HTTP capability, CLI, and VS Code extension support Linux, Windows, and macOS. Native CI builds and tests Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS. The portable acceptance suite executes real HTTP workflows and a local load test on each platform.
+
+The repository does not publish prebuilt executables yet, so the current installation path requires Rustup and Cargo on every platform. Release archives and package-manager installation are part of release readiness work.
+
+Most contributor acceptance scripts use Bash because Linux remains the primary development environment. `python scripts/acceptance-portable.py` provides the operating-system-neutral runtime smoke test used by CI.
 
 ```bash
 mettle check examples/request-collection.mettle
@@ -452,4 +460,4 @@ The [language proposal](docs/language-proposal.md) describes the language direct
 - no workload ramping, distributed workers, or per-operation metric breakdowns yet
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS
-- Linux is the tested release platform
+- no prebuilt Windows, macOS, or Linux release archives yet

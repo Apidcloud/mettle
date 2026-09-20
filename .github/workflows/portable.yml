@@ -1,0 +1,51 @@
+name: Portable runtime
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            os: ubuntu-latest
+          - name: Windows x64
+            os: windows-latest
+          - name: macOS Apple Silicon
+            os: macos-15
+          - name: macOS Intel
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Check lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Exercise HTTP and load runtime
+        run: python scripts/acceptance-portable.py
+
+  repository-checks:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check dependency licences
+        run: python scripts/check-licenses.py
+      - name: Test VS Code extension
+        working-directory: util/plugin/vscode
+        run: npm test

@@ -465,6 +465,12 @@ Deliver:
 
 User acceptance executes a release checklist from a clean machine, runs the soak and failure suites, verifies graceful shutdown at load, exercises advanced TLS against local fixtures, and installs/runs the packaged binary without a Rust toolchain.
 
+### Portability baseline
+
+The production crates use Rust standard-library paths, Tokio networking and signals, Hyper, and Rustls without direct operating-system APIs. Windows drive paths receive explicit file-URI normalization in the language server. GitHub Actions runs workspace tests, Clippy, and the portable HTTP/load acceptance suite on Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS.
+
+Linux-specific `/proc` sampling remains isolated to the optional benchmark script. Bash acceptance scripts remain useful for the primary development environment, while `scripts/acceptance-portable.py` covers the runtime surface without shell-specific process control.
+
 ## 7. Testing strategy
 
 Testing follows the layer boundaries:

@@ -259,7 +259,20 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
             cursor += 1;
         }
     }
-    Some(PathBuf::from(String::from_utf8(decoded).ok()?))
+    let decoded = String::from_utf8(decoded).ok()?;
+    #[cfg(windows)]
+    let decoded = if decoded.starts_with('/')
+        && decoded.as_bytes().get(2) == Some(&b':')
+        && decoded
+            .as_bytes()
+            .get(1)
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        decoded[1..].to_owned()
+    } else {
+        decoded
+    };
+    Some(PathBuf::from(decoded))
 }
 
 fn hex(byte: u8) -> Option<u8> {
@@ -272,8 +285,13 @@ fn hex(byte: u8) -> Option<u8> {
 }
 
 fn path_to_file_uri(path: &Path) -> String {
-    let mut uri = String::from("file://");
-    for byte in path.to_string_lossy().bytes() {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.as_bytes().get(1) == Some(&b':') {
+        String::from("file:///")
+    } else {
+        String::from("file://")
+    };
+    for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
             uri.push(char::from(byte));
         } else {
@@ -312,9 +330,17 @@ mod tests {
 
     #[test]
     fn round_trips_file_uris() {
-        let path = Path::new("/tmp/flow project/main.mettle");
+        let path = if cfg!(windows) {
+            Path::new("C:\\flow project\\main.mettle")
+        } else {
+            Path::new("/tmp/flow project/main.mettle")
+        };
         let uri = path_to_file_uri(path);
-        assert_eq!(uri, "file:///tmp/flow%20project/main.mettle");
+        if cfg!(windows) {
+            assert_eq!(uri, "file:///C:/flow%20project/main.mettle");
+        } else {
+            assert_eq!(uri, "file:///tmp/flow%20project/main.mettle");
+        }
         assert_eq!(file_uri_to_path(&uri).as_deref(), Some(path));
     }
 
