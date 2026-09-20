@@ -304,7 +304,9 @@ fn path_to_file_uri(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Server, byte_offset, file_uri_to_path, path_to_file_uri, position};
+    use super::{
+        Server, byte_offset, file_uri_to_path, normalize_path, path_to_file_uri, position,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -358,7 +360,9 @@ mod tests {
 
         let unsaved = "use namespace shared\nflow main() = helper()\n";
         let mut server = Server::default();
-        server.documents.insert(entry.clone(), unsaved.to_owned());
+        server
+            .documents
+            .insert(normalize_path(entry.clone()), unsaved.to_owned());
         let result = server
             .definition(&json!({
                 "textDocument": { "uri": path_to_file_uri(&entry) },
