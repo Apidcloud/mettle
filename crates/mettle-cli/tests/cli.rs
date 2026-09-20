@@ -29,6 +29,24 @@ fn project_directory() -> std::path::PathBuf {
     path
 }
 
+fn file_uri(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut uri = if path.as_bytes().get(1) == Some(&b':') {
+        String::from("file:///")
+    } else {
+        String::from("file://")
+    };
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(uri, "%{byte:02X}").expect("writing to a string cannot fail");
+        }
+    }
+    uri
+}
+
 fn send_lsp(stdin: &mut ChildStdin, message: &serde_json::Value) {
     let body = serde_json::to_vec(message).expect("LSP message should serialize");
     write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("LSP header should be writable");
@@ -340,7 +358,7 @@ fn lsp_navigates_from_an_unsaved_document_to_another_file() {
     let entry = directory.join("main.mettle");
     fs::write(&entry, "use namespace shared\nflow main() = false\n")
         .expect("entry should be writable");
-    let entry_uri = format!("file://{}", entry.display());
+    let entry_uri = file_uri(&entry);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("lsp")
@@ -386,7 +404,7 @@ fn lsp_navigates_from_an_unsaved_document_to_another_file() {
             "id": 2,
             "method": "textDocument/definition",
             "params": {
-                "textDocument": { "uri": format!("file://{}", entry.display()) },
+                "textDocument": { "uri": file_uri(&entry) },
                 "position": { "line": 1, "character": 16 }
             }
         }),
