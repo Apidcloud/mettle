@@ -1,0 +1,45 @@
+context localApi {
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        timeout: 2s
+        headers: {
+            "Authorization": "Bearer local-test-token"
+        }
+    }
+}
+
+flow main() {
+    use context localApi
+
+    posted = http.post("/method") {
+        json: { action: "create" }
+    }
+    put = http.put("/method") {
+        body: "replacement"
+    }
+    patched = http.patch("/method") {
+        headers: { "Content-Type": "application/merge-patch+json" }
+        json: { active: true }
+    }
+    deleted = http.delete("/method")
+    head = http.head("/method")
+    options = http.options("/method")
+
+    assert(posted.status == 200)
+    assert(posted.duration < 2s)
+    assert(put.status == 200)
+    assert(patched.status == 200)
+    assert(deleted.status == 200)
+    assert(head.status == 200)
+    assert(options.status == 204)
+
+    return {
+        posted: posted.json
+        put: put.json
+        patched: patched.json
+        deleted: deleted.json
+        headBody: head.body
+        allowed: options.headers["allow"]
+        responseContentType: posted.headers["content-type"]
+    }
+}

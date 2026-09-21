@@ -1,0 +1,9 @@
+flow main() {
+    return http.post("${METTLE_BASE_URL}/method") {
+        headers: {
+            "Authorization": "Bearer local-test-token"
+            "Content-Type": "text/plain"
+        }
+        json: { valid: true }
+    }
+}

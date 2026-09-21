@@ -7,4 +7,4 @@ cd "$plugin_dir"
 mkdir -p dist
 exec npx --yes @vscode/vsce@4.0.0 package \
   --allow-missing-repository \
-  --out dist/mettle-language-0.9.0.vsix
+  --out dist/mettle-language-0.10.0.vsix

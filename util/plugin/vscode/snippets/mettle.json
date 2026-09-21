@@ -123,5 +123,14 @@
       "    }",
       "}"
     ]
+  },
+  "HTTP request with text body": {
+    "prefix": "httpbody",
+    "description": "Send an HTTP request with a UTF-8 text body",
+    "body": [
+      "http.${1|post,put,patch,delete|}(\"${2:/path}\") {",
+      "    body: \"${3:value}\"",
+      "}"
+    ]
   }
 }

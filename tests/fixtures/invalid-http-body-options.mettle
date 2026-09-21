@@ -1,0 +1,6 @@
+flow main() {
+    return http.post("http://localhost/") {
+        json: { valid: true }
+        body: "conflict"
+    }
+}

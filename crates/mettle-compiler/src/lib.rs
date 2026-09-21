@@ -1365,10 +1365,12 @@ impl<'a> Compiler<'a> {
                 .enumerate()
                 .find(|(_, operation)| operation.name == operation_name)
             else {
-                self.errors.push(CompileError::new(
+                let message = with_name_suggestion(
                     format!("capability `{capability_name}` has no operation `{operation_name}`"),
-                    callee.span,
-                ));
+                    operation_name,
+                    capability.operations.iter().map(|operation| operation.name),
+                );
+                self.errors.push(CompileError::new(message, callee.span));
                 return None;
             };
             if arguments.len() != operation.parameters.len() {
@@ -1393,6 +1395,25 @@ impl<'a> Compiler<'a> {
                     Some(value)
                 })
                 .collect();
+            for group in operation.mutually_exclusive {
+                let present = options
+                    .iter()
+                    .filter(|option| group.contains(&option.name.value.as_str()))
+                    .collect::<Vec<_>>();
+                if present.len() > 1 {
+                    self.errors.push(CompileError::new(
+                        format!(
+                            "options {} cannot be used together",
+                            present
+                                .iter()
+                                .map(|option| format!("`{}`", option.name.value))
+                                .collect::<Vec<_>>()
+                                .join(" and ")
+                        ),
+                        present[1].name.span,
+                    ));
+                }
+            }
             let options = self.compile_fields(
                 current_flow,
                 options,
@@ -1488,10 +1509,13 @@ impl<'a> Compiler<'a> {
                         .find(|candidate| candidate.name == field.name.value)
                 });
                 if schema.is_some() && field_schema.is_none() {
-                    self.errors.push(CompileError::new(
+                    let message = with_name_suggestion(
                         format!("unknown option `{}`", field.name.value),
-                        field.name.span,
-                    ));
+                        &field.name.value,
+                        schema.into_iter().flatten().map(|candidate| candidate.name),
+                    );
+                    self.errors
+                        .push(CompileError::new(message, field.name.span));
                 }
                 let expression = if let Some(FieldSchema {
                     value_type: SchemaType::Object(nested),
@@ -1817,6 +1841,42 @@ fn is_valid_identifier(value: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+fn with_name_suggestion<'a>(
+    message: String,
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let candidate = candidates
+        .into_iter()
+        .map(|candidate| (edit_distance(name, candidate), candidate))
+        .min_by_key(|(distance, _)| *distance);
+    match candidate {
+        Some((distance, candidate)) if distance <= 3 && distance * 3 <= name.len().max(3) => {
+            format!("{message}; did you mean `{candidate}`?")
+        }
+        _ => message,
+    }
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            current[right_index + 1] = if left_byte == right_byte {
+                previous[right_index]
+            } else {
+                1 + previous[right_index]
+                    .min(previous[right_index + 1])
+                    .min(current[right_index])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum VisitState {
     Unvisited,
@@ -1857,11 +1917,30 @@ mod tests {
             value_type: SchemaType::Object(TLS_OPTIONS),
         },
     ];
-    const HTTP_OPERATIONS: &[OperationSchema] = &[OperationSchema {
-        name: "get",
-        parameters: &[SchemaType::String],
-        options: HTTP_OPTIONS,
-    }];
+    const BODY_OPTIONS: &[FieldSchema] = &[
+        FieldSchema {
+            name: "json",
+            value_type: SchemaType::Json,
+        },
+        FieldSchema {
+            name: "body",
+            value_type: SchemaType::String,
+        },
+    ];
+    const HTTP_OPERATIONS: &[OperationSchema] = &[
+        OperationSchema {
+            name: "get",
+            parameters: &[SchemaType::String],
+            options: HTTP_OPTIONS,
+            mutually_exclusive: &[],
+        },
+        OperationSchema {
+            name: "post",
+            parameters: &[SchemaType::String],
+            options: BODY_OPTIONS,
+            mutually_exclusive: &[&["json", "body"]],
+        },
+    ];
     const HTTP: CapabilityDescriptor = CapabilityDescriptor {
         name: "http",
         defaults: HTTP_OPTIONS,
@@ -1875,6 +1954,41 @@ mod tests {
             .into_iter()
             .map(|error| error.message)
             .collect()
+    }
+
+    fn http_errors(source: &str) -> Vec<String> {
+        let program = parse(source).expect("test source should parse");
+        compile_with_capabilities(&program, &[HTTP])
+            .expect_err("test program should not compile")
+            .into_iter()
+            .map(|error| error.message)
+            .collect()
+    }
+
+    #[test]
+    fn suggests_capability_operations_and_options() {
+        let operation = http_errors(r#"flow main() = http.gett("/")"#);
+        assert!(operation.iter().any(|message| {
+            message == "capability `http` has no operation `gett`; did you mean `get`?"
+        }));
+
+        let option = http_errors(r#"flow main() = http.get("/") { tiemout: 1s }"#);
+        assert!(
+            option
+                .iter()
+                .any(|message| { message == "unknown option `tiemout`; did you mean `timeout`?" })
+        );
+    }
+
+    #[test]
+    fn rejects_mutually_exclusive_operation_options() {
+        let messages =
+            http_errors(r#"flow main() = http.post("/") { json: { ok: true } body: "no" }"#);
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message == "options `json` and `body` cannot be used together" })
+        );
     }
 
     #[test]

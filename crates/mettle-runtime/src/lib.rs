@@ -1398,6 +1398,7 @@ mod tests {
         name: "wait",
         parameters: &[],
         options: &[],
+        mutually_exclusive: &[],
     }];
     const PROBE: CapabilityDescriptor = CapabilityDescriptor {
         name: "probe",
@@ -1603,8 +1604,11 @@ mod tests {
         let syntax = parse(
             r#"
             flow main() {
-                user = { name: "Mettle", roles: ["tester"] }
-                return user.name
+                response = {
+                    headers: { "content-type": "application/json" }
+                    roles: ["tester"]
+                }
+                return response.headers["content-type"]
             }
             "#,
         )
@@ -1613,7 +1617,7 @@ mod tests {
 
         assert_eq!(
             block_on(Runtime::default().execute(&plan)).expect("program should run"),
-            Value::String("Mettle".to_owned())
+            Value::String("application/json".to_owned())
         );
     }
 

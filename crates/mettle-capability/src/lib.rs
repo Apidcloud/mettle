@@ -47,6 +47,7 @@ pub struct OperationSchema {
     pub name: &'static str,
     pub parameters: &'static [SchemaType],
     pub options: &'static [FieldSchema],
+    pub mutually_exclusive: &'static [&'static [&'static str]],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,0 +1,5 @@
+flow main() {
+    return http.get("${METTLE_BASE_URL}/invalid-json") {
+        headers: { "Authorization": "Bearer local-test-token" }
+    }
+}

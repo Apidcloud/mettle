@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.10.0
+
+- Add a snippet for POST, PUT, PATCH, and DELETE requests with text bodies.
+- Recognize quoted key access used for HTTP headers and external JSON fields.
+
 ## 0.9.0
 
 - Show structured flow reports in the Run Flow task terminal.

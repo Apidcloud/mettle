@@ -42,7 +42,7 @@ project="$repository_dir/tests/projects/basic/main.mettle"
 result="$(
   METTLE_BASE_URL="http://127.0.0.1:$port" \
     METTLE_API_TOKEN="local-test-token" \
-    cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- run "$project"
+    cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- run "$project" --raw
 )"
 [[ "$result" == "seed-42" ]]
 

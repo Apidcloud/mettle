@@ -151,7 +151,7 @@ This is the complete shape used by [`examples/http.mettle`](examples/http.mettle
 mettle run examples/http.mettle
 ```
 
-An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, and `url`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious.
+An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, `url`, and `duration`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious. Header names containing punctuation use string-key access, such as `response.headers["content-type"]`.
 
 ## Put shared setup in contexts
 
@@ -305,7 +305,7 @@ The SIP capability and this exact schema are planned work. HTTP is the only prot
 
 ## HTTP support today
 
-Mettle currently supports HTTP/1.1 `GET` and `POST` over HTTP or HTTPS. Absolute URLs work anywhere. Relative URLs use `baseUrl` from the active HTTP defaults or the operation itself.
+Mettle currently supports HTTP/1.1 `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` over HTTP or HTTPS. Absolute URLs work anywhere. Relative URLs use `baseUrl` from the active HTTP defaults or the operation itself.
 
 ```mettle
 response = http.post("/users") {
@@ -329,7 +329,17 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `headers` | Object of strings | Request headers |
 | `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
 | `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
-| `json` | JSON value | Body for `http.post`; sets `Content-Type` when absent |
+| `json` | JSON value | Body for `post`, `put`, `patch`, or `delete`; sets `Content-Type` when absent |
+| `body` | String | Text body for `post`, `put`, `patch`, or `delete`; defaults to UTF-8 `text/plain` |
+
+`json` and `body` are mutually exclusive and Mettle rejects the combination during compilation. An explicit `Content-Type` used with `json` must be `application/json` or a media type ending in `+json`. A response that declares one of those media types but contains malformed JSON fails with a clear protocol error. The response size limit is enforced from `Content-Length` when available and while streaming the body.
+
+External data does not have to use Mettle identifier names. Use a quoted key after brackets for HTTP headers or JSON properties containing punctuation:
+
+```mettle
+requestId = response.headers["x-request-id"]
+displayName = response.json["display-name"]
+```
 
 HTTPS certificate and hostname validation is enabled by default. A controlled test system with an intentionally untrusted certificate can opt out explicitly:
 
@@ -396,7 +406,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.9.0.vsix --force
+code --install-extension dist/mettle-language-0.10.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
@@ -455,8 +465,8 @@ The [language proposal](docs/language-proposal.md) describes the language direct
 
 ## Current limits
 
-- HTTP/1.1 `GET` and `POST` are the only protocol operations implemented today
 - no redirects or proxy discovery
+- request bodies currently support JSON values and UTF-8 text; multipart forms and streaming bodies are not implemented
 - no workload ramping, distributed workers, or per-operation metric breakdowns yet
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS

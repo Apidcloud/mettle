@@ -79,7 +79,7 @@ Queues and concurrency limits must be bounded from their first introduction. Bac
 
 Mettle code, the compiler, scheduling policies, and capability interfaces remain platform-independent. Tokio is planned as the asynchronous runtime boundary. It maps its portable APIs to platform facilities such as `epoll` on Linux, `kqueue` on macOS/BSD, and Windows I/O mechanisms.
 
-Linux is the only release target during the initial MVP work. Platform-specific optimizations must remain behind internal interfaces and include a portable fallback. Experimental facilities such as `io_uring` are not part of the initial architecture.
+Linux is the primary development environment. Native CI verifies Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS. Platform-specific optimizations must remain behind internal interfaces and include a portable fallback. Experimental facilities such as `io_uring` are not part of the initial architecture.
 
 ## 3. Workspace architecture
 
@@ -136,13 +136,13 @@ Plans are immutable and shareable across worker tasks. Runtime state, including 
 
 ### 4.3 HTTP
 
-The first HTTP capability supports a deliberately small surface:
+The first HTTP capability supports a deliberately focused surface:
 
 - HTTP and HTTPS URLs;
-- `GET` and `POST` operations through `http.get()` and `http.post()`;
-- base URL, timeout, headers, and JSON request bodies;
+- `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` operations;
+- base URL, timeout, headers, JSON request bodies, and UTF-8 text request bodies;
 - connection reuse;
-- response status, headers, bounded body bytes/text, and parsed JSON;
+- response status, headers, bounded body bytes/text, parsed JSON, and operation duration;
 - an explicit certificate-verification setting for local test systems.
 
 Proposed configuration:
@@ -447,6 +447,21 @@ The CLI consumes these events to provide:
 - automatic plain output for pipes and explicit `--no-color` and `--no-progress` controls.
 
 The VS Code Run Flow action launches the same CLI in a dedicated task terminal, so editor execution and direct terminal execution share one reporting implementation.
+
+### HTTP MVP hardening checkpoint
+
+Deliver:
+
+- common HTTP/1.1 methods through capability operations rather than parser keywords;
+- mutually exclusive JSON and UTF-8 text body options validated before execution;
+- JSON media-type validation and automatic content types;
+- explicit failure for responses that declare JSON but contain malformed JSON;
+- response duration and quoted string-key access for HTTP headers and external JSON fields;
+- bounded response bodies checked from declared length and while streaming;
+- compiler suggestions for mistyped capability operations and option names;
+- deterministic acceptance coverage for every method, body mode, size rejection, timeout, TLS verification, and connection reuse.
+
+Redirects, proxy discovery, multipart requests, streaming bodies, custom trust stores, and client certificates remain separate HTTP slices because they introduce additional security or lifecycle policy.
 
 ### Milestone 6: MVP refinement and release readiness
 

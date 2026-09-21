@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use hyper::{Method, Request, Uri};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
@@ -50,9 +50,9 @@ const COMMON_OPTIONS: &[FieldSchema] = &[
     },
 ];
 
-const GET_OPTIONS: &[FieldSchema] = COMMON_OPTIONS;
+const NO_BODY_OPTIONS: &[FieldSchema] = COMMON_OPTIONS;
 
-const POST_OPTIONS: &[FieldSchema] = &[
+const BODY_OPTIONS: &[FieldSchema] = &[
     FieldSchema {
         name: "baseUrl",
         value_type: SchemaType::String,
@@ -77,18 +77,57 @@ const POST_OPTIONS: &[FieldSchema] = &[
         name: "json",
         value_type: SchemaType::Json,
     },
+    FieldSchema {
+        name: "body",
+        value_type: SchemaType::String,
+    },
 ];
+
+const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
+const NO_CONFLICTS: &[&[&str]] = &[];
 
 const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "get",
         parameters: &[SchemaType::String],
-        options: GET_OPTIONS,
+        options: NO_BODY_OPTIONS,
+        mutually_exclusive: NO_CONFLICTS,
     },
     OperationSchema {
         name: "post",
         parameters: &[SchemaType::String],
-        options: POST_OPTIONS,
+        options: BODY_OPTIONS,
+        mutually_exclusive: BODY_CONFLICTS,
+    },
+    OperationSchema {
+        name: "put",
+        parameters: &[SchemaType::String],
+        options: BODY_OPTIONS,
+        mutually_exclusive: BODY_CONFLICTS,
+    },
+    OperationSchema {
+        name: "patch",
+        parameters: &[SchemaType::String],
+        options: BODY_OPTIONS,
+        mutually_exclusive: BODY_CONFLICTS,
+    },
+    OperationSchema {
+        name: "delete",
+        parameters: &[SchemaType::String],
+        options: BODY_OPTIONS,
+        mutually_exclusive: BODY_CONFLICTS,
+    },
+    OperationSchema {
+        name: "head",
+        parameters: &[SchemaType::String],
+        options: NO_BODY_OPTIONS,
+        mutually_exclusive: NO_CONFLICTS,
+    },
+    OperationSchema {
+        name: "options",
+        parameters: &[SchemaType::String],
+        options: NO_BODY_OPTIONS,
+        mutually_exclusive: NO_CONFLICTS,
     },
 ];
 
@@ -160,9 +199,14 @@ impl HttpCapability {
         options: Object,
         span: Span,
     ) -> Result<Value, CapabilityError> {
-        let (method, operation_name) = match operation {
-            0 => (Method::GET, "get"),
-            1 => (Method::POST, "post"),
+        let method = match operation {
+            0 => Method::GET,
+            1 => Method::POST,
+            2 => Method::PUT,
+            3 => Method::PATCH,
+            4 => Method::DELETE,
+            5 => Method::HEAD,
+            6 => Method::OPTIONS,
             _ => {
                 return Err(CapabilityError::new(
                     "HTTP execution plan references an unknown operation",
@@ -175,7 +219,9 @@ impl HttpCapability {
         let uri = url.parse::<Uri>().map_err(|error| {
             CapabilityError::new(format!("invalid HTTP URL `{url}`: {error}"), span)
         })?;
-        if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        if !uri.scheme_str().is_some_and(|scheme| {
+            scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+        }) {
             return Err(CapabilityError::new(
                 "HTTP URL must use the `http` or `https` scheme",
                 span,
@@ -194,14 +240,18 @@ impl HttpCapability {
                 other => Err(type_error("tls.verifyCertificates", "boolean", other, span)),
             })?;
 
-        let body = if operation_name == "post" {
-            if let Some(json) = options.get("json") {
-                Bytes::from(serde_json::to_vec(&to_json(json, span)?).map_err(|error| {
-                    CapabilityError::new(format!("could not encode JSON request: {error}"), span)
-                })?)
-            } else {
-                Bytes::new()
-            }
+        if options.contains_key("json") && options.contains_key("body") {
+            return Err(CapabilityError::new(
+                "HTTP request options `json` and `body` cannot be used together",
+                span,
+            ));
+        }
+        let body = if let Some(json) = options.get("json") {
+            Bytes::from(serde_json::to_vec(&to_json(json, span)?).map_err(|error| {
+                CapabilityError::new(format!("could not encode JSON request: {error}"), span)
+            })?)
+        } else if let Some(body) = options.get("body") {
+            Bytes::copy_from_slice(expect_string(Some(body), "body", span)?.as_bytes())
         } else {
             Bytes::new()
         };
@@ -225,7 +275,30 @@ impl HttpCapability {
                 request = request.header(name, value);
             }
         }
-        if operation_name == "post" && options.contains_key("json") {
+        if options.contains_key("json") {
+            let content_type =
+                options
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .and_then(|headers| {
+                        headers.iter().find_map(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-type").then_some(value)
+                        })
+                    });
+            if let Some(content_type) = content_type {
+                let content_type = expect_string(Some(content_type), "Content-Type header", span)?;
+                if !is_json_content_type(content_type) {
+                    return Err(CapabilityError::new(
+                        format!(
+                            "JSON request body requires a JSON Content-Type, found `{content_type}`"
+                        ),
+                        span,
+                    ));
+                }
+            } else {
+                request = request.header(CONTENT_TYPE, "application/json");
+            }
+        } else if options.contains_key("body") {
             let has_content_type = options
                 .get("headers")
                 .and_then(Value::as_object)
@@ -235,7 +308,7 @@ impl HttpCapability {
                         .any(|name| name.eq_ignore_ascii_case("content-type"))
                 });
             if !has_content_type {
-                request = request.header(CONTENT_TYPE, "application/json");
+                request = request.header(CONTENT_TYPE, "text/plain; charset=utf-8");
             }
         }
         let request = request.body(Full::new(body)).map_err(|error| {
@@ -247,6 +320,7 @@ impl HttpCapability {
         } else {
             &self.insecure_client
         };
+        let started = Instant::now();
         let exchange = async {
             let response = client.request(request).await.map_err(|error| {
                 CapabilityError::new(
@@ -256,6 +330,22 @@ impl HttpCapability {
             })?;
 
             let status = response.status().as_u16();
+            if method != Method::HEAD
+                && let Some(length) = response.headers().get(CONTENT_LENGTH)
+                && let Ok(length) = length.to_str()
+                && let Ok(length) = length.parse::<u64>()
+                && length > max_response_bytes as u64
+            {
+                return Err(CapabilityError::new(
+                    format!("HTTP response exceeded the {max_response_bytes} byte limit"),
+                    span,
+                ));
+            }
+            let declares_json = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(is_json_content_type);
             let headers = response
                 .headers()
                 .iter()
@@ -268,13 +358,23 @@ impl HttpCapability {
                 .collect::<BTreeMap<_, _>>();
             let bytes = read_bounded_body(response.into_body(), max_response_bytes, span).await?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let json = serde_json::from_slice::<serde_json::Value>(&bytes)
-                .ok()
-                .map_or(Value::Null, from_json);
+            let json = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) => from_json(value),
+                Err(_) if bytes.is_empty() || !declares_json => Value::Null,
+                Err(error) => {
+                    return Err(CapabilityError::new(
+                        format!(
+                            "HTTP response declared JSON but its body could not be decoded: {error}"
+                        ),
+                        span,
+                    ));
+                }
+            };
 
             Ok(Value::Object(BTreeMap::from([
                 ("body".to_owned(), Value::String(text)),
                 ("bodyBytes".to_owned(), Value::Bytes(Arc::from(bytes))),
+                ("duration".to_owned(), Value::Duration(started.elapsed())),
                 ("headers".to_owned(), Value::Object(headers)),
                 ("json".to_owned(), json),
                 ("method".to_owned(), Value::String(method.to_string())),
@@ -369,7 +469,7 @@ async fn read_bounded_body(
 }
 
 fn resolve_url(path: &str, options: &Object, span: Span) -> Result<String, CapabilityError> {
-    if path.starts_with("http://") || path.starts_with("https://") {
+    if has_uri_scheme(path) {
         return Ok(path.to_owned());
     }
     let base = options.get("baseUrl").ok_or_else(|| {
@@ -384,6 +484,15 @@ fn resolve_url(path: &str, options: &Object, span: Span) -> Result<String, Capab
         base.trim_end_matches('/'),
         path.trim_start_matches('/')
     ))
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    let mut bytes = scheme.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
 fn option_duration(
@@ -433,6 +542,12 @@ fn type_error(name: &str, expected: &str, value: &Value, span: Span) -> Capabili
         format!("`{name}` must be {expected}, found {}", value.type_name()),
         span,
     )
+}
+
+fn is_json_content_type(value: &str) -> bool {
+    let media_type = value.split(';').next().unwrap_or(value).trim();
+    media_type.eq_ignore_ascii_case("application/json")
+        || media_type.to_ascii_lowercase().ends_with("+json")
 }
 
 fn error_chain(error: &dyn Error) -> String {
@@ -543,7 +658,7 @@ mod tests {
 
     use mettle_capability::{Capability, Object, Span, Value};
 
-    use super::{HttpCapability, from_json, resolve_url, to_json};
+    use super::{HttpCapability, from_json, is_json_content_type, resolve_url, to_json};
 
     #[test]
     fn resolves_relative_urls_without_double_slashes() {
@@ -607,5 +722,13 @@ mod tests {
             Some(&Value::String("Bearer new".to_owned()))
         );
         assert!(!headers.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn recognizes_json_media_types() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("Application/JSON; charset=utf-8"));
+        assert!(is_json_content_type("application/merge-patch+json"));
+        assert!(!is_json_content_type("text/plain"));
     }
 }

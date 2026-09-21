@@ -108,10 +108,29 @@ class FixtureHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
+        if self.path == "/large":
+            body = b"x" * 1024
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/invalid-json":
+            body = b'{"incomplete":'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
+            return
+        if self.path == "/method":
+            self._method_response()
             return
         if self.path != "/users":
             self._json(404, {"error": "not found"})
@@ -135,6 +154,37 @@ class FixtureHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._method_response()
+
+    def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._method_response()
+
+    def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._method_response()
+
+    def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authorized():
+            return
+        if self.path != "/method":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("X-Mettle-Method", self.command)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if not self._authorized():
+            return
+        if self.path != "/method":
+            self._json(404, {"error": "not found"})
+            return
+        self.send_response(204)
+        self.send_header("Allow", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
@@ -143,6 +193,28 @@ class FixtureHandler(BaseHTTPRequestHandler):
             return True
         self._json(401, {"error": "missing or invalid token"})
         return False
+
+    def _method_response(self) -> None:
+        if not self._authorized():
+            return
+        if self.path != "/method":
+            self._json(404, {"error": "not found"})
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        content_type = self.headers.get("Content-Type", "")
+        parsed_json = None
+        if body and (content_type.split(";", 1)[0].lower().endswith("json")):
+            parsed_json = json.loads(body)
+        self._json(
+            200,
+            {
+                "method": self.command,
+                "body": body,
+                "json": parsed_json,
+                "contentType": content_type,
+            },
+        )
 
     def _json(self, status: int, value: object) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()

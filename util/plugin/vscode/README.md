@@ -9,7 +9,7 @@ Basic language support for `.mettle` source files.
 - `//` comment toggling;
 - matching and automatic closing of braces, brackets, parentheses, and strings;
 - indentation and region folding;
-- snippets for named flows, anonymous flows, namespaces, assertions, contexts, structured and load execution policies, HTTP GET, and HTTP POST;
+- snippets for named flows, anonymous flows, namespaces, assertions, contexts, structured and load execution policies, and HTTP requests;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - prompts for named flow parameters and execution in a dedicated task terminal.
 - Ctrl+Click, **Go to Definition**, and **Peek Definition** for flow calls,
@@ -47,7 +47,7 @@ http.get("https://jsonplaceholder.typicode.com/posts/1")
 
 ▶ Run inspectRequest
 flow inspectRequest(baseUrl, requestId) =
-    http.get("${baseUrl}/get?requestId=${requestId}")
+    http.get("${baseUrl}/posts/${requestId}")
 ```
 
 The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. The dedicated task terminal shows the same structured flow report and live workload dashboard as the CLI. Use `mettle run --verbose` when you need the complete returned value.
@@ -65,7 +65,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/mettle-language-0.9.0.vsix
+dist/mettle-language-0.10.0.vsix
 ```
 
 ## Install
@@ -73,7 +73,7 @@ dist/mettle-language-0.9.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/mettle-language-0.9.0.vsix --force
+code --install-extension dist/mettle-language-0.10.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

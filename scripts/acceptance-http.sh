@@ -57,6 +57,31 @@ assert result["seedConnection"] == result["connectionId"], result
 print(json.dumps(result, indent=2))
 PY
 
+methods_result="$(
+  cd "$repository_dir"
+  METTLE_BASE_URL="http://127.0.0.1:$port" \
+    cargo run --quiet -- run tests/fixtures/http-methods.mettle --raw
+)"
+
+python3 - "$methods_result" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["posted"]["method"] == "POST", result
+assert result["posted"]["json"] == {"action": "create"}, result
+assert result["posted"]["contentType"] == "application/json", result
+assert result["put"]["method"] == "PUT", result
+assert result["put"]["body"] == "replacement", result
+assert result["put"]["contentType"] == "text/plain; charset=utf-8", result
+assert result["patched"]["method"] == "PATCH", result
+assert result["patched"]["json"] == {"active": True}, result
+assert result["deleted"]["method"] == "DELETE", result
+assert result["headBody"] == "", result
+assert "PATCH" in result["allowed"], result
+assert result["responseContentType"] == "application/json", result
+PY
+
 anonymous_result="$(
   cd "$repository_dir"
   METTLE_BASE_URL="http://127.0.0.1:$port" \
@@ -93,6 +118,45 @@ if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
 fi
 
 rg -q 'unknown option `banana`' "$state_dir/invalid.err"
+
+if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  check "$repository_dir/tests/fixtures/invalid-http-body-options.mettle" \
+  >"$state_dir/body-options.out" 2>"$state_dir/body-options.err"; then
+  echo "conflicting HTTP body options unexpectedly compiled" >&2
+  exit 1
+fi
+
+rg -q 'options `json` and `body` cannot be used together' "$state_dir/body-options.err"
+
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
+  cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/invalid-http-content-type.mettle" \
+  >"$state_dir/content-type.out" 2>"$state_dir/content-type.err"; then
+  echo "JSON with a non-JSON Content-Type unexpectedly ran" >&2
+  exit 1
+fi
+
+rg -q 'JSON request body requires a JSON Content-Type' "$state_dir/content-type.err"
+
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
+  cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/http-response-limit.mettle" \
+  >"$state_dir/response-limit.out" 2>"$state_dir/response-limit.err"; then
+  echo "oversized HTTP response unexpectedly completed" >&2
+  exit 1
+fi
+
+rg -q 'HTTP response exceeded the 100 byte limit' "$state_dir/response-limit.err"
+
+if METTLE_BASE_URL="http://127.0.0.1:$port" \
+  cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
+  run "$repository_dir/tests/fixtures/invalid-http-json.mettle" \
+  >"$state_dir/invalid-json.out" 2>"$state_dir/invalid-json.err"; then
+  echo "malformed declared JSON unexpectedly completed" >&2
+  exit 1
+fi
+
+rg -q 'HTTP response declared JSON but its body could not be decoded' "$state_dir/invalid-json.err"
 
 if METTLE_BASE_URL="http://127.0.0.1:$port" \
   cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \

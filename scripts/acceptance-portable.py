@@ -77,6 +77,22 @@ def main() -> None:
         assert response["id"] == "created-seed-42", response
         assert response["seedConnection"] == response["connectionId"], response
 
+        methods = json.loads(
+            run(
+                "run",
+                "tests/fixtures/http-methods.mettle",
+                "--raw",
+                environment=environment,
+            ).stdout
+        )
+        assert methods["posted"]["method"] == "POST", methods
+        assert methods["put"]["method"] == "PUT", methods
+        assert methods["patched"]["method"] == "PATCH", methods
+        assert methods["deleted"]["method"] == "DELETE", methods
+        assert methods["headBody"] == "", methods
+        assert "OPTIONS" in methods["allowed"], methods
+        assert methods["responseContentType"] == "application/json", methods
+
         workload = json.loads(
             run(
                 "run",

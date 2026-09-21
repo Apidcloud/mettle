@@ -1044,9 +1044,32 @@ impl Parser {
             };
         }
 
-        while self.at(&TokenKind::Dot) {
-            self.advance();
-            let member = self.take_identifier("a member name after `.`")?;
+        self.parse_member_access(expression)
+    }
+
+    fn parse_member_access(
+        &mut self,
+        mut expression: Expression,
+    ) -> Result<Expression, SyntaxError> {
+        loop {
+            let member = if self.take_if(&TokenKind::Dot) {
+                self.take_identifier("a member name after `.`")?
+            } else if self.take_if(&TokenKind::LeftBracket) {
+                let token = self.advance();
+                let TokenKind::String(value) = token.kind else {
+                    return Err(SyntaxError::new(
+                        "object key access requires a string literal",
+                        token.span,
+                    ));
+                };
+                let close = self.take(&TokenKind::RightBracket)?.span;
+                Spanned {
+                    value,
+                    span: token.span.join(close),
+                }
+            } else {
+                break;
+            };
             let span = expression.span.join(member.span);
             expression = Expression {
                 kind: ExpressionKind::Member {
@@ -1472,7 +1495,7 @@ mod tests {
                 response = http.post("/users") {
                     json: { name: "Mettle", roles: ["tester"] }
                 }
-                return response.json.id
+                return response.headers["content-type"]
             }
             "#,
         )

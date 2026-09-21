@@ -1,0 +1,6 @@
+flow main() {
+    return http.get("${METTLE_BASE_URL}/large") {
+        headers: { "Authorization": "Bearer local-test-token" }
+        maxResponseBytes: 100
+    }
+}
