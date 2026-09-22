@@ -1,29 +1,33 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn source_file(contents: &str) -> std::path::PathBuf {
+static TEMPORARY_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn temporary_path_suffix() -> String {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after the Unix epoch")
         .as_nanos();
+    let counter = TEMPORARY_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{unique}-{counter}", std::process::id())
+}
+
+fn source_file(contents: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "mettle-cli-test-{}-{unique}.mettle",
-        std::process::id()
+        "mettle-cli-test-{}.mettle",
+        temporary_path_suffix()
     ));
     fs::write(&path, contents).expect("test source should be writable");
     path
 }
 
 fn project_directory() -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after the Unix epoch")
-        .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "mettle-cli-project-test-{}-{unique}",
-        std::process::id()
+        "mettle-cli-project-test-{}",
+        temporary_path_suffix()
     ));
     fs::create_dir_all(&path).expect("project directory should be creatable");
     path
@@ -267,6 +271,119 @@ fn requires_selection_when_multiple_flows_have_no_main() {
     assert!(error.contains("no default flow was found"));
     assert!(error.contains("first"));
     assert!(error.contains("second"));
+}
+
+#[test]
+fn all_runs_zero_argument_flows_and_skips_parameterized_flows() {
+    let path = source_file(
+        "flow first() = \"one\"\nflow needsArgument(value) = value\nflow second() = \"two\"\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--all")
+        .output()
+        .expect("flows should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("first"));
+    assert!(stdout.contains("one"));
+    assert!(stdout.contains("second"));
+    assert!(stdout.contains("two"));
+    assert!(!stdout.contains("needsArgument"));
+    assert!(stdout.contains("Flow 1/2 · first"));
+    assert!(stdout.contains("Flow 2/2 · second"));
+    assert!(stdout.contains("Batch summary"));
+    assert!(stdout.contains("Passed: 2   Failed: 0   Skipped: 1"));
+}
+
+#[test]
+fn all_json_output_is_atomic_json_lines_with_batch_records() {
+    let path = source_file(
+        "flow first() = \"one\"\nflow needsArgument(value) = value\nflow second() = \"two\"\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--all")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("flows should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let records = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("record is JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0]["type"], "start");
+    assert_eq!(records[0]["eligible"], 2);
+    assert_eq!(records[0]["skipped"], 1);
+    assert_eq!(records[1]["type"], "result");
+    assert_eq!(records[1]["flow"], "first");
+    assert_eq!(records[1]["result"], "one");
+    assert_eq!(records[2]["type"], "result");
+    assert_eq!(records[2]["flow"], "second");
+    assert_eq!(records[3]["type"], "summary");
+    assert_eq!(records[3]["passed"], 2);
+    assert_eq!(records[3]["failed"], 0);
+    assert_eq!(records[3]["skipped"], 1);
+}
+
+#[test]
+fn all_only_runs_zero_argument_flows_in_the_requested_file() {
+    let directory = project_directory();
+    fs::write(directory.join("mettle.toml"), "name = \"all\"\n")
+        .expect("manifest should be writable");
+    fs::write(
+        directory.join("shared.mettle"),
+        "flow helper() = \"outside\"\n",
+    )
+    .expect("shared source should be writable");
+    let entry = directory.join("main.mettle");
+    fs::write(&entry, "flow main() = \"inside\"\n").expect("entry source should be writable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .arg("--all")
+        .output()
+        .expect("flows should start");
+    fs::remove_dir_all(directory).expect("test project should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("main"));
+    assert!(stdout.contains("inside"));
+    assert!(!stdout.contains("helper"));
+    assert!(!stdout.contains("outside"));
+}
+
+#[test]
+fn all_continues_after_a_failed_flow_and_returns_failure() {
+    let path =
+        source_file("flow broken() { assert(false) return true }\nflow healthy() = \"ok\"\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--all")
+        .output()
+        .expect("flows should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("healthy"));
+    assert!(stdout.contains("ok"));
+    assert!(stdout.contains("Batch summary"));
+    assert!(stdout.contains("Passed: 1   Failed: 1   Skipped: 0"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("broken"));
+    assert!(stderr.contains("assertion failed"));
 }
 
 #[test]

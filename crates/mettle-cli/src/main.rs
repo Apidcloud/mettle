@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mettle_capability::{CapabilityDescriptor, Object, Value};
 use mettle_compiler::{CompileError, ExecutionPlan, MettlePlan, compile_with_capabilities};
@@ -23,7 +23,7 @@ Mettle language tools
 Usage:
   mettle check <file>
   mettle list <file> [--json]
-  mettle run <file> [flow-name] [--line <line>] [--arg <name=value>]... [output options]
+  mettle run <file> [flow-name] [--all | --line <line>] [--arg <name=value>]... [output options]
   mettle lsp
   mettle --help
   mettle --version
@@ -31,7 +31,7 @@ Usage:
 Commands:
   check   Parse and validate a Mettle source file
   list    List compiler-discovered runnable flows
-  run     Validate the source and execute a selected flow
+  run     Validate the source and execute a selected flow, or every zero-argument flow
   lsp     Start the Mettle language server over standard input/output
 
 Run output options:
@@ -46,13 +46,14 @@ Run output options:
 mod lsp;
 mod report;
 
-use report::{CliObserver, ExecutionReport, failure_summary, raw_value};
+use report::{CliObserver, ExecutionReport, display_duration, failure_summary, raw_value};
 
 const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR];
 
 #[derive(Debug)]
 struct RunOptions {
     selector: Option<MettleSelector>,
+    all: bool,
     arguments: Vec<(String, String)>,
     output: OutputMode,
     progress: bool,
@@ -63,6 +64,7 @@ impl Default for RunOptions {
     fn default() -> Self {
         Self {
             selector: None,
+            all: false,
             arguments: Vec::new(),
             output: OutputMode::Human,
             progress: true,
@@ -137,6 +139,20 @@ fn parse_run_options(arguments: &[OsString]) -> Result<RunOptions, CliError> {
             .to_str()
             .ok_or_else(|| CliError::Usage("run options must be valid UTF-8".to_owned()))?;
         match argument {
+            "--all" => {
+                if options.all {
+                    return Err(CliError::Usage(
+                        "`--all` was supplied more than once".to_owned(),
+                    ));
+                }
+                if options.selector.is_some() {
+                    return Err(CliError::Usage(
+                        "`--all` cannot be combined with a flow name, line, or ID".to_owned(),
+                    ));
+                }
+                options.all = true;
+                cursor += 1;
+            }
             "--line" => {
                 let value = arguments
                     .get(cursor + 1)
@@ -240,6 +256,11 @@ fn set_output_mode(
 }
 
 fn set_selector(options: &mut RunOptions, selector: MettleSelector) -> Result<(), CliError> {
+    if options.all {
+        return Err(CliError::Usage(
+            "a flow name, line, or ID cannot be combined with `--all`".to_owned(),
+        ));
+    }
     if options.selector.is_some() {
         return Err(CliError::Usage(
             "select a flow by name or line, not both".to_owned(),
@@ -293,8 +314,35 @@ fn list_flows(path: &Path, json: bool) -> Result<(), CliError> {
 fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
     let project = load_project(path)?;
     let plan = compile_project(&project)?;
-    let flow_id = select_flow(&plan, &project, options.selector.as_ref())?;
-    let arguments = resolve_arguments(&plan.flows[flow_id], &options.arguments)?;
+    let flow_ids = if options.all {
+        if !options.arguments.is_empty() {
+            return Err(CliError::Usage(
+                "`--arg` cannot be used with `--all`; parameterized flows are skipped".to_owned(),
+            ));
+        }
+        plan.flows
+            .iter()
+            .enumerate()
+            .filter_map(|(flow_id, flow)| {
+                (flow.span.source == project.entry_source && flow.parameters.is_empty())
+                    .then_some(flow_id)
+            })
+            .collect()
+    } else {
+        vec![select_flow(&plan, &project, options.selector.as_ref())?]
+    };
+
+    let entry_flow_count = plan
+        .flows
+        .iter()
+        .filter(|flow| flow.span.source == project.entry_source)
+        .count();
+    let skipped = entry_flow_count - flow_ids.len();
+    if flow_ids.is_empty() {
+        print_all_empty(options, skipped);
+        return Ok(());
+    }
+
     let async_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -302,6 +350,64 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
             eprintln!("error: could not start the Mettle runtime: {error}");
             CliError::Failure
         })?;
+    let batch_started = Instant::now();
+    if options.all && options.output == OutputMode::Json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "start",
+                "eligible": flow_ids.len(),
+                "skipped": skipped,
+            })
+        );
+    }
+    let mut passed = 0;
+    let mut failed = 0;
+    let total = flow_ids.len();
+    for (index, flow_id) in flow_ids.into_iter().enumerate() {
+        if options.all {
+            print_all_flow_separator(options, index + 1, total, &plan.flows[flow_id].display_name);
+        }
+        match run_flow(
+            &project,
+            &plan,
+            flow_id,
+            if options.all { &[] } else { &options.arguments },
+            options,
+            &async_runtime,
+        ) {
+            Ok(()) => passed += 1,
+            Err(CliError::Failure) if options.all => failed += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    if options.all {
+        print_all_summary(options, passed, failed, skipped, batch_started.elapsed());
+    }
+    if failed > 0 {
+        Err(CliError::Failure)
+    } else {
+        Ok(())
+    }
+}
+
+fn print_all_flow_separator(options: &RunOptions, index: usize, total: usize, display_name: &str) {
+    if matches!(options.output, OutputMode::Human | OutputMode::Verbose) {
+        println!(
+            "\n------------------------------------------------------------------------\nFlow {index}/{total} · {display_name}\n------------------------------------------------------------------------"
+        );
+    }
+}
+
+fn run_flow(
+    project: &LoadedProject,
+    plan: &ExecutionPlan,
+    flow_id: usize,
+    supplied_arguments: &[(String, String)],
+    options: &RunOptions,
+    async_runtime: &tokio::runtime::Runtime,
+) -> Result<(), CliError> {
+    let arguments = resolve_arguments(&plan.flows[flow_id], supplied_arguments)?;
     let observer = Arc::new(CliObserver::new(
         options.progress && matches!(options.output, OutputMode::Human | OutputMode::Verbose),
     ));
@@ -344,6 +450,14 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
                 OutputMode::Verbose => report.human(true, color),
                 OutputMode::Quiet => report.quiet(color),
                 OutputMode::Raw => raw_value(&value),
+                OutputMode::Json if options.all => serde_json::json!({
+                    "type": "result",
+                    "flow": plan.flows[flow_id].display_name,
+                    "durationNanos": u64::try_from(started.elapsed().as_nanos())
+                        .unwrap_or(u64::MAX),
+                    "result": report::value_json(&value),
+                })
+                .to_string(),
                 OutputMode::Json => report.json(),
             };
             println!("{output}");
@@ -356,21 +470,25 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
                     .get(error.span.source)
                     .unwrap_or_else(|| &project.sources[project.entry_source]);
                 let (line, column) = source_location(&source.text, error.span.start);
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "flow": plan.flows[flow_id].display_name,
-                        "durationNanos": u64::try_from(started.elapsed().as_nanos())
-                            .unwrap_or(u64::MAX),
-                        "error": {
-                            "message": error.message,
-                            "path": source.path,
-                            "line": line,
-                            "column": column,
-                            "flowStack": error.flow_stack,
-                        }
-                    })
-                );
+                let mut output = serde_json::json!({
+                    "flow": plan.flows[flow_id].display_name,
+                    "durationNanos": u64::try_from(started.elapsed().as_nanos())
+                        .unwrap_or(u64::MAX),
+                    "error": {
+                        "message": error.message,
+                        "path": source.path,
+                        "line": line,
+                        "column": column,
+                        "flowStack": error.flow_stack,
+                    }
+                });
+                if options.all {
+                    output
+                        .as_object_mut()
+                        .expect("execution report is an object")
+                        .insert("type".to_owned(), serde_json::json!("failure"));
+                }
+                println!("{output}");
                 return Err(CliError::Failure);
             }
             let operations = observer.take_operations();
@@ -389,6 +507,57 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
             }
             Err(CliError::Failure)
         }
+    }
+}
+
+fn print_all_empty(options: &RunOptions, skipped: usize) {
+    if options.output == OutputMode::Json {
+        println!(
+            "{}",
+            serde_json::json!({ "type": "start", "eligible": 0, "skipped": skipped })
+        );
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "summary",
+                "eligible": 0,
+                "skipped": skipped,
+                "passed": 0,
+                "failed": 0,
+                "durationNanos": 0,
+            })
+        );
+    } else if options.output != OutputMode::Raw {
+        println!(
+            "\n========================================================================\nBatch summary\n  No zero-argument flows to run.\n  Passed: 0   Failed: 0   Skipped: {skipped}\n========================================================================"
+        );
+    }
+}
+
+fn print_all_summary(
+    options: &RunOptions,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    duration: Duration,
+) {
+    if options.output == OutputMode::Json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "summary",
+                "eligible": passed + failed,
+                "skipped": skipped,
+                "passed": passed,
+                "failed": failed,
+                "durationNanos": u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
+            })
+        );
+    } else if options.output != OutputMode::Raw {
+        println!(
+            "\n========================================================================\nBatch summary\n  Passed: {passed}   Failed: {failed}   Skipped: {skipped}\n  Duration: {}\n========================================================================",
+            display_duration(duration)
+        );
     }
 }
 

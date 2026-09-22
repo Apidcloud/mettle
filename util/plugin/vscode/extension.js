@@ -424,6 +424,39 @@ async function runFlow(flow, output) {
   await vscode.tasks.executeTask(task);
 }
 
+async function runAllFlows(output) {
+  const document = vscode.window.activeTextEditor?.document;
+  if (!document || document.languageId !== "mettle") {
+    void vscode.window.showErrorMessage("Open a Mettle file before running all flows.");
+    return;
+  }
+  if (document.isDirty && !(await document.save())) {
+    void vscode.window.showErrorMessage("Save the Mettle file before running all flows.");
+    return;
+  }
+
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+  const scope = workspaceFolder || vscode.TaskScope.Workspace;
+  const execution = new vscode.ProcessExecution(
+    mettleExecutable(),
+    ["run", document.uri.fsPath, "--all"],
+    { cwd: path.dirname(document.uri.fsPath) },
+  );
+  const task = new vscode.Task(
+    { type: "mettle", file: document.uri.fsPath, all: true },
+    scope,
+    "Run All Eligible Flows",
+    "Mettle",
+    execution,
+  );
+  task.presentationOptions = {
+    reveal: vscode.TaskRevealKind.Always,
+    panel: vscode.TaskPanelKind.Dedicated,
+    clear: true,
+  };
+  await vscode.tasks.executeTask(task);
+}
+
 function activate(context) {
   const output = vscode.window.createOutputChannel("Mettle");
   const provider = new FlowCodeLensProvider(output);
@@ -457,6 +490,7 @@ function activate(context) {
       }
     }),
     vscode.commands.registerCommand("mettle.runFlow", (flow) => runFlow(flow, output)),
+    vscode.commands.registerCommand("mettle.runAllFlows", () => runAllFlows(output)),
     { dispose: () => void languageServer.stop() },
   );
   if (vscode.workspace.textDocuments.some((document) => document.languageId === "mettle")) {

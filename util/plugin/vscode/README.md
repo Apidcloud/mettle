@@ -11,6 +11,7 @@ Basic language support for `.mettle` source files.
 - indentation and region folding;
 - snippets for named flows, anonymous flows, namespaces, assertions, contexts, structured and load execution policies, and HTTP requests;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
+- a file-level **Run All Eligible Flows** command for zero-argument flows;
 - prompts for named flow parameters and execution in a dedicated task terminal.
 - Ctrl+Click, **Go to Definition**, and **Peek Definition** for flow calls,
   context uses, parameters, and local bindings, including declarations in other
@@ -50,7 +51,9 @@ flow inspectRequest(baseUrl, requestId) =
     http.get("${baseUrl}/posts/${requestId}")
 ```
 
-The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. The dedicated task terminal shows the same structured flow report and live workload dashboard as the CLI. Use `mettle run --verbose` when you need the complete returned value.
+The extension asks for `baseUrl` and `requestId` before launching `inspectRequest`. Use `https://jsonplaceholder.typicode.com` as the base URL for the included demo. Anonymous flows are selected by their compiler-reported identity; named flows are selected by name. Dirty files are saved before execution. The dedicated task terminal shows the same structured flow report and live workload dashboard as the CLI. Use `mettle run --verbose` to expand HTTP response headers and decoded bodies.
+
+To run every zero-argument flow in the active file, use **Mettle: Run All Eligible Flows in File** from the Command Palette or the editor title bar. Parameterized flows are skipped; all eligible flows run sequentially and the terminal ends with a batch summary.
 
 ## Package
 

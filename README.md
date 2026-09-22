@@ -59,6 +59,24 @@ cargo install --path crates/mettle-cli --locked
 mettle --version
 ```
 
+### VS Code extension
+
+The repository includes the Mettle Language extension for syntax highlighting,
+flow CodeLens actions, and go-to-definition. Build and install its VSIX from
+the repository checkout:
+
+```bash
+cd util/plugin/vscode
+npm run package
+code --install-extension dist/mettle-language-0.10.0.vsix --force
+```
+
+If the `code` launcher is unavailable, in VS Code open the Extensions view,
+choose **Install from VSIX…**, and select the generated package. The extension
+requires the `mettle` CLI on `PATH`; configure **Mettle: Executable Path** when
+the binary is elsewhere. See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md)
+for editor features and development details.
+
 The included request collection uses the public JSONPlaceholder test API. It needs an internet connection but no account, credentials, environment variables, or local server.
 
 ### Platform support
@@ -109,6 +127,18 @@ mettle run requests.mettle getPost \
 
 ```bash
 mettle run examples/request-collection.mettle --line 3
+```
+
+Run every zero-argument flow in source order with `--all`. Parameterized flows
+are deliberately skipped, so this is useful for a collection of self-contained
+checks. Each flow still performs its real I/O; Mettle continues after a failed
+flow and returns a nonzero status if any executed flow fails. Human output ends
+with a batch summary. `--output json` emits JSON Lines: a `start` record, one
+atomic `result` or `failure` record per executed flow, and a final `summary`
+record.
+
+```bash
+mettle run checks.mettle --all
 ```
 
 ## Build a workflow from operation results
@@ -373,7 +403,11 @@ createUser
 ✓ Completed in 141ms
 ```
 
-Large payloads are formatted and capped in the default view. `--verbose` includes the complete returned value. `--quiet` prints only the final flow status, `--raw` prints only the returned value, and `--output json` produces a stable execution envelope for automation. `--no-color` disables ANSI colors.
+Large payloads are formatted and capped in the default view. `--verbose` expands
+every HTTP operation with readable response headers and one decoded body, without
+dumping duplicate raw body bytes. `--quiet` prints only the final flow status,
+`--raw` prints only the returned value, and `--output json` produces a stable
+execution envelope for automation. `--no-color` disables ANSI colors.
 
 ```bash
 mettle run examples/request-collection.mettle --line 10 --verbose

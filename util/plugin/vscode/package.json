@@ -11,7 +11,8 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:mettle",
-    "onCommand:mettle.runFlow"
+    "onCommand:mettle.runFlow",
+    "onCommand:mettle.runAllFlows"
   ],
   "categories": [
     "Programming Languages",
@@ -33,6 +34,11 @@
         "command": "mettle.runFlow",
         "title": "Mettle: Run Flow",
         "icon": "$(play)"
+      },
+      {
+        "command": "mettle.runAllFlows",
+        "title": "Mettle: Run All Eligible Flows in File",
+        "icon": "$(run-all)"
       }
     ],
     "configuration": {
@@ -70,6 +76,15 @@
         "language": "mettle",
         "path": "./snippets/mettle.json"
       }
-    ]
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "mettle.runAllFlows",
+          "when": "editorLangId == mettle",
+          "group": "navigation@1"
+        }
+      ]
+    }
   }
 }
