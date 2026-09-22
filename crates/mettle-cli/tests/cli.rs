@@ -172,7 +172,7 @@ fn verbose_prints_nested_results_for_humans() {
 }
 
 #[test]
-fn default_output_summarizes_http_responses() {
+fn ordinary_objects_are_not_mistaken_for_capability_results() {
     let path = source_file(
         "flow main() { return { body: \"ignored\" headers: { server: \"test\" } json: { active: true } method: \"GET\" status: 200 url: \"https://example.test/users\" } }",
     );
@@ -185,12 +185,70 @@ fn default_output_summarizes_http_responses() {
 
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("GET"));
-    assert!(stdout.contains("https://example.test/users"));
-    assert!(stdout.contains("200"));
+    assert!(stdout.contains("\"method\": \"GET\""));
+    assert!(stdout.contains("\"url\": \"https://example.test/users\""));
+    assert!(stdout.contains("\"status\": 200"));
     assert!(stdout.contains("\"active\": true"));
-    assert!(!stdout.contains("headers"));
-    assert!(!stdout.contains("ignored"));
+    assert!(stdout.contains("headers"));
+    assert!(stdout.contains("ignored"));
+}
+
+#[test]
+fn file_contexts_apply_to_every_flow_in_their_own_source_file() {
+    let directory = project_directory();
+    fs::write(directory.join("mettle.toml"), "name = \"contexts\"\n")
+        .expect("manifest should be writable");
+    let entry = directory.join("main.mettle");
+    fs::write(
+        &entry,
+        "context entry { marker: \"entry\" }\nflow main() = marker\nuse context entry\n",
+    )
+    .expect("entry source should be writable");
+    fs::write(
+        directory.join("other.mettle"),
+        "context otherContext { marker: \"other\" }\nflow other() = marker\nuse context otherContext\n",
+    )
+    .expect("other source should be writable");
+
+    let main = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&entry)
+        .output()
+        .expect("main flow should run");
+    let other = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&entry)
+        .arg("other")
+        .output()
+        .expect("other flow should run");
+    fs::remove_dir_all(directory).expect("project directory should be removable");
+
+    assert!(main.status.success(), "{main:?}");
+    assert!(other.status.success(), "{other:?}");
+    assert!(String::from_utf8_lossy(&main.stdout).contains("entry"));
+    assert!(!String::from_utf8_lossy(&main.stdout).contains("other"));
+    assert!(String::from_utf8_lossy(&other.stdout).contains("other"));
+}
+
+#[test]
+fn secret_values_are_redacted_after_interpolation_and_in_json() {
+    let path = source_file(
+        "flow main() { credentials = secret({ token: env(\"METTLE_TEST_SECRET\") }) return \"Bearer ${credentials.token}\" }",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .env("METTLE_TEST_SECRET", "never-print-this")
+        .output()
+        .expect("flow should run");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[REDACTED]"));
+    assert!(!stdout.contains("never-print-this"));
 }
 
 #[test]

@@ -72,6 +72,7 @@ pub enum PlanExpressionKind {
     Local(usize),
     Context(usize),
     Environment(String),
+    Sensitive(Box<PlanExpression>),
     Array(Vec<PlanExpression>),
     Object(Vec<PlanField>),
     Member {
@@ -141,6 +142,7 @@ pub enum Constant {
 pub enum ValueType {
     Null,
     Boolean,
+    Bytes,
     Integer,
     Float,
     String,
@@ -155,6 +157,7 @@ impl ValueType {
         match self {
             Self::Null => "null",
             Self::Boolean => "boolean",
+            Self::Bytes => "bytes",
             Self::Integer => "integer",
             Self::Float => "number",
             Self::String => "string",
@@ -163,6 +166,18 @@ impl ValueType {
             Self::Object => "object",
             Self::Inferred => "inferred value",
         }
+    }
+}
+
+const fn schema_value_type(schema: SchemaType) -> ValueType {
+    match schema {
+        SchemaType::Boolean => ValueType::Boolean,
+        SchemaType::Bytes => ValueType::Bytes,
+        SchemaType::Duration => ValueType::Duration,
+        SchemaType::Integer => ValueType::Integer,
+        SchemaType::Json => ValueType::Inferred,
+        SchemaType::Object(_) | SchemaType::StringMap => ValueType::Object,
+        SchemaType::String => ValueType::String,
     }
 }
 
@@ -291,15 +306,15 @@ impl<'a> DefinitionFinder<'a> {
 
         for name in &self.program.file_contexts {
             if self.at(name.span) {
-                let namespace = self
+                let owner = self
                     .program
-                    .namespace
-                    .as_ref()
-                    .map_or("", |value| value.value.as_str());
+                    .flows
+                    .iter()
+                    .find(|flow| flow.span.source == name.span.source)?;
                 return self.resolve_context(
                     name.value.as_str(),
-                    namespace,
-                    &self.program.namespace_uses,
+                    &owner.namespace,
+                    &owner.namespace_uses,
                 );
             }
         }
@@ -550,16 +565,12 @@ impl<'a> Compiler<'a> {
         self.collect_flow_names();
 
         let default_flow = self.flow_ids.get("main").copied();
-        let file_context = self.resolve_file_context();
-
         let contexts = self.compile_contexts();
-        let flows = self
-            .program
-            .flows
-            .iter()
-            .enumerate()
-            .map(|(flow_id, flow)| self.compile_flow(flow_id, flow, file_context))
-            .collect();
+        let mut flows = Vec::with_capacity(self.program.flows.len());
+        for (flow_id, flow) in self.program.flows.iter().enumerate() {
+            let file_context = self.resolve_file_context(flow);
+            flows.push(self.compile_flow(flow_id, flow, file_context));
+        }
         self.detect_recursion();
 
         if self.errors.is_empty() {
@@ -659,9 +670,14 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn resolve_file_context(&mut self) -> Option<usize> {
-        let name = self.program.file_contexts.first()?;
-        for duplicate in self.program.file_contexts.iter().skip(1) {
+    fn resolve_file_context(&mut self, flow: &MettleDecl) -> Option<usize> {
+        let mut names = self
+            .program
+            .file_contexts
+            .iter()
+            .filter(|name| name.span.source == flow.span.source);
+        let name = names.next()?;
+        for duplicate in names {
             self.errors.push(CompileError::new(
                 "a file may apply only one default context until context composition is available",
                 duplicate.span,
@@ -670,11 +686,8 @@ impl<'a> Compiler<'a> {
         let error_count = self.errors.len();
         self.resolve_context_name(
             &name.value,
-            self.program
-                .namespace
-                .as_ref()
-                .map_or("", |namespace| namespace.value.as_str()),
-            &self.program.namespace_uses,
+            &flow.namespace,
+            &flow.namespace_uses,
             name.span,
         )
         .or_else(|| {
@@ -1350,6 +1363,23 @@ impl<'a> Compiler<'a> {
             });
         }
 
+        if callee.value == "secret" {
+            if !options.is_empty() || arguments.len() != 1 {
+                self.errors.push(CompileError::new(
+                    "`secret` expects exactly one argument and no option block",
+                    span,
+                ));
+                return None;
+            }
+            let value = self.compile_expression(current_flow, &arguments[0], locals, context)?;
+            let value_type = value.value_type;
+            return Some(PlanExpression {
+                kind: PlanExpressionKind::Sensitive(Box::new(value)),
+                value_type,
+                span,
+            });
+        }
+
         if let Some((capability_name, operation_name)) = callee.value.split_once('.') {
             let Some(capability_id) = self.capability_ids.get(capability_name).copied() else {
                 self.errors.push(CompileError::new(
@@ -1428,7 +1458,7 @@ impl<'a> Compiler<'a> {
                     arguments: compiled_arguments,
                     options,
                 },
-                value_type: ValueType::Object,
+                value_type: schema_value_type(operation.result),
                 span,
             });
         }
@@ -1554,6 +1584,7 @@ impl<'a> Compiler<'a> {
         }
         let valid = match expected {
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
+            SchemaType::Bytes => value.value_type == ValueType::Bytes,
             SchemaType::Duration => value.value_type == ValueType::Duration,
             SchemaType::Integer => value.value_type == ValueType::Integer,
             SchemaType::String => value.value_type == ValueType::String,
@@ -1933,12 +1964,14 @@ mod tests {
             parameters: &[SchemaType::String],
             options: HTTP_OPTIONS,
             mutually_exclusive: &[],
+            result: SchemaType::Json,
         },
         OperationSchema {
             name: "post",
             parameters: &[SchemaType::String],
             options: BODY_OPTIONS,
             mutually_exclusive: &[&["json", "body"]],
+            result: SchemaType::Json,
         },
     ];
     const HTTP: CapabilityDescriptor = CapabilityDescriptor {

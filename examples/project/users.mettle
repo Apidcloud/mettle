@@ -1,7 +1,7 @@
 namespace users
 use namespace core
+use context api
 
 flow inspectRequest(requestId) {
-    use context api
     return http.get("/posts/${requestId}")
 }

@@ -1,4 +1,5 @@
 /target/
+.local/
 *.profraw
 __pycache__/
 *.py[cod]

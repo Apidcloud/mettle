@@ -224,11 +224,11 @@ The runner may support `.env` files and explicit environment-file selection. A p
 
 Environment selection is not required to live outside source code: named contexts can still represent intentional environment-specific settings. The common case should work with a shared `base` context and externally supplied values, without duplicating every request for local and staging environments.
 
-Value retrieval and sensitivity are separate concerns. `env()` does not inherently promise redaction. A future sensitive-value wrapper could mark a value obtained from any source; it should not replace `env()` with a misleading secret-store lookup. The runtime should avoid recording authorization headers by default and define redaction before adding rich payload logging.
+Value retrieval and sensitivity are separate concerns. `env()` does not inherently promise redaction. The implemented `secret(value)` wrapper marks a value obtained from any source, propagates through interpolation and structured values, and redacts normal CLI, JSON, diagnostic, and capability report output. Capabilities additionally identify sensitive protocol fields; HTTP redacts credential-bearing request and response headers.
 
 ## Context lifetime and flow boundaries
 
-The current direction is to apply contexts inside existing owners: context declarations, flows, tests, or supported execution blocks. Avoid persistent, free-floating `use context` at file level. Namespace directives remain valid at file level because they affect name resolution rather than runtime configuration.
+`use context` may appear at file level as a default for every flow in that source file. Its position does not change its scope, though placing it with the other file directives near the top is the conventional form. A flow-level `use context` overrides the file default. Context composition remains the way to combine more than one reusable context.
 
 ```text
 flow getUser(id) {
@@ -639,7 +639,7 @@ context authenticatedSip {
 }
 ```
 
-These forms are proposals. HTTP bearer, HTTP basic, and SIP digest do not share the same exchange and should be implemented by their capabilities. `env()` identifies where a value comes from; `secret(value)` marks any value as sensitive. Sensitive taint should propagate through interpolation and derived values and prevent disclosure in CLI output, traces, reports, errors, and recorded request data unless the user explicitly opts into an unsafe diagnostic mode.
+The authentication constructors remain proposals. HTTP bearer, HTTP basic, and SIP digest do not share the same exchange and should be implemented by their capabilities. `env()` identifies where a value comes from; the implemented `secret(value)` marks any value as sensitive. Sensitive taint propagates through interpolation and derived values and prevents disclosure in CLI output, JSON reports, errors, and capability reports.
 
 ## Documentation, examples, and test selection
 

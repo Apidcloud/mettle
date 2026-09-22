@@ -7,6 +7,6 @@ flow getSeed() {
 }
 
 flow invalidSecretUrl() {
-    secretHost = env("METTLE_TEST_SECRET")
+    secretHost = secret(env("METTLE_TEST_SECRET"))
     return http.get("http://${secretHost}")
 }

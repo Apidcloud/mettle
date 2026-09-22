@@ -185,7 +185,7 @@ An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `meth
 
 ## Put shared setup in contexts
 
-Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
+Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. A file-level `use context` applies a default to every flow in that source file, regardless of where the directive appears; placing it near the top is the recommended convention. A flow-level context overrides the file default. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
 
 ```mettle
 context baseApi {
@@ -200,7 +200,7 @@ context baseApi {
 
 context authenticatedApi {
     use context baseApi
-    apiToken: env("API_TOKEN")
+    apiToken: secret(env("API_TOKEN"))
 
     defaults http {
         headers: {
@@ -216,6 +216,8 @@ flow currentUser() {
 ```
 
 `env("API_URL")` requires an environment variable. Within a string, `${API_URL}` first resolves a flow local, parameter, or context value, then falls back to the process environment. That keeps a one-off file pleasant to use:
+
+`env()` does not make a value secret by itself. Wrap credentials with `secret(...)`; sensitivity propagates through interpolation and structured values, and normal CLI, JSON, diagnostic, and capability report output replaces them with `[REDACTED]`. HTTP also redacts credential-bearing headers such as `Authorization`, `Cookie`, and `Set-Cookie`.
 
 ```mettle
 flow health() = http.get("${API_URL}/health")

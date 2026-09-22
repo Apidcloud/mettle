@@ -209,16 +209,7 @@ fn parse_run_options(arguments: &[OsString]) -> Result<RunOptions, CliError> {
                 cursor += 1;
             }
             "--output" => {
-                let value = arguments
-                    .get(cursor + 1)
-                    .and_then(|value| value.to_str())
-                    .ok_or_else(|| CliError::Usage("`--output` requires `json`".to_owned()))?;
-                if value != "json" {
-                    return Err(CliError::Usage(format!(
-                        "unsupported output format `{value}`; expected `json`"
-                    )));
-                }
-                set_output_mode(&mut options, OutputMode::Json, "--output json")?;
+                parse_output_format(arguments.get(cursor + 1), &mut options)?;
                 cursor += 2;
             }
             "--no-progress" => {
@@ -239,6 +230,18 @@ fn parse_run_options(arguments: &[OsString]) -> Result<RunOptions, CliError> {
         }
     }
     Ok(options)
+}
+
+fn parse_output_format(value: Option<&OsString>, options: &mut RunOptions) -> Result<(), CliError> {
+    let value = value
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| CliError::Usage("`--output` requires `json`".to_owned()))?;
+    if value != "json" {
+        return Err(CliError::Usage(format!(
+            "unsupported output format `{value}`; expected `json`"
+        )));
+    }
+    set_output_mode(options, OutputMode::Json, "--output json")
 }
 
 fn set_output_mode(
@@ -415,7 +418,7 @@ fn run_flow(
         Runtime::new(vec![Arc::new(HttpCapability::new())]).with_observer(observer.clone());
     let started = Instant::now();
     let outcome = async_runtime.block_on(async {
-        let mut execution = Box::pin(mettle_runtime.execute_selected(&plan, flow_id, arguments));
+        let mut execution = Box::pin(mettle_runtime.execute_selected(plan, flow_id, arguments));
         let mut interrupt = Box::pin(tokio::signal::ctrl_c());
         std::future::poll_fn(|task| {
             if let Poll::Ready(result) = execution.as_mut().poll(task) {
@@ -498,10 +501,7 @@ fn run_flow(
                 "{}\n",
                 failure_summary(&plan.flows[flow_id].display_name, &operations, color)
             );
-            eprintln!(
-                "{}",
-                render_diagnostic(&project, &error.message, error.span)
-            );
+            eprintln!("{}", render_diagnostic(project, &error.message, error.span));
             if !error.flow_stack.is_empty() {
                 eprintln!("flow stack: {}", error.flow_stack.join(" -> "));
             }
@@ -860,7 +860,6 @@ fn load_sources(
         program.set_source(source_id);
         if source_id != entry_source {
             program.flows.retain(|flow| flow.name.is_some());
-            program.file_contexts.clear();
         }
         parsed.push(program);
     }
@@ -870,11 +869,12 @@ fn load_sources(
         namespace: entry.namespace.clone(),
         namespace_uses: entry.namespace_uses.clone(),
         contexts: Vec::new(),
-        file_contexts: entry.file_contexts.clone(),
+        file_contexts: Vec::new(),
         flows: Vec::new(),
     };
     for source in parsed {
         program.contexts.extend(source.contexts);
+        program.file_contexts.extend(source.file_contexts);
         program.flows.extend(source.flows);
     }
     Ok(LoadedProject {

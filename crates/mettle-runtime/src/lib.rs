@@ -7,7 +7,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 use std::{env, fmt};
 
-use mettle_capability::{Capability, Object, Span, Value};
+use mettle_capability::{Capability, Object, OperationReport, Span, Value};
 use mettle_compiler::{
     BinaryOperator, Constant, ContextPlan, ExecutionPlan, Instruction, MettlePlan, PlanExpression,
     PlanExpressionKind, PlanField, StringPart,
@@ -60,6 +60,7 @@ pub struct OperationEvent {
     pub duration: Duration,
     pub span: Span,
     pub result: Result<Value, String>,
+    pub report: Option<OperationReport>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -354,12 +355,12 @@ impl Executor<'_> {
                 }
                 Instruction::Assert(expression) => {
                     let value = self.evaluate(expression, &locals, &context).await?;
-                    match value {
+                    match value.revealed() {
                         Value::Boolean(true) => {}
                         Value::Boolean(false) => {
                             return Err(self.error("assertion failed", expression.span));
                         }
-                        value => {
+                        _ => {
                             return Err(self.error(
                                 format!(
                                     "assertion produced {}, expected boolean",
@@ -420,19 +421,17 @@ impl Executor<'_> {
                         )
                     })
                 }
-                PlanExpressionKind::Environment(name) => env::var(name)
-                    .map(|value| {
-                        if !value.is_empty() && !self.secrets.contains(&value) {
-                            self.secrets.push(value.clone());
-                        }
-                        Value::String(value)
-                    })
-                    .map_err(|_| {
+                PlanExpressionKind::Environment(name) => {
+                    env::var(name).map(Value::String).map_err(|_| {
                         self.error(
                             format!("required environment variable `{name}` is not set"),
                             expression.span,
                         )
-                    }),
+                    })
+                }
+                PlanExpressionKind::Sensitive(value) => {
+                    Ok(self.evaluate(value, locals, context).await?.sensitive())
+                }
                 PlanExpressionKind::Array(values) => {
                     let mut result = Vec::with_capacity(values.len());
                     for value in values {
@@ -446,15 +445,26 @@ impl Executor<'_> {
                     .map(Value::Object),
                 PlanExpressionKind::Member { value, member } => {
                     let value = self.evaluate(value, locals, context).await?;
-                    let Value::Object(fields) = value else {
+                    let inherited_sensitivity = value.is_sensitive();
+                    let Value::Object(fields) = value.revealed() else {
                         return Err(self.error(
                             format!("cannot read member `{member}` from {}", value.type_name()),
                             expression.span,
                         ));
                     };
-                    fields.get(member).cloned().ok_or_else(|| {
-                        self.error(format!("object has no member `{member}`"), expression.span)
-                    })
+                    fields
+                        .get(member)
+                        .cloned()
+                        .map(|value| {
+                            if inherited_sensitivity {
+                                value.sensitive()
+                            } else {
+                                value
+                            }
+                        })
+                        .ok_or_else(|| {
+                            self.error(format!("object has no member `{member}`"), expression.span)
+                        })
                 }
                 PlanExpressionKind::Binary {
                     left,
@@ -469,17 +479,23 @@ impl Executor<'_> {
                 }
                 PlanExpressionKind::InterpolatedString(parts) => {
                     let mut result = String::new();
+                    let mut sensitive = false;
                     for part in parts {
                         match part {
                             StringPart::Text(value) => result.push_str(value),
                             StringPart::Value(value) => {
-                                result.push_str(
-                                    &self.evaluate(value, locals, context).await?.to_string(),
-                                );
+                                let value = self.evaluate(value, locals, context).await?;
+                                sensitive |= value.contains_sensitive();
+                                result.push_str(&value.exposed_string());
                             }
                         }
                     }
-                    Ok(Value::String(result))
+                    let result = Value::String(result);
+                    Ok(if sensitive {
+                        result.sensitive()
+                    } else {
+                        result
+                    })
                 }
                 PlanExpressionKind::MettleCall { flow, arguments } => {
                     let mut values = Vec::with_capacity(arguments.len());
@@ -511,6 +527,14 @@ impl Executor<'_> {
                         ));
                     };
                     capability.merge_options(&mut effective, local);
+                    for value in values.iter().chain(effective.values()) {
+                        value.visit_sensitive_strings(&mut |secret| {
+                            if !secret.is_empty() && !self.secrets.iter().any(|seen| seen == secret)
+                            {
+                                self.secrets.push(secret.to_owned());
+                            }
+                        });
+                    }
                     let capability_name = capability.name();
                     let operation_name = capability.operation_name(*operation);
                     let started = self.clock.now();
@@ -524,6 +548,7 @@ impl Executor<'_> {
                         .unwrap_or_default();
                     match result {
                         Ok(value) => {
+                            let report = capability.report(*operation, &value);
                             if !self.inside_workload {
                                 self.observer.operation_completed(OperationEvent {
                                     capability: capability_name.to_owned(),
@@ -531,6 +556,7 @@ impl Executor<'_> {
                                     duration,
                                     span: expression.span,
                                     result: Ok(value.clone()),
+                                    report,
                                 });
                             }
                             Ok(value)
@@ -544,6 +570,7 @@ impl Executor<'_> {
                                     duration,
                                     span: expression.span,
                                     result: Err(error.message.clone()),
+                                    report: None,
                                 });
                             }
                             Err(error)
@@ -1342,6 +1369,8 @@ fn format_duration(duration: Duration) -> String {
 }
 
 fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Result<bool, String> {
+    let left = left.revealed();
+    let right = right.revealed();
     if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
         let equal = left == right;
         return Ok(if operator == BinaryOperator::Equal {
@@ -1399,6 +1428,7 @@ mod tests {
         parameters: &[],
         options: &[],
         mutually_exclusive: &[],
+        result: mettle_capability::SchemaType::Json,
     }];
     const PROBE: CapabilityDescriptor = CapabilityDescriptor {
         name: "probe",

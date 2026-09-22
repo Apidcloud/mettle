@@ -3,7 +3,7 @@ use std::io::{self, IsTerminal as _, Write as _};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use mettle_capability::Value;
+use mettle_capability::{OperationReport, ReportOutcome, ReportSection, Value};
 use mettle_runtime::{
     ExecutionObserver, OperationEvent, WorkloadKind, WorkloadPhase, WorkloadSnapshot,
 };
@@ -104,36 +104,24 @@ impl ExecutionReport<'_> {
             render_operation(&mut output, operation, color, verbose);
         }
 
-        if self.operations.is_empty()
-            && let Some((method, url, status)) = http_summary(self.result)
-        {
-            writeln!(
-                output,
-                "  {} {:<6} {}\n    {} · {}\n",
-                style("✓", "32", color),
-                method,
-                url,
-                style(&status.to_string(), status_color(status), color),
-                display_duration(self.duration)
-            )
-            .expect("writing to a string cannot fail");
-        }
-
-        let verbose_http_already_rendered = verbose
-            && is_http_response(self.result)
-            && self
-                .operations
-                .iter()
-                .any(|operation| matches!(&operation.result, Ok(value) if value == self.result));
-        let show_result = !verbose_http_already_rendered
-            && ((self.operations.is_empty() && !is_http_response(self.result))
-                || verbose
-                || !is_http_response(self.result)
-                || response_payload(self.result).is_some());
+        let final_operation_report = self.operations.iter().find_map(|operation| {
+            (matches!(&operation.result, Ok(value) if value == self.result)
+                || operation
+                    .report
+                    .as_ref()
+                    .and_then(|report| report.payload.as_ref())
+                    == Some(self.result))
+            .then_some(operation.report.as_ref())
+            .flatten()
+        });
+        let payload = final_operation_report.and_then(|report| report.payload.as_ref());
+        let show_result = if verbose {
+            final_operation_report.is_none()
+        } else {
+            self.operations.is_empty() || payload.is_some()
+        };
         if show_result {
-            let label = if verbose && is_http_response(self.result) {
-                "HTTP response"
-            } else if verbose {
+            let label = if verbose {
                 "Full result"
             } else if self.operations.is_empty() {
                 "Result"
@@ -142,15 +130,11 @@ impl ExecutionReport<'_> {
             };
             writeln!(output, "  {}", style(label, "2", color))
                 .expect("writing to a string cannot fail");
-            if verbose && is_http_response(self.result) {
-                render_http_details(&mut output, self.result, color);
-            } else {
-                let formatted = pretty_value(self.result, verbose);
-                for line in formatted.lines() {
-                    writeln!(output, "    {line}").expect("writing to a string cannot fail");
-                }
-                output.push('\n');
+            let formatted = pretty_value(payload.unwrap_or(self.result), verbose);
+            for line in formatted.lines() {
+                writeln!(output, "    {line}").expect("writing to a string cannot fail");
             }
+            output.push('\n');
         }
 
         write!(
@@ -185,24 +169,22 @@ impl ExecutionReport<'_> {
 fn render_operation(output: &mut String, event: &OperationEvent, color: bool, verbose: bool) {
     match &event.result {
         Ok(value) => {
-            if let Some((method, url, status)) = http_summary(value) {
-                writeln!(
-                    output,
-                    "  {} {:<6} {}",
-                    style("✓", "32", color),
-                    method,
-                    url
-                )
-                .expect("writing to a string cannot fail");
+            if let Some(report) = &event.report {
+                writeln!(output, "  {} {}", style("✓", "32", color), report.summary)
+                    .expect("writing to a string cannot fail");
                 writeln!(
                     output,
                     "    {} · {}\n",
-                    style(&status.to_string(), status_color(status), color),
+                    style(
+                        &report.outcome,
+                        report_outcome_color(report.outcome_kind),
+                        color
+                    ),
                     display_duration(event.duration)
                 )
                 .expect("writing to a string cannot fail");
                 if verbose {
-                    render_http_details(output, value, color);
+                    render_operation_report(output, report, color);
                 }
             } else {
                 writeln!(
@@ -364,30 +346,6 @@ pub fn failure_summary(flow: &str, operations: &[OperationEvent], color: bool) -
     output
 }
 
-fn is_http_response(value: &Value) -> bool {
-    http_summary(value).is_some()
-}
-
-fn http_summary(value: &Value) -> Option<(&str, &str, i64)> {
-    let fields = value.as_object()?;
-    let Value::String(method) = fields.get("method")? else {
-        return None;
-    };
-    let Value::String(url) = fields.get("url")? else {
-        return None;
-    };
-    let status = integer(fields.get("status")?)?;
-    Some((method, url, status))
-}
-
-fn response_payload(value: &Value) -> Option<&Value> {
-    let fields = value.as_object()?;
-    match fields.get("json") {
-        Some(Value::Null) | None => fields.get("body"),
-        Some(json) => Some(json),
-    }
-}
-
 fn render_verbose_value(output: &mut String, value: &Value, color: bool) {
     writeln!(output, "    {}", style("Details", "2", color))
         .expect("writing to a string cannot fail");
@@ -397,45 +355,34 @@ fn render_verbose_value(output: &mut String, value: &Value, color: bool) {
     output.push('\n');
 }
 
-fn render_http_details(output: &mut String, value: &Value, color: bool) {
-    let Some(fields) = value.as_object() else {
-        return;
-    };
-
-    writeln!(output, "    {}", style("Headers", "2", color))
-        .expect("writing to a string cannot fail");
-    if let Some(Value::Object(headers)) = fields.get("headers") {
-        if headers.is_empty() {
-            writeln!(output, "      (none)").expect("writing to a string cannot fail");
-        } else {
-            for (name, value) in headers {
-                let value = match value {
-                    Value::String(value) => value.clone(),
-                    value => value.to_string(),
-                };
-                writeln!(output, "      {name}: {value}").expect("writing to a string cannot fail");
+fn render_operation_report(output: &mut String, report: &OperationReport, color: bool) {
+    for section in &report.sections {
+        match section {
+            ReportSection::Fields { title, fields } => {
+                writeln!(output, "    {}", style(title, "2", color))
+                    .expect("writing to a string cannot fail");
+                if fields.is_empty() {
+                    writeln!(output, "      (none)").expect("writing to a string cannot fail");
+                } else {
+                    for (name, value) in fields {
+                        writeln!(output, "      {name}: {value}")
+                            .expect("writing to a string cannot fail");
+                    }
+                }
             }
-        }
-    } else {
-        writeln!(output, "      (none)").expect("writing to a string cannot fail");
-    }
-
-    let (label, body) = match fields.get("json") {
-        Some(Value::Null) | None => ("Body", fields.get("body")),
-        Some(json) => ("JSON body", Some(json)),
-    };
-    if let Some(body) = body {
-        writeln!(output, "    {}", style(label, "2", color))
-            .expect("writing to a string cannot fail");
-        for line in format_value(body).lines() {
-            writeln!(output, "      {line}").expect("writing to a string cannot fail");
+            ReportSection::Value { title, value } => {
+                writeln!(output, "    {}", style(title, "2", color))
+                    .expect("writing to a string cannot fail");
+                for line in format_value(value).lines() {
+                    writeln!(output, "      {line}").expect("writing to a string cannot fail");
+                }
+            }
         }
     }
     output.push('\n');
 }
 
 fn pretty_value(value: &Value, complete: bool) -> String {
-    let value = response_payload(value).unwrap_or(value);
     let formatted = format_value(value);
     if complete {
         return formatted;
@@ -444,15 +391,15 @@ fn pretty_value(value: &Value, complete: bool) -> String {
 }
 
 fn format_value(value: &Value) -> String {
-    let formatted = match value {
+    match value {
         Value::Array(_) | Value::Object(_) | Value::Bytes(_) => {
             serde_json::to_string_pretty(&value_json(value))
                 .expect("Mettle values always convert to JSON")
         }
         Value::String(value) => value.clone(),
+        Value::Sensitive(_) => "[REDACTED]".to_owned(),
         _ => value.to_string(),
-    };
-    formatted
+    }
 }
 
 fn truncate(value: &str, limit: usize) -> String {
@@ -489,6 +436,7 @@ pub fn value_json(value: &Value) -> serde_json::Value {
                 .map(|(name, value)| (name.clone(), value_json(value)))
                 .collect(),
         ),
+        Value::Sensitive(_) => serde_json::Value::String("[REDACTED]".to_owned()),
     }
 }
 
@@ -557,11 +505,12 @@ pub fn display_duration(duration: Duration) -> String {
     }
 }
 
-fn status_color(status: i64) -> &'static str {
-    match status {
-        200..=399 => "32",
-        400..=499 => "33",
-        _ => "31",
+fn report_outcome_color(outcome: ReportOutcome) -> &'static str {
+    match outcome {
+        ReportOutcome::Success => "32",
+        ReportOutcome::Warning => "33",
+        ReportOutcome::Failure => "31",
+        ReportOutcome::Neutral => "36",
     }
 }
 
@@ -578,7 +527,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{ExecutionReport, truncate};
-    use mettle_capability::Value;
+    use mettle_capability::{Capability, Span, Value};
+    use mettle_http::HttpCapability;
+    use mettle_runtime::OperationEvent;
 
     #[test]
     fn report_formats_a_named_value() {
@@ -615,10 +566,16 @@ mod tests {
             ),
             (
                 "headers".to_owned(),
-                Value::Object(BTreeMap::from([(
-                    "content-type".to_owned(),
-                    Value::String("application/json".to_owned()),
-                )])),
+                Value::Object(BTreeMap::from([
+                    (
+                        "content-type".to_owned(),
+                        Value::String("application/json".to_owned()),
+                    ),
+                    (
+                        "set-cookie".to_owned(),
+                        Value::String("session=secret".to_owned()).sensitive(),
+                    ),
+                ])),
             ),
             (
                 "json".to_owned(),
@@ -634,19 +591,29 @@ mod tests {
                 Value::String("https://example.test/health".to_owned()),
             ),
         ]));
+        let operation = OperationEvent {
+            capability: "http".to_owned(),
+            operation: "get".to_owned(),
+            duration: std::time::Duration::from_millis(10),
+            span: Span::default(),
+            result: Ok(value.clone()),
+            report: HttpCapability::new().report(0, &value),
+        };
         let report = ExecutionReport {
             flow: "health",
             duration: std::time::Duration::from_millis(12),
             result: &value,
-            operations: &[],
+            operations: &[operation],
         };
 
         let normal = report.human(false, false);
         let verbose = report.human(true, false);
         assert!(!normal.contains("\"headers\""));
-        assert!(verbose.contains("HTTP response"));
+        assert!(verbose.contains("GET    https://example.test/health"));
         assert!(verbose.contains("Headers"));
         assert!(verbose.contains("content-type: application/json"));
+        assert!(verbose.contains("set-cookie: [REDACTED]"));
+        assert!(!verbose.contains("session=secret"));
         assert!(verbose.contains("JSON body"));
         assert!(verbose.contains("\"status\": \"ok\""));
         assert!(verbose.contains("https://example.test/health"));

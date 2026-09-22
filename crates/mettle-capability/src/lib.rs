@@ -13,6 +13,7 @@ pub use mettle_syntax::Span;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaType {
     Boolean,
+    Bytes,
     Duration,
     Integer,
     Json,
@@ -26,6 +27,7 @@ impl SchemaType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
+            Self::Bytes => "bytes",
             Self::Duration => "duration",
             Self::Integer => "integer",
             Self::Json => "JSON value",
@@ -48,6 +50,7 @@ pub struct OperationSchema {
     pub parameters: &'static [SchemaType],
     pub options: &'static [FieldSchema],
     pub mutually_exclusive: &'static [&'static [&'static str]],
+    pub result: SchemaType,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,12 +73,14 @@ pub enum Value {
     Duration(Duration),
     Array(Vec<Self>),
     Object(Object),
+    Sensitive(Box<Self>),
 }
 
 impl Value {
     #[must_use]
     pub const fn type_name(&self) -> &'static str {
         match self {
+            Self::Sensitive(value) => value.type_name(),
             Self::Null => "null",
             Self::Boolean(_) => "boolean",
             Self::Integer(_) => "integer",
@@ -91,15 +96,117 @@ impl Value {
     #[must_use]
     pub fn as_object(&self) -> Option<&Object> {
         match self {
+            Self::Sensitive(value) => value.as_object(),
             Self::Object(value) => Some(value),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub fn sensitive(self) -> Self {
+        match self {
+            Self::Sensitive(_) => self,
+            value => Self::Sensitive(Box::new(value)),
+        }
+    }
+
+    #[must_use]
+    pub const fn revealed(&self) -> &Self {
+        match self {
+            Self::Sensitive(value) => value.revealed(),
+            value => value,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_sensitive(&self) -> bool {
+        matches!(self, Self::Sensitive(_))
+    }
+
+    #[must_use]
+    pub fn contains_sensitive(&self) -> bool {
+        match self {
+            Self::Sensitive(_) => true,
+            Self::Array(values) => values.iter().any(Self::contains_sensitive),
+            Self::Object(fields) => fields.values().any(Self::contains_sensitive),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn exposed_string(&self) -> String {
+        match self.revealed() {
+            Self::String(value) => value.clone(),
+            Self::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(exposed_json_value)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Object(fields) => format!(
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(name, value)| format!(
+                        "\"{}\": {}",
+                        escape_json(name),
+                        exposed_json_value(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            value => value.to_string(),
+        }
+    }
+
+    pub fn visit_sensitive_strings(&self, visitor: &mut impl FnMut(&str)) {
+        match self {
+            Self::Sensitive(value) => visit_strings(value, visitor),
+            Self::Array(values) => {
+                for value in values {
+                    value.visit_sensitive_strings(visitor);
+                }
+            }
+            Self::Object(fields) => {
+                for value in fields.values() {
+                    value.visit_sensitive_strings(visitor);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn exposed_json_value(value: &Value) -> String {
+    match value.revealed() {
+        Value::String(value) => format!("\"{}\"", escape_json(value)),
+        value => value.exposed_string(),
+    }
+}
+
+fn visit_strings(value: &Value, visitor: &mut impl FnMut(&str)) {
+    match value.revealed() {
+        Value::String(value) => visitor(value),
+        Value::Array(values) => {
+            for value in values {
+                visit_strings(value, visitor);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values() {
+                visit_strings(value, visitor);
+            }
+        }
+        _ => {}
     }
 }
 
 impl fmt::Display for Value {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Sensitive(_) => formatter.write_str("[REDACTED]"),
             Self::Null => formatter.write_str("null"),
             Self::Boolean(value) => value.fmt(formatter),
             Self::Integer(value) => value.fmt(formatter),
@@ -196,6 +303,35 @@ impl std::error::Error for CapabilityError {}
 pub type CapabilityFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Value, CapabilityError>> + Send + 'a>>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReportOutcome {
+    Success,
+    Warning,
+    Failure,
+    Neutral,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReportSection {
+    Fields {
+        title: String,
+        fields: Vec<(String, String)>,
+    },
+    Value {
+        title: String,
+        value: Value,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperationReport {
+    pub summary: String,
+    pub outcome: String,
+    pub outcome_kind: ReportOutcome,
+    pub sections: Vec<ReportSection>,
+    pub payload: Option<Value>,
+}
+
 pub trait Capability: Send + Sync {
     fn name(&self) -> &'static str;
 
@@ -205,6 +341,10 @@ pub trait Capability: Send + Sync {
 
     fn merge_options(&self, defaults: &mut Object, overrides: Object) {
         merge_objects(defaults, overrides);
+    }
+
+    fn report(&self, _operation: usize, _result: &Value) -> Option<OperationReport> {
+        None
     }
 
     fn invoke(

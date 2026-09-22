@@ -16,7 +16,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use mettle_capability::{
     Capability, CapabilityDescriptor, CapabilityError, CapabilityFuture, FieldSchema, Object,
-    OperationSchema, SchemaType, Span, Value, merge_objects,
+    OperationReport, OperationSchema, ReportOutcome, ReportSection, SchemaType, Span, Value,
+    merge_objects,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -86,48 +87,90 @@ const BODY_OPTIONS: &[FieldSchema] = &[
 const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
 const NO_CONFLICTS: &[&[&str]] = &[];
 
+const RESPONSE_FIELDS: &[FieldSchema] = &[
+    FieldSchema {
+        name: "body",
+        value_type: SchemaType::String,
+    },
+    FieldSchema {
+        name: "bodyBytes",
+        value_type: SchemaType::Bytes,
+    },
+    FieldSchema {
+        name: "duration",
+        value_type: SchemaType::Duration,
+    },
+    FieldSchema {
+        name: "headers",
+        value_type: SchemaType::StringMap,
+    },
+    FieldSchema {
+        name: "json",
+        value_type: SchemaType::Json,
+    },
+    FieldSchema {
+        name: "method",
+        value_type: SchemaType::String,
+    },
+    FieldSchema {
+        name: "status",
+        value_type: SchemaType::Integer,
+    },
+    FieldSchema {
+        name: "url",
+        value_type: SchemaType::String,
+    },
+];
+
 const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "get",
         parameters: &[SchemaType::String],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "post",
         parameters: &[SchemaType::String],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "put",
         parameters: &[SchemaType::String],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "patch",
         parameters: &[SchemaType::String],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "delete",
         parameters: &[SchemaType::String],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "head",
         parameters: &[SchemaType::String],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
     OperationSchema {
         name: "options",
         parameters: &[SchemaType::String],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
+        result: SchemaType::Object(RESPONSE_FIELDS),
     },
 ];
 
@@ -350,10 +393,14 @@ impl HttpCapability {
                 .headers()
                 .iter()
                 .map(|(name, value)| {
-                    (
-                        name.as_str().to_owned(),
-                        Value::String(String::from_utf8_lossy(value.as_bytes()).into_owned()),
-                    )
+                    let value =
+                        Value::String(String::from_utf8_lossy(value.as_bytes()).into_owned());
+                    let value = if sensitive_header(name.as_str()) {
+                        value.sensitive()
+                    } else {
+                        value
+                    };
+                    (name.as_str().to_owned(), value)
                 })
                 .collect::<BTreeMap<_, _>>();
             let bytes = read_bounded_body(response.into_body(), max_response_bytes, span).await?;
@@ -434,6 +481,46 @@ impl Capability for HttpCapability {
         merge_objects(defaults, overrides);
     }
 
+    fn report(&self, _operation: usize, result: &Value) -> Option<OperationReport> {
+        let fields = result.as_object()?;
+        let method = expect_string(fields.get("method"), "method", Span::default()).ok()?;
+        let url = expect_string(fields.get("url"), "url", Span::default()).ok()?;
+        let Value::Integer(status) = fields.get("status")?.revealed() else {
+            return None;
+        };
+        let header_fields = fields
+            .get("headers")?
+            .as_object()?
+            .iter()
+            .map(|(name, value)| (name.clone(), value.to_string()))
+            .collect();
+        let (payload_title, payload) = match fields.get("json") {
+            Some(Value::Null) | None => ("Body", fields.get("body").cloned()),
+            Some(json) => ("JSON body", Some(json.clone())),
+        };
+        let mut sections = vec![ReportSection::Fields {
+            title: "Headers".to_owned(),
+            fields: header_fields,
+        }];
+        if let Some(value) = &payload {
+            sections.push(ReportSection::Value {
+                title: payload_title.to_owned(),
+                value: value.clone(),
+            });
+        }
+        Some(OperationReport {
+            summary: format!("{method:<6} {url}"),
+            outcome: status.to_string(),
+            outcome_kind: match status {
+                200..=399 => ReportOutcome::Success,
+                400..=499 => ReportOutcome::Warning,
+                _ => ReportOutcome::Failure,
+            },
+            sections,
+            payload,
+        })
+    }
+
     fn invoke(
         &self,
         operation: usize,
@@ -501,10 +588,12 @@ fn option_duration(
     default: Duration,
     span: Span,
 ) -> Result<Duration, CapabilityError> {
-    options.get(name).map_or(Ok(default), |value| match value {
-        Value::Duration(value) => Ok(*value),
-        other => Err(type_error(name, "duration", other, span)),
-    })
+    options
+        .get(name)
+        .map_or(Ok(default), |value| match value.revealed() {
+            Value::Duration(value) => Ok(*value),
+            other => Err(type_error(name, "duration", other, span)),
+        })
 }
 
 fn option_usize(
@@ -513,16 +602,18 @@ fn option_usize(
     default: usize,
     span: Span,
 ) -> Result<usize, CapabilityError> {
-    options.get(name).map_or(Ok(default), |value| match value {
-        Value::Integer(value) if *value > 0 => usize::try_from(*value).map_err(|_| {
-            CapabilityError::new(format!("`{name}` is too large for this platform"), span)
-        }),
-        Value::Integer(_) => Err(CapabilityError::new(
-            format!("`{name}` must be greater than zero"),
-            span,
-        )),
-        other => Err(type_error(name, "positive integer", other, span)),
-    })
+    options
+        .get(name)
+        .map_or(Ok(default), |value| match value.revealed() {
+            Value::Integer(value) if *value > 0 => usize::try_from(*value).map_err(|_| {
+                CapabilityError::new(format!("`{name}` is too large for this platform"), span)
+            }),
+            Value::Integer(_) => Err(CapabilityError::new(
+                format!("`{name}` must be greater than zero"),
+                span,
+            )),
+            other => Err(type_error(name, "positive integer", other, span)),
+        })
 }
 
 fn expect_string<'a>(
@@ -530,7 +621,7 @@ fn expect_string<'a>(
     name: &str,
     span: Span,
 ) -> Result<&'a str, CapabilityError> {
-    match value {
+    match value.map(Value::revealed) {
         Some(Value::String(value)) => Ok(value),
         Some(other) => Err(type_error(name, "string", other, span)),
         None => Err(CapabilityError::new(format!("missing {name}"), span)),
@@ -562,7 +653,7 @@ fn error_chain(error: &dyn Error) -> String {
 }
 
 fn to_json(value: &Value, span: Span) -> Result<serde_json::Value, CapabilityError> {
-    match value {
+    match value.revealed() {
         Value::Null => Ok(serde_json::Value::Null),
         Value::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
         Value::Integer(value) => Ok(serde_json::Value::Number((*value).into())),
@@ -588,7 +679,15 @@ fn to_json(value: &Value, span: Span) -> Result<serde_json::Value, CapabilityErr
             .map(|(name, value)| Ok((name.clone(), to_json(value, span)?)))
             .collect::<Result<serde_json::Map<_, _>, _>>()
             .map(serde_json::Value::Object),
+        Value::Sensitive(_) => unreachable!("revealed values are not sensitive wrappers"),
     }
+}
+
+fn sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "api-key"
+    ) || name.to_ascii_lowercase().contains("token")
 }
 
 fn from_json(value: serde_json::Value) -> Value {
