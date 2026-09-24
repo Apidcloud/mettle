@@ -53,6 +53,10 @@ pub struct MettlePlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
+    Echo {
+        value: PlanExpression,
+        span: Span,
+    },
     If {
         branches: Vec<ConditionalBranch>,
         else_body: Option<Vec<Instruction>>,
@@ -585,6 +589,33 @@ mod tests {
                 .iter()
                 .any(|message| message == "if condition must be boolean")
         );
+    }
+
+    #[test]
+    fn echo_is_a_standalone_diagnostic_statement() {
+        let plan = compile(
+            &parse("flow main() { echo({ value: 1 })\n return true }")
+                .expect("source should parse"),
+        )
+        .expect("echo should compile");
+        assert!(matches!(
+            plan.flows[0].instructions[0],
+            super::Instruction::Echo { .. }
+        ));
+        let messages = errors("flow main() { return echo(1) }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("standalone statement"))
+        );
+        let messages = errors("flow main() { echo()\n return true }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("exactly one argument"))
+        );
+        let messages = errors("flow echo(value) = value");
+        assert!(messages.iter().any(|message| message.contains("reserved")));
     }
 
     #[test]

@@ -137,6 +137,13 @@ impl<'a> Compiler<'a> {
                 }
                 continue;
             }
+            if name.value == "echo" {
+                self.errors.push(CompileError::new(
+                    "`echo` is reserved for diagnostic statements",
+                    name.span,
+                ));
+                continue;
+            }
             let qualified = qualified_name(&flow.namespace, &name.value);
             if self.flow_ids.insert(qualified.clone(), index).is_some() {
                 self.errors.push(CompileError::new(
@@ -558,6 +565,29 @@ impl<'a> Compiler<'a> {
                     locals.insert(name.value.clone(), slot);
                     if let Some(expression) = expression {
                         instructions.push(Instruction::Bind { slot, expression });
+                    }
+                }
+                Statement::Expression(Expression {
+                    kind:
+                        ExpressionKind::Call {
+                            callee,
+                            arguments,
+                            options,
+                        },
+                    span,
+                }) if callee.value == "echo" => {
+                    if arguments.len() != 1 || !options.is_empty() {
+                        self.errors.push(CompileError::new(
+                            "`echo` expects exactly one argument and no option block",
+                            *span,
+                        ));
+                    } else if let Some(value) = self.compile_expression(
+                        Some(flow_id),
+                        &arguments[0],
+                        locals,
+                        active_context,
+                    ) {
+                        instructions.push(Instruction::Echo { value, span: *span });
                     }
                 }
                 Statement::Expression(expression) => {
@@ -1040,6 +1070,13 @@ impl<'a> Compiler<'a> {
         locals: &HashMap<String, usize>,
         context: Option<usize>,
     ) -> Option<PlanExpression> {
+        if callee.value == "echo" {
+            self.errors.push(CompileError::new(
+                "`echo` can only be used as a standalone statement in a flow or test",
+                span,
+            ));
+            return None;
+        }
         if matches!(callee.value.as_str(), "env" | "senv") {
             if !options.is_empty() || arguments.len() != 1 {
                 self.errors.push(CompileError::new(

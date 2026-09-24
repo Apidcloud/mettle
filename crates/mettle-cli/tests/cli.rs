@@ -349,6 +349,107 @@ fn secret_values_are_redacted_after_interpolation_and_in_json() {
 }
 
 #[test]
+fn echo_respects_human_quiet_raw_and_json_output() {
+    let path = source_file("flow main() { echo(\"starting\")\n return \"done\" }");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .arg("run")
+            .arg(&path)
+            .args(args)
+            .output()
+            .expect("flow should start")
+    };
+    let human = run(&[]);
+    let verbose = run(&["--verbose"]);
+    let quiet = run(&["--quiet"]);
+    let raw = run(&["--raw"]);
+    let json = run(&["--output", "json"]);
+    fs::remove_file(path).expect("test source should be removable");
+
+    for output in [&human, &verbose, &quiet, &raw, &json] {
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert!(String::from_utf8_lossy(&human.stdout).contains("echo starting"));
+    assert!(String::from_utf8_lossy(&verbose.stdout).contains("echo starting"));
+    assert!(!String::from_utf8_lossy(&quiet.stdout).contains("starting"));
+    assert_eq!(String::from_utf8_lossy(&raw.stdout).trim(), "done");
+    let record: serde_json::Value = serde_json::from_slice(&json.stdout).expect("JSON report");
+    assert_eq!(record["events"][0]["type"], "echo");
+    assert_eq!(record["events"][0]["value"], "starting");
+}
+
+#[test]
+fn echo_in_parallel_has_branch_paths_and_keeps_batch_records_atomic() {
+    let path = source_file(
+        "flow message(name) { echo(name)\n return name }\nflow main() = parallel(limit: 2) { message(\"Ada\"), message(\"Lin\") }",
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("main")
+        .output()
+        .expect("flow should start");
+    let json = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("main")
+        .args(["--output", "json"])
+        .output()
+        .expect("flow should start");
+    let batch = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .args(["--all", "--output", "json"])
+        .output()
+        .expect("batch should start");
+    fs::remove_file(path).expect("test source should be removable");
+    assert!(human.status.success(), "{human:?}");
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("[p1:b1/2] echo Ada"), "{stdout}");
+    assert!(stdout.contains("[p1:b2/2] echo Lin"), "{stdout}");
+    let record: serde_json::Value = serde_json::from_slice(&json.stdout).expect("JSON report");
+    assert_eq!(record["events"][0]["scope"][0]["kind"], "parallel");
+    assert_eq!(record["events"][0]["scope"][0]["branch"], 1);
+    assert_eq!(record["events"][1]["scope"][0]["branch"], 2);
+    assert!(batch.status.success(), "{batch:?}");
+    let lines = String::from_utf8_lossy(&batch.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[1]["type"], "result");
+    assert_eq!(lines[1]["events"].as_array().expect("events").len(), 2);
+}
+
+#[test]
+fn echo_is_retained_on_failure_and_redacts_secrets() {
+    let path = source_file(
+        "flow main() { echo(senv(\"METTLE_ECHO_SECRET\"))\n assert(false)\n return true }",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .env("METTLE_ECHO_SECRET", "do-not-print-me")
+        .output()
+        .expect("flow should start");
+    let json = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .args(["--output", "json"])
+        .env("METTLE_ECHO_SECRET", "do-not-print-me")
+        .output()
+        .expect("flow should start");
+    fs::remove_file(path).expect("test source should be removable");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("echo [REDACTED]"), "{stderr}");
+    assert!(!stderr.contains("do-not-print-me"));
+    let record: serde_json::Value = serde_json::from_slice(&json.stdout).expect("JSON failure");
+    assert_eq!(record["events"][0]["value"], "[REDACTED]");
+    assert!(!String::from_utf8_lossy(&json.stdout).contains("do-not-print-me"));
+}
+
+#[test]
 fn senv_reads_environment_and_redacts_derived_values() {
     let path = source_file(
         "context credentials { token: senv(\"METTLE_TEST_SECRET\") }\nuse context credentials\nflow main() = \"Bearer ${token}\"\n",

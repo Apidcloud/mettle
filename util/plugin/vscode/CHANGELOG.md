@@ -1,5 +1,10 @@
 # Change Log
 
+## 0.16.0
+
+- Add an `echo()` snippet for flow-scoped diagnostic messages.
+- Show logical parallel-branch and retry-attempt labels in the CLI report.
+
 ## 0.15.0
 
 - Highlight `if`, `else`, `and`, `or`, and `not`; add a conditional snippet.

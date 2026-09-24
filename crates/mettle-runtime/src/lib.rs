@@ -50,6 +50,7 @@ pub struct RuntimeError {
     pub message: String,
     pub span: Span,
     pub flow_stack: Vec<String>,
+    pub scope_path: Box<[ExecutionScope]>,
     pub assertions: Vec<AssertionFailure>,
     pub assertion_only: bool,
 }
@@ -76,6 +77,36 @@ pub struct OperationEvent {
     pub span: Span,
     pub result: Result<Value, String>,
     pub report: Option<OperationReport>,
+}
+
+/// Logical execution context. These identify async branches and attempts, not OS threads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionScope {
+    Parallel {
+        invocation: u64,
+        branch: usize,
+        total: usize,
+    },
+    Retry {
+        invocation: u64,
+        attempt: usize,
+        total: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionEvent {
+    pub kind: ExecutionEventKind,
+    pub scope_path: Vec<ExecutionScope>,
+    pub span: Span,
+    pub inside_workload: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExecutionEventKind {
+    Operation(OperationEvent),
+    Echo(Value),
+    BranchCancelled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,7 +149,7 @@ pub struct WorkloadSnapshot {
 }
 
 pub trait ExecutionObserver: Send + Sync {
-    fn operation_completed(&self, _event: OperationEvent) {}
+    fn execution_event(&self, _event: ExecutionEvent) {}
 
     fn workload_updated(&self, _snapshot: WorkloadSnapshot) {}
 }
@@ -509,8 +540,8 @@ mod tests {
     use mettle_syntax::parse;
 
     use super::{
-        Clock, ClockFuture, ExecutionObserver, OperationEvent, Runtime, Value, WorkloadPhase,
-        WorkloadSnapshot,
+        Clock, ClockFuture, ExecutionEvent, ExecutionEventKind, ExecutionObserver, OperationEvent,
+        Runtime, Value, WorkloadPhase, WorkloadSnapshot,
     };
 
     const PROBE_OPERATIONS: &[OperationSchema] = &[OperationSchema {
@@ -549,12 +580,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingObserver {
         operations: Mutex<Vec<OperationEvent>>,
+        events: Mutex<Vec<ExecutionEvent>>,
         workloads: Mutex<Vec<WorkloadSnapshot>>,
     }
 
     impl ExecutionObserver for RecordingObserver {
-        fn operation_completed(&self, event: OperationEvent) {
-            self.operations.lock().expect("observer lock").push(event);
+        fn execution_event(&self, event: ExecutionEvent) {
+            if let ExecutionEventKind::Operation(operation) = &event.kind {
+                self.operations
+                    .lock()
+                    .expect("observer lock")
+                    .push(operation.clone());
+            }
+            self.events.lock().expect("observer lock").push(event);
         }
 
         fn workload_updated(&self, snapshot: WorkloadSnapshot) {
@@ -784,6 +822,124 @@ mod tests {
     }
 
     #[test]
+    fn echo_events_inherit_parallel_branch_and_retry_attempt_paths() {
+        let syntax = parse(
+            r#"
+            flow message(name) {
+                echo(name)
+                return name
+            }
+            flow main() = parallel(limit: 2) { message("Ada"), message("Lin") }
+        "#,
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        block_on(
+            Runtime::default()
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect("parallel flow should run");
+        let events = observer.events.lock().expect("observer lock");
+        let echoes = events
+            .iter()
+            .filter(|event| matches!(event.kind, ExecutionEventKind::Echo(_)))
+            .collect::<Vec<_>>();
+        assert_eq!(echoes.len(), 2);
+        assert_eq!(
+            echoes[0].scope_path,
+            [super::ExecutionScope::Parallel {
+                invocation: 1,
+                branch: 1,
+                total: 2
+            }]
+        );
+        assert_eq!(
+            echoes[1].scope_path,
+            [super::ExecutionScope::Parallel {
+                invocation: 1,
+                branch: 2,
+                total: 2
+            }]
+        );
+        drop(events);
+
+        let syntax = parse("flow fail() { echo(\"trying\")\n assert(false)\n return true }\nflow main() = retry(attempts: 2) { fail() }")
+            .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        block_on(
+            Runtime::default()
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect_err("retry should exhaust");
+        let events = observer.events.lock().expect("observer lock");
+        let attempts = events
+            .iter()
+            .filter_map(|event| match (&event.kind, event.scope_path.last()) {
+                (
+                    ExecutionEventKind::Echo(_),
+                    Some(super::ExecutionScope::Retry { attempt, .. }),
+                ) => Some(*attempt),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(attempts, [1, 2]);
+    }
+
+    #[test]
+    fn nested_parallel_and_operation_events_keep_their_execution_paths() {
+        let syntax = parse(
+            r#"
+            flow note(value) { echo(value)
+                return value }
+            flow main() = parallel(limit: 2) {
+                parallel(limit: 2) { note("nested"), note("sibling") },
+                probe.wait()
+            }
+        "#,
+        )
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        let runtime = Runtime::new(vec![Arc::new(ProbeCapability::default())])
+            .with_observer(observer.clone());
+        block_on(runtime.execute(&plan)).expect("parallel flow should run");
+        let events = observer.events.lock().expect("observer lock");
+        let nested = events.iter().find(|event| matches!(&event.kind, ExecutionEventKind::Echo(Value::String(value)) if value == "nested"))
+            .expect("nested echo");
+        assert_eq!(
+            nested.scope_path,
+            [
+                super::ExecutionScope::Parallel {
+                    invocation: 1,
+                    branch: 1,
+                    total: 2
+                },
+                super::ExecutionScope::Parallel {
+                    invocation: 2,
+                    branch: 1,
+                    total: 2
+                },
+            ]
+        );
+        let operation = events
+            .iter()
+            .find(|event| matches!(event.kind, ExecutionEventKind::Operation(_)))
+            .expect("operation event");
+        assert_eq!(
+            operation.scope_path,
+            [super::ExecutionScope::Parallel {
+                invocation: 1,
+                branch: 2,
+                total: 2
+            }]
+        );
+    }
+
+    #[test]
     fn collects_test_assertions_and_preserves_earlier_failures_on_runtime_error() {
         let syntax = parse(
             "test(\"checks\") { assert(false, \"first failure\")\n assert(true)\n assert(false, \"second failure\") }",
@@ -937,14 +1093,34 @@ mod tests {
         .expect("source should parse");
         let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
         let dropped = Arc::new(AtomicBool::new(false));
+        let observer = Arc::new(RecordingObserver::default());
         let runtime = Runtime::with_clock(
             vec![Arc::new(PendingCapability {
                 dropped: Arc::clone(&dropped),
             })],
             Arc::new(PendingClock),
-        );
+        )
+        .with_observer(observer.clone());
         let error = block_on(runtime.execute(&plan)).expect_err("one branch should fail");
         assert!(error.message.contains("required environment variable"));
+        assert_eq!(
+            &*error.scope_path,
+            [super::ExecutionScope::Parallel {
+                invocation: 1,
+                branch: 2,
+                total: 2
+            }]
+        );
+        let events = observer.events.lock().expect("observer lock");
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            ExecutionEventKind::BranchCancelled
+        ) && event.scope_path
+            == [super::ExecutionScope::Parallel {
+                invocation: 1,
+                branch: 1,
+                total: 2
+            }]));
         assert!(dropped.load(Ordering::SeqCst));
     }
 
@@ -1003,6 +1179,27 @@ mod tests {
         assert_eq!(result.get("saturated"), Some(&Value::Boolean(true)));
         assert_eq!(result.get("drainTimedOut"), Some(&Value::Boolean(true)));
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn echo_in_workload_iterations_is_marked_for_bounded_reporting() {
+        let syntax = parse(
+            "flow sample() { echo(\"tick\")\n return true }\nflow main() = rate(target: 4, period: 1s, duration: 1s, limit: 2) { sample() }",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        block_on(
+            Runtime::with_clock(Vec::new(), Arc::new(ImmediateClock::default()))
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect("workload should complete");
+        let events = observer.events.lock().expect("observer lock");
+        assert_eq!(events.len(), 4);
+        assert!(events.iter().all(
+            |event| matches!(event.kind, ExecutionEventKind::Echo(_)) && event.inside_workload
+        ));
     }
 
     #[test]

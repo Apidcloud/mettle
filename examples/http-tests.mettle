@@ -11,7 +11,7 @@ flow getPost(id) = http.get("/posts/${id}")
 
 test("post 1 is available") {
     response = getPost(1)
-    assert(response.status != 200, "GET /posts/1 should return 200")
+    assert(response.status == 200, "GET /posts/1 should return 200")
     assert(response.json.id == 1, "GET /posts/1 should return id 1")
 }
 

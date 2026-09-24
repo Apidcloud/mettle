@@ -247,7 +247,7 @@ impl<'a> DefinitionFinder<'a> {
             } => {
                 if self.at(callee.span)
                     && !callee.value.contains('.')
-                    && !matches!(callee.value.as_str(), "env" | "senv" | "secret")
+                    && !matches!(callee.value.as_str(), "env" | "senv" | "secret" | "echo")
                     && let Some(flow) = flow
                     && let NameResolution::Found(id) = resolve_visible_name(
                         &self.flow_ids,

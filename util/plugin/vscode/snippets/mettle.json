@@ -48,6 +48,13 @@
       "assert(${1:response.status == 200})"
     ]
   },
+  "Echo report message": {
+    "prefix": "echo",
+    "description": "Record a value in the current flow or test report",
+    "body": [
+      "echo(\"${1:message}\")"
+    ]
+  },
   "Assertion with message": {
     "prefix": "assertm",
     "description": "Assert with a failure message",

@@ -69,7 +69,7 @@ the repository checkout:
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.15.0.vsix --force
+code --install-extension dist/mettle-language-0.16.0.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -467,6 +467,38 @@ defaults http {
 
 ## CLI output and diagnostics
 
+Use `echo(value)` as a standalone statement in a flow or test when a value should
+appear in its execution report. It accepts one value, including strings with
+interpolation or structured objects. It does not change the flow's return value.
+Like other statements, its argument is evaluated in every output mode; for
+example, `echo(http.get(...))` still makes the request with `--quiet` or `--raw`.
+
+```mettle
+flow greet(name) {
+    echo("Greeting ${name}")
+    return "Hello, ${name}!"
+}
+
+flow main() = parallel(limit: 2) { greet("Ada"), greet("Lin") }
+```
+
+Messages from parallel branches carry logical labels such as `[p1:b2/2]`:
+parallel invocation 1, branch 2 of 2. Nested branches retain their full path;
+retry attempts similarly use labels such as `[r2:a1/3]`. These are execution
+identifiers, not OS thread IDs. Branch numbers follow source order, while event
+order reflects what actually completed or emitted first. Messages from a
+cancelled branch remain in the report, and pending sibling branches are marked
+cancelled when another branch fails.
+
+`echo` appears in normal and verbose human reports, including failures. Quiet
+and raw modes keep their existing minimal output. JSON reports carry ordered,
+redacted `events` inside each atomic flow or test record. In workload iterations,
+the CLI retains at most 50 messages per run and reports how many were omitted,
+keeping load-test output bounded. Messages are collected until the top-level
+flow finishes; `--all` therefore keeps each flow's output together. There is no
+separate `debug()` or debug mode yet. Try the network-free
+[echo example](examples/echo.mettle) with `mettle run examples/echo.mettle`.
+
 Mettle presents a flow as one execution rather than dumping its internal value. A normal HTTP workflow shows each operation, its status and timing, the useful response payload, and the total duration:
 
 ```text
@@ -524,7 +556,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.15.0.vsix --force
+code --install-extension dist/mettle-language-0.16.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.

@@ -645,7 +645,32 @@ fn run_flow(
     });
     let Some(result) = outcome else {
         observer.clear_progress();
-        eprintln!("execution cancelled");
+        let captured = observer.take_events();
+        if options.output == OutputMode::Json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "cancelled",
+                    "flow": plan.flows[flow_id].display_name,
+                    "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
+                })
+            );
+        } else if matches!(options.output, OutputMode::Human | OutputMode::Verbose) {
+            let color =
+                options.color && io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none();
+            eprintln!(
+                "{}",
+                report::cancellation_summary(
+                    &plan.flows[flow_id].display_name,
+                    &captured.events,
+                    captured.omitted_workload_echoes,
+                    color
+                )
+            );
+        } else {
+            eprintln!("execution cancelled");
+        }
         return Err(CliError::Interrupted);
     };
     observer.clear_progress();
@@ -666,12 +691,13 @@ fn print_success(
     observer: &CliObserver,
     value: &Value,
 ) {
-    let operations = observer.take_operations();
+    let captured = observer.take_events();
     let report = ExecutionReport {
         flow: &plan.flows[flow_id].display_name,
         duration: started.elapsed(),
         result: value,
-        operations: &operations,
+        events: &captured.events,
+        omitted_workload_echoes: captured.omitted_workload_echoes,
     };
     let color = options.color && io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
     let is_test = plan.flows[flow_id].kind == DeclarationKind::Test;
@@ -689,6 +715,7 @@ fn print_success(
             "test": plan.flows[flow_id].display_name,
             "status": "passed",
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
         })
         .to_string(),
         OutputMode::Json if options.all => serde_json::json!({
@@ -696,6 +723,7 @@ fn print_success(
             "flow": plan.flows[flow_id].display_name,
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             "result": report::value_json(value),
+            "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
         })
         .to_string(),
         OutputMode::Json => report.json(),
@@ -703,6 +731,7 @@ fn print_success(
     println!("{output}");
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_failure(
     project: &LoadedProject,
     plan: &ExecutionPlan,
@@ -712,6 +741,7 @@ fn print_failure(
     observer: &CliObserver,
     error: &RuntimeError,
 ) -> Result<(), CliError> {
+    let captured = observer.take_events();
     if options.output == OutputMode::Json {
         let source = project
             .sources
@@ -721,12 +751,14 @@ fn print_failure(
         let mut output = serde_json::json!({
             "flow": plan.flows[flow_id].display_name,
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
             "error": {
                 "message": error.message,
                 "path": source.path,
                 "line": line,
                 "column": column,
                 "flowStack": error.flow_stack,
+                "scope": report::scope_json(&error.scope_path),
             }
         });
         if plan.flows[flow_id].kind == DeclarationKind::Test {
@@ -770,13 +802,21 @@ fn print_failure(
         println!("{output}");
         return Err(CliError::Failure);
     }
-    let operations = observer.take_operations();
     let color = options.color && io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none();
     eprintln!(
         "{}\n",
         failure_summary(
             &plan.flows[flow_id].display_name,
-            &operations,
+            if matches!(options.output, OutputMode::Quiet | OutputMode::Raw) {
+                &[]
+            } else {
+                &captured.events
+            },
+            if matches!(options.output, OutputMode::Quiet | OutputMode::Raw) {
+                0
+            } else {
+                captured.omitted_workload_echoes
+            },
             color,
             plan.flows[flow_id].kind == DeclarationKind::Test
         )
@@ -799,6 +839,12 @@ fn print_failure(
     }
     if !error.flow_stack.is_empty() && !error.assertion_only {
         eprintln!("flow stack: {}", error.flow_stack.join(" -> "));
+    }
+    if !error.scope_path.is_empty() && !error.assertion_only {
+        eprintln!(
+            "execution path: {}",
+            report::scope_label(&error.scope_path).trim_end()
+        );
     }
     Err(CliError::Failure)
 }

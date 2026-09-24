@@ -5,14 +5,23 @@ use std::time::Duration;
 
 use mettle_capability::{OperationReport, ReportOutcome, ReportSection, Value};
 use mettle_runtime::{
-    ExecutionObserver, OperationEvent, WorkloadKind, WorkloadPhase, WorkloadSnapshot,
+    ExecutionEvent, ExecutionEventKind, ExecutionObserver, ExecutionScope, OperationEvent,
+    WorkloadKind, WorkloadPhase, WorkloadSnapshot,
 };
 
 const DEFAULT_PREVIEW_CHARS: usize = 8 * 1024;
+const MAX_WORKLOAD_ECHOES: usize = 50;
+
+#[derive(Default)]
+pub struct CapturedEvents {
+    pub events: Vec<ExecutionEvent>,
+    pub omitted_workload_echoes: usize,
+}
 
 #[derive(Default)]
 struct ObserverState {
-    operations: Vec<OperationEvent>,
+    captured: CapturedEvents,
+    workload_echoes: usize,
     rendered_lines: usize,
 }
 
@@ -31,9 +40,9 @@ impl CliObserver {
         }
     }
 
-    pub fn take_operations(&self) -> Vec<OperationEvent> {
+    pub fn take_events(&self) -> CapturedEvents {
         let mut state = self.state.lock().expect("CLI observer lock was poisoned");
-        std::mem::take(&mut state.operations)
+        std::mem::take(&mut state.captured)
     }
 
     pub fn clear_progress(&self) {
@@ -70,12 +79,16 @@ impl CliObserver {
 }
 
 impl ExecutionObserver for CliObserver {
-    fn operation_completed(&self, event: OperationEvent) {
-        self.state
-            .lock()
-            .expect("CLI observer lock was poisoned")
-            .operations
-            .push(event);
+    fn execution_event(&self, event: ExecutionEvent) {
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        if event.inside_workload && matches!(event.kind, ExecutionEventKind::Echo(_)) {
+            if state.workload_echoes == MAX_WORKLOAD_ECHOES {
+                state.captured.omitted_workload_echoes += 1;
+                return;
+            }
+            state.workload_echoes += 1;
+        }
+        state.captured.events.push(event);
     }
 
     fn workload_updated(&self, snapshot: WorkloadSnapshot) {
@@ -87,15 +100,20 @@ pub struct ExecutionReport<'a> {
     pub flow: &'a str,
     pub duration: Duration,
     pub result: &'a Value,
-    pub operations: &'a [OperationEvent],
+    pub events: &'a [ExecutionEvent],
+    pub omitted_workload_echoes: usize,
 }
 
 impl ExecutionReport<'_> {
     pub fn test_human(&self, verbose: bool, color: bool) -> String {
         let mut output = String::from("\n");
-        for operation in self.operations {
-            render_operation(&mut output, operation, color, verbose);
-        }
+        render_events(
+            &mut output,
+            self.events,
+            self.omitted_workload_echoes,
+            color,
+            verbose,
+        );
         write!(
             output,
             "{} Passed in {}",
@@ -116,19 +134,30 @@ impl ExecutionReport<'_> {
     }
 
     pub fn human(&self, verbose: bool, color: bool) -> String {
-        if let Some(summary) = workload_result(self.result, color) {
-            return format!("{}\n\n{summary}", style(self.flow, "1", color));
-        }
-
         let mut output = String::new();
         writeln!(output, "{}\n", style(self.flow, "1", color))
             .expect("writing to a string cannot fail");
-
-        for operation in self.operations {
-            render_operation(&mut output, operation, color, verbose);
+        render_events(
+            &mut output,
+            self.events,
+            self.omitted_workload_echoes,
+            color,
+            verbose,
+        );
+        if let Some(summary) = workload_result(self.result, color) {
+            output.push_str(&summary);
+            return output;
         }
 
-        let final_operation_report = self.operations.iter().find_map(|operation| {
+        let operations = self
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                ExecutionEventKind::Operation(operation) => Some(operation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let final_operation_report = operations.iter().find_map(|operation| {
             (matches!(&operation.result, Ok(value) if value == self.result)
                 || operation
                     .report
@@ -142,12 +171,12 @@ impl ExecutionReport<'_> {
         let show_result = if verbose {
             final_operation_report.is_none()
         } else {
-            self.operations.is_empty() || payload.is_some() || final_operation_report.is_none()
+            operations.is_empty() || payload.is_some() || final_operation_report.is_none()
         };
         if show_result {
             let label = if verbose {
                 "Full result"
-            } else if self.operations.is_empty() || final_operation_report.is_none() {
+            } else if operations.is_empty() || final_operation_report.is_none() {
                 "Result"
             } else {
                 "Response"
@@ -185,17 +214,126 @@ impl ExecutionReport<'_> {
             "flow": self.flow,
             "durationNanos": duration_nanos(self.duration),
             "result": value_json(self.result),
+            "events": events_json(self.events, self.omitted_workload_echoes),
         })
         .to_string()
     }
 }
 
-fn render_operation(output: &mut String, event: &OperationEvent, color: bool, verbose: bool) {
+fn render_events(
+    output: &mut String,
+    events: &[ExecutionEvent],
+    omitted: usize,
+    color: bool,
+    verbose: bool,
+) {
+    for event in events {
+        let label = scope_label(&event.scope_path);
+        match &event.kind {
+            ExecutionEventKind::Operation(operation) => {
+                render_operation(output, operation, &label, color, verbose);
+            }
+            ExecutionEventKind::Echo(value) => {
+                let value = echo_value(value, verbose);
+                let mut lines = value.lines();
+                writeln!(
+                    output,
+                    "  {label}{} {}",
+                    style("echo", "36", color),
+                    lines.next().unwrap_or_default()
+                )
+                .expect("writing to a string cannot fail");
+                for line in lines {
+                    writeln!(output, "    {line}").expect("writing to a string cannot fail");
+                }
+                output.push('\n');
+            }
+            ExecutionEventKind::BranchCancelled => {
+                writeln!(
+                    output,
+                    "  {label}{} branch cancelled\n",
+                    style("↯", "33", color)
+                )
+                .expect("writing to a string cannot fail");
+            }
+        }
+    }
+    if omitted > 0 {
+        writeln!(
+            output,
+            "  … {omitted} echo message(s) omitted from workload\n"
+        )
+        .expect("writing to a string cannot fail");
+    }
+}
+
+pub fn scope_label(path: &[ExecutionScope]) -> String {
+    if path.is_empty() {
+        return String::new();
+    }
+    let parts = path
+        .iter()
+        .map(|scope| match scope {
+            ExecutionScope::Parallel {
+                invocation,
+                branch,
+                total,
+            } => format!("p{invocation}:b{branch}/{total}"),
+            ExecutionScope::Retry {
+                invocation,
+                attempt,
+                total,
+            } => format!("r{invocation}:a{attempt}/{total}"),
+        })
+        .collect::<Vec<_>>();
+    format!("[{}] ", parts.join(" > "))
+}
+
+pub fn events_json(events: &[ExecutionEvent], omitted: usize) -> serde_json::Value {
+    let mut entries = events.iter().map(|event| {
+        let path = scope_json(&event.scope_path);
+        let mut entry = match &event.kind {
+            ExecutionEventKind::Operation(operation) => serde_json::json!({
+                "type":"operation", "capability":operation.capability, "operation":operation.operation,
+                "durationNanos":duration_nanos(operation.duration),
+                "status": if operation.result.is_ok() {"ok"} else {"error"},
+            }),
+            ExecutionEventKind::Echo(value) => serde_json::json!({"type":"echo", "value":value_json(value)}),
+            ExecutionEventKind::BranchCancelled => serde_json::json!({"type":"branch_cancelled"}),
+        };
+        entry["scope"] = path;
+        entry
+    }).collect::<Vec<_>>();
+    if omitted > 0 {
+        entries.push(serde_json::json!({"type":"echo_omitted", "count":omitted}));
+    }
+    serde_json::json!(entries)
+}
+
+pub fn scope_json(path: &[ExecutionScope]) -> serde_json::Value {
+    serde_json::json!(path.iter().map(|scope| match scope {
+        ExecutionScope::Parallel { invocation, branch, total } => serde_json::json!({"kind":"parallel","invocation":invocation,"branch":branch,"total":total}),
+        ExecutionScope::Retry { invocation, attempt, total } => serde_json::json!({"kind":"retry","invocation":invocation,"attempt":attempt,"total":total}),
+    }).collect::<Vec<_>>())
+}
+
+fn render_operation(
+    output: &mut String,
+    event: &OperationEvent,
+    label: &str,
+    color: bool,
+    verbose: bool,
+) {
     match &event.result {
         Ok(value) => {
             if let Some(report) = &event.report {
-                writeln!(output, "  {} {}", style("✓", "32", color), report.summary)
-                    .expect("writing to a string cannot fail");
+                writeln!(
+                    output,
+                    "  {label}{} {}",
+                    style("✓", "32", color),
+                    report.summary
+                )
+                .expect("writing to a string cannot fail");
                 writeln!(
                     output,
                     "    {} · {}\n",
@@ -213,7 +351,7 @@ fn render_operation(output: &mut String, event: &OperationEvent, color: bool, ve
             } else {
                 writeln!(
                     output,
-                    "  {} {}.{} · {}\n",
+                    "  {label}{} {}.{} · {}\n",
                     style("✓", "32", color),
                     event.capability,
                     event.operation,
@@ -228,7 +366,7 @@ fn render_operation(output: &mut String, event: &OperationEvent, color: bool, ve
         Err(message) => {
             writeln!(
                 output,
-                "  {} {}.{} · {}\n    {}\n",
+                "  {label}{} {}.{} · {}\n    {}\n",
                 style("✗", "31", color),
                 event.capability,
                 event.operation,
@@ -361,7 +499,8 @@ fn workload_result(value: &Value, color: bool) -> Option<String> {
 
 pub fn failure_summary(
     flow: &str,
-    operations: &[OperationEvent],
+    events: &[ExecutionEvent],
+    omitted_workload_echoes: usize,
     color: bool,
     test: bool,
 ) -> String {
@@ -369,9 +508,7 @@ pub fn failure_summary(
     if !test {
         writeln!(output, "{}\n", style(flow, "1", color)).expect("writing to a string cannot fail");
     }
-    for operation in operations {
-        render_operation(&mut output, operation, color, false);
-    }
+    render_events(&mut output, events, omitted_workload_echoes, color, false);
     write!(
         output,
         "{} {} failed",
@@ -379,6 +516,19 @@ pub fn failure_summary(
         if test { "Test" } else { "Flow" }
     )
     .expect("writing to a string cannot fail");
+    output
+}
+
+pub fn cancellation_summary(
+    flow: &str,
+    events: &[ExecutionEvent],
+    omitted: usize,
+    color: bool,
+) -> String {
+    let mut output = format!("{}\n\n", style(flow, "1", color));
+    render_events(&mut output, events, omitted, color, false);
+    write!(output, "{} Execution cancelled", style("↯", "33", color))
+        .expect("writing to a string cannot fail");
     output
 }
 
@@ -424,6 +574,23 @@ fn pretty_value(value: &Value, complete: bool) -> String {
         return formatted;
     }
     truncate(&formatted, DEFAULT_PREVIEW_CHARS)
+}
+
+fn echo_value(value: &Value, complete: bool) -> String {
+    let formatted = format_value(value);
+    if complete {
+        return formatted;
+    }
+    let mut characters = formatted.chars();
+    let preview = characters
+        .by_ref()
+        .take(DEFAULT_PREVIEW_CHARS)
+        .collect::<String>();
+    if characters.next().is_none() {
+        formatted
+    } else {
+        format!("{preview}\n… echo truncated after 8 KiB; use --verbose for the full value")
+    }
 }
 
 fn format_value(value: &Value) -> String {
@@ -560,10 +727,19 @@ fn style(value: &str, code: &str, enabled: bool) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{ExecutionReport, display_duration, truncate};
+    use super::{CliObserver, ExecutionReport, display_duration, events_json, truncate};
     use mettle_capability::{Capability, Span, Value};
     use mettle_http::HttpCapability;
-    use mettle_runtime::OperationEvent;
+    use mettle_runtime::{ExecutionEvent, ExecutionEventKind, ExecutionObserver, OperationEvent};
+
+    fn operation_event(operation: OperationEvent) -> ExecutionEvent {
+        ExecutionEvent {
+            span: operation.span,
+            kind: ExecutionEventKind::Operation(operation),
+            scope_path: Vec::new(),
+            inside_workload: false,
+        }
+    }
 
     #[test]
     fn report_formats_a_named_value() {
@@ -575,7 +751,8 @@ mod tests {
             flow: "health",
             duration: std::time::Duration::from_millis(12),
             result: &value,
-            operations: &[],
+            events: &[],
+            omitted_workload_echoes: 0,
         }
         .human(false, false);
         assert!(output.contains("health"));
@@ -622,7 +799,8 @@ mod tests {
             flow: "main",
             duration: std::time::Duration::from_millis(12),
             result: &result,
-            operations: &[operation],
+            events: &[operation_event(operation)],
+            omitted_workload_echoes: 0,
         }
         .human(false, false);
         assert!(output.contains("Result"), "{output}");
@@ -683,7 +861,8 @@ mod tests {
             flow: "health",
             duration: std::time::Duration::from_millis(12),
             result: &value,
-            operations: &[operation],
+            events: &[operation_event(operation)],
+            omitted_workload_echoes: 0,
         };
 
         let normal = report.human(false, false);
@@ -699,5 +878,24 @@ mod tests {
         assert!(verbose.contains("https://example.test/health"));
         assert!(!verbose.contains("bodyBytes"));
         assert!(!verbose.contains("raw body"));
+    }
+
+    #[test]
+    fn workload_echo_capture_is_bounded_and_reports_omissions() {
+        let observer = CliObserver::new(false);
+        for _ in 0..55 {
+            observer.execution_event(ExecutionEvent {
+                kind: ExecutionEventKind::Echo(Value::String("sample".to_owned())),
+                scope_path: Vec::new(),
+                span: Span::default(),
+                inside_workload: true,
+            });
+        }
+        let captured = observer.take_events();
+        assert_eq!(captured.events.len(), 50);
+        assert_eq!(captured.omitted_workload_echoes, 5);
+        let json = events_json(&captured.events, captured.omitted_workload_echoes);
+        assert_eq!(json[50]["type"], "echo_omitted");
+        assert_eq!(json[50]["count"], 5);
     }
 }

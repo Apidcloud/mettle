@@ -2,13 +2,15 @@
 
 use super::{
     ActiveContext, ActiveIteration, Arc, AssertionFailure, Capability, Clock, Constant,
-    ContextPlan, DeclarationKind, Duration, ExecutionObserver, ExecutionPlan, Future, HashMap,
-    Instant, Instruction, MAX_CALL_DEPTH, MettlePlan, NoopObserver, Object, OperationEvent, Pin,
-    PlanExpression, PlanExpressionKind, PlanField, Poll, RateSettings, RuntimeError, Span,
-    StringPart, TokioClock, Value, WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL,
-    WorkloadEvent, WorkloadMetrics, WorkloadPhase, WorkloadPolicy, cooperative_yield,
-    evaluate_binary, format_duration, process_environment,
+    ContextPlan, DeclarationKind, Duration, ExecutionEvent, ExecutionEventKind, ExecutionObserver,
+    ExecutionPlan, ExecutionScope, Future, HashMap, Instant, Instruction, MAX_CALL_DEPTH,
+    MettlePlan, NoopObserver, Object, OperationEvent, Pin, PlanExpression, PlanExpressionKind,
+    PlanField, Poll, RateSettings, RuntimeError, Span, StringPart, TokioClock, Value,
+    WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL, WorkloadEvent, WorkloadMetrics,
+    WorkloadPhase, WorkloadPolicy, cooperative_yield, evaluate_binary, format_duration,
+    process_environment,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Runtime {
     capabilities: Vec<Arc<dyn Capability>>,
@@ -70,6 +72,7 @@ impl Runtime {
                 message: "execution requires an explicitly selected flow".to_owned(),
                 span: Span::default(),
                 flow_stack: Vec::new(),
+                scope_path: Vec::new().into_boxed_slice(),
                 assertions: Vec::new(),
                 assertion_only: false,
             });
@@ -97,6 +100,8 @@ impl Runtime {
             environment: &self.environment,
             inside_workload: false,
             flow_stack: Vec::new(),
+            scope_path: Vec::new(),
+            next_scope_id: Arc::new(AtomicU64::new(1)),
             secrets: Vec::new(),
         }
         .execute_flow(flow, arguments, ActiveContext::default())
@@ -109,6 +114,7 @@ impl Runtime {
                 message: "execution plan and runtime have different capability sets".to_owned(),
                 span: Span::default(),
                 flow_stack: Vec::new(),
+                scope_path: Vec::new().into_boxed_slice(),
                 assertions: Vec::new(),
                 assertion_only: false,
             });
@@ -122,6 +128,7 @@ impl Runtime {
                     ),
                     span: Span::default(),
                     flow_stack: Vec::new(),
+                    scope_path: Vec::new().into_boxed_slice(),
                     assertions: Vec::new(),
                     assertion_only: false,
                 });
@@ -146,6 +153,8 @@ struct Executor<'a> {
     environment: &'a HashMap<String, String>,
     inside_workload: bool,
     flow_stack: Vec<String>,
+    scope_path: Vec<ExecutionScope>,
+    next_scope_id: Arc<AtomicU64>,
     secrets: Vec<String>,
 }
 
@@ -289,6 +298,7 @@ impl Executor<'_> {
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn run_instructions<'b>(
         &'b mut self,
         instructions: &'b [Instruction],
@@ -300,6 +310,18 @@ impl Executor<'_> {
         Box::pin(async move {
             for instruction in instructions {
                 match instruction {
+                    Instruction::Echo { value, span } => {
+                        let value = self
+                            .evaluate(value, locals, context)
+                            .await
+                            .map_err(|error| error.with_assertions(assertions))?;
+                        self.observer.execution_event(ExecutionEvent {
+                            kind: ExecutionEventKind::Echo(value),
+                            scope_path: self.scope_path.clone(),
+                            span: *span,
+                            inside_workload: self.inside_workload,
+                        });
+                    }
                     Instruction::If {
                         branches,
                         else_body,
@@ -702,13 +724,18 @@ impl Executor<'_> {
                         Ok(value) => {
                             let report = capability.report(*operation, &value);
                             if !self.inside_workload {
-                                self.observer.operation_completed(OperationEvent {
-                                    capability: capability_name.to_owned(),
-                                    operation: operation_name.to_owned(),
-                                    duration,
+                                self.observer.execution_event(ExecutionEvent {
+                                    kind: ExecutionEventKind::Operation(OperationEvent {
+                                        capability: capability_name.to_owned(),
+                                        operation: operation_name.to_owned(),
+                                        duration,
+                                        span: expression.span,
+                                        result: Ok(value.clone()),
+                                        report,
+                                    }),
+                                    scope_path: self.scope_path.clone(),
                                     span: expression.span,
-                                    result: Ok(value.clone()),
-                                    report,
+                                    inside_workload: false,
                                 });
                             }
                             Ok(value)
@@ -716,13 +743,18 @@ impl Executor<'_> {
                         Err(error) => {
                             let error = self.error(error.message, error.span);
                             if !self.inside_workload {
-                                self.observer.operation_completed(OperationEvent {
-                                    capability: capability_name.to_owned(),
-                                    operation: operation_name.to_owned(),
-                                    duration,
+                                self.observer.execution_event(ExecutionEvent {
+                                    kind: ExecutionEventKind::Operation(OperationEvent {
+                                        capability: capability_name.to_owned(),
+                                        operation: operation_name.to_owned(),
+                                        duration,
+                                        span: expression.span,
+                                        result: Err(error.message.clone()),
+                                        report: None,
+                                    }),
+                                    scope_path: self.scope_path.clone(),
                                     span: expression.span,
-                                    result: Err(error.message.clone()),
-                                    report: None,
+                                    inside_workload: false,
                                 });
                             }
                             Err(error)
@@ -752,9 +784,18 @@ impl Executor<'_> {
                     delay,
                     body,
                 } => {
+                    let invocation = self.next_scope_id.fetch_add(1, Ordering::Relaxed);
                     let mut last_error = None;
                     for attempt in 0..*attempts {
-                        match self.evaluate(body, locals, context).await {
+                        let mut scoped = self.clone();
+                        scoped.scope_path.push(ExecutionScope::Retry {
+                            invocation,
+                            attempt: attempt + 1,
+                            total: *attempts,
+                        });
+                        let result = scoped.evaluate(body, locals, context).await;
+                        self.secrets = scoped.secrets;
+                        match result {
                             Ok(value) => return Ok(value),
                             Err(error) => last_error = Some(error),
                         }
@@ -812,6 +853,7 @@ impl Executor<'_> {
         locals: &[Option<Value>],
         context: &ActiveContext,
     ) -> Result<Value, RuntimeError> {
+        let invocation = self.next_scope_id.fetch_add(1, Ordering::Relaxed);
         let mut results = vec![None; branches.len()];
         let mut futures = Vec::with_capacity(limit);
         let mut next = 0;
@@ -820,6 +862,11 @@ impl Executor<'_> {
                 let index = next;
                 let branch = &branches[index];
                 let mut executor = self.clone();
+                executor.scope_path.push(ExecutionScope::Parallel {
+                    invocation,
+                    branch: index + 1,
+                    total: branches.len(),
+                });
                 let locals = locals.to_vec();
                 let context = context.clone();
                 let future: Pin<Box<dyn Future<Output = Result<Value, RuntimeError>> + Send + '_>> =
@@ -837,7 +884,28 @@ impl Executor<'_> {
             })
             .await;
             let (index, _) = futures.swap_remove(completed);
-            results[index] = Some(result?);
+            match result {
+                Ok(value) => results[index] = Some(value),
+                Err(error) => {
+                    if !self.inside_workload {
+                        for (cancelled, _) in &futures {
+                            let mut scope_path = self.scope_path.clone();
+                            scope_path.push(ExecutionScope::Parallel {
+                                invocation,
+                                branch: cancelled + 1,
+                                total: branches.len(),
+                            });
+                            self.observer.execution_event(ExecutionEvent {
+                                kind: ExecutionEventKind::BranchCancelled,
+                                scope_path,
+                                span: branches[*cancelled].span,
+                                inside_workload: false,
+                            });
+                        }
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(Value::Array(
             results
@@ -1199,6 +1267,7 @@ impl Executor<'_> {
             message,
             span,
             flow_stack: self.flow_stack.clone(),
+            scope_path: self.scope_path.clone().into_boxed_slice(),
             assertions: Vec::new(),
             assertion_only: false,
         }

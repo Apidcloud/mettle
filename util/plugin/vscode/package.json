@@ -2,7 +2,7 @@
   "name": "mettle-language",
   "displayName": "Mettle Language",
   "description": "Language support for the Mettle I/O-oriented programming language.",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "publisher": "mettle-lang",
   "license": "UNLICENSED",
   "engines": {
@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.15.0.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.16.0.vsix"
   },
   "contributes": {
     "commands": [
