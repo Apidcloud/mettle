@@ -58,10 +58,35 @@ cargo install --path crates/mettle-cli --locked
 mettle --version
 ```
 
+### Neovim
+
+Neovim 0.11+ can use its built-in LSP client for diagnostics and navigation;
+no Neovim plugin is required. Build or install the `mettle` CLI, then add
+this to your `init.lua` or a Lua module loaded by it:
+
+```lua
+vim.filetype.add({ extension = { mettle = "mettle" } })
+
+vim.lsp.config("mettle", {
+  cmd = { "mettle", "lsp" },
+  filetypes = { "mettle" },
+  root_markers = { "mettle.toml" },
+  workspace_required = false,
+})
+vim.lsp.enable("mettle")
+```
+
+If you built the CLI with `cargo build -p mettle-cli` rather than installing
+it on `PATH`, replace `"mettle"` in `cmd` with the absolute path to
+`target/debug/mettle`. Open a `.mettle` file and run `:checkhealth vim.lsp`
+to confirm that the server attached.
+
+The server reports diagnostics for unsaved edits. For the time being, given Mettle doesn't have separate implementation declarations, go-to-implementation returns the same declaration as go-to-definition.
+
 ### VS Code extension
 
 The repository includes the Mettle Language extension for syntax highlighting,
-parser/compiler diagnostics, flow and test CodeLens actions, and go-to-definition. Build and install its VSIX from
+parser/compiler diagnostics, flow and test CodeLens actions, and go-to-definition (go-to-implementation resolves to the same). Build and install its VSIX from
 the repository checkout:
 
 ```bash

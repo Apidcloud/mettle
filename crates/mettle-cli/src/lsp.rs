@@ -56,6 +56,7 @@ impl Server {
                 &json!({
                     "capabilities": {
                         "definitionProvider": true,
+                        "implementationProvider": true,
                         "textDocumentSync": {
                             "openClose": true,
                             "change": 1,
@@ -72,7 +73,7 @@ impl Server {
                 self.shutdown = true;
                 write_result(writer, &id, &Value::Null)?;
             }
-            (Some("textDocument/definition"), Some(id)) => {
+            (Some("textDocument/definition" | "textDocument/implementation"), Some(id)) => {
                 let result = message
                     .get("params")
                     .and_then(|params| self.definition(params));

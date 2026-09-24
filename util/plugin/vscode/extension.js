@@ -398,10 +398,10 @@ class MettleLanguageServer {
     this.notify("mettle/revalidate", {});
   }
 
-  async definition(document, position, token) {
+  async definition(method, document, position, token) {
     try {
       const result = await this.request(
-        "textDocument/definition",
+        method,
         {
           textDocument: { uri: document.uri.toString() },
           position: { line: position.line, character: position.character },
@@ -728,7 +728,11 @@ function activate(context) {
     vscode.languages.registerCodeLensProvider({ language: "mettle" }, provider),
     vscode.languages.registerDefinitionProvider(
       { language: "mettle", scheme: "file" },
-      { provideDefinition: (document, position, token) => languageServer.definition(document, position, token) },
+      { provideDefinition: (document, position, token) => languageServer.definition("textDocument/definition", document, position, token) },
+    ),
+    vscode.languages.registerImplementationProvider(
+      { language: "mettle", scheme: "file" },
+      { provideImplementation: (document, position, token) => languageServer.definition("textDocument/implementation", document, position, token) },
     ),
     vscode.workspace.onDidOpenTextDocument((document) => {
       if (document.languageId === "mettle") {
