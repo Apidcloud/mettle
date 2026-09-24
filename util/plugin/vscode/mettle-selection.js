@@ -23,4 +23,8 @@ function selectCurrentFlow(selected, currentFlows) {
   return anonymous.length === 1 ? anonymous[0] : undefined;
 }
 
-module.exports = { selectCurrentFlow };
+function selectCurrentTest(selected, currentTests) {
+  return currentTests.find((candidate) => candidate.name === selected.name);
+}
+
+module.exports = { selectCurrentFlow, selectCurrentTest };

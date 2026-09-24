@@ -13,6 +13,8 @@ Basic language support for `.mettle` source files.
   reusable and anonymous file contexts, `senv()`, structured and load execution
   policies, and HTTP requests;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
+- **Run Test** play buttons above each test declaration; each runs only that test;
+- parser and compiler diagnostics in the editor, including unsaved project files;
 - a file-level **Run All Eligible Flows** command for zero-argument flows;
 - a file-level **Run Tests in File** command;
 - a status-bar profile picker for `.env` and `.env.<name>` files;
@@ -21,7 +23,7 @@ Basic language support for `.mettle` source files.
   context uses, parameters, and local bindings, including declarations in other
   project files and references in unsaved editor text.
 
-The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Mettle discovery comes from project-aware `mettle list <file> --json`. Navigation uses the Language Server Protocol through `mettle lsp`; both features reuse the Rust parser, project discovery, source spans, and namespace resolver, so the editor does not maintain a second language implementation. Compiler diagnostics, completion, hover information, references, rename, formatting, and semantic highlighting are planned but are not available yet.
+The extension contains a small JavaScript entry point using only VS Code and Node built-in APIs. It has no npm runtime dependencies. Mettle discovery comes from project-aware `mettle list <file> --json`. Navigation and diagnostics use the Language Server Protocol through `mettle lsp`; they reuse the Rust parser, compiler, project discovery, source spans, and namespace resolver, so the editor does not maintain a second language implementation. Diagnostics refresh as open files change, when files are saved, and when project files change on disk. Completion, hover information, references, rename, formatting, and semantic highlighting are planned but are not available yet.
 
 ## Navigate source
 
@@ -85,7 +87,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/mettle-language-0.11.0.vsix
+dist/mettle-language-0.13.0.vsix
 ```
 
 ## Install
@@ -93,7 +95,7 @@ dist/mettle-language-0.11.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/mettle-language-0.11.0.vsix --force
+code --install-extension dist/mettle-language-0.13.0.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.

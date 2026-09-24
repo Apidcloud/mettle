@@ -2,7 +2,7 @@
   "name": "mettle-language",
   "displayName": "Mettle Language",
   "description": "Language support for the Mettle I/O-oriented programming language.",
-  "version": "0.11.0",
+  "version": "0.13.0",
   "publisher": "mettle-lang",
   "license": "UNLICENSED",
   "engines": {
@@ -12,6 +12,7 @@
   "activationEvents": [
     "onLanguage:mettle",
     "onCommand:mettle.runFlow",
+    "onCommand:mettle.runTest",
     "onCommand:mettle.runAllFlows",
     "onCommand:mettle.runTests",
     "onCommand:mettle.selectProfile"
@@ -28,13 +29,18 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.11.0.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.13.0.vsix"
   },
   "contributes": {
     "commands": [
       {
         "command": "mettle.runFlow",
         "title": "Mettle: Run Flow",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mettle.runTest",
+        "title": "Mettle: Run Test",
         "icon": "$(play)"
       },
       {

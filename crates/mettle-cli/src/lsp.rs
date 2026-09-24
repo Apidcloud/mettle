@@ -1,12 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use mettle_compiler::find_definition;
-use mettle_syntax::Span;
+use mettle_compiler::{compile_with_capabilities, find_definition};
+use mettle_syntax::{Span, parse};
 use serde_json::{Value, json};
 
-use super::{CliError, load_project_with_overlays};
+use super::{
+    CAPABILITIES, CliError, SourceDocument, combine_parsed_sources, find_project_root,
+    load_project_documents_with_overlays, load_project_with_overlays,
+};
 
 pub(super) fn run() -> Result<(), CliError> {
     let stdin = io::stdin();
@@ -37,6 +40,7 @@ fn io_failure(error: &io::Error) -> CliError {
 #[derive(Default)]
 struct Server {
     documents: HashMap<PathBuf, String>,
+    published: HashMap<PathBuf, BTreeSet<PathBuf>>,
     shutdown: bool,
 }
 
@@ -54,7 +58,8 @@ impl Server {
                         "definitionProvider": true,
                         "textDocumentSync": {
                             "openClose": true,
-                            "change": 1
+                            "change": 1,
+                            "save": true
                         }
                     },
                     "serverInfo": {
@@ -73,9 +78,12 @@ impl Server {
                     .and_then(|params| self.definition(params));
                 write_result(writer, &id, &result.unwrap_or(Value::Null))?;
             }
-            (Some("textDocument/didOpen"), None) => self.did_open(message),
-            (Some("textDocument/didChange"), None) => self.did_change(message),
-            (Some("textDocument/didClose"), None) => self.did_close(message),
+            (Some("textDocument/didOpen"), None) => self.did_open(message, writer)?,
+            (Some("textDocument/didChange"), None) => self.did_change(message, writer)?,
+            (Some("textDocument/didClose"), None) => self.did_close(message, writer)?,
+            (Some("textDocument/didSave" | "mettle/revalidate"), None) => {
+                self.revalidate_all(writer)?;
+            }
             (Some("exit"), None) => return Ok(true),
             (Some(_), Some(id)) => write_error(writer, &id, -32_601, "method not found")?,
             _ => {}
@@ -83,52 +91,144 @@ impl Server {
         Ok(false)
     }
 
-    fn did_open(&mut self, message: &Value) {
+    fn did_open(&mut self, message: &Value, writer: &mut impl Write) -> io::Result<()> {
         let Some(document) = message
             .pointer("/params/textDocument")
             .and_then(Value::as_object)
         else {
-            return;
+            return Ok(());
         };
         let (Some(uri), Some(text)) = (
             document.get("uri").and_then(Value::as_str),
             document.get("text").and_then(Value::as_str),
         ) else {
-            return;
+            return Ok(());
         };
         if let Some(path) = file_uri_to_path(uri) {
             self.documents.insert(normalize_path(path), text.to_owned());
+            self.revalidate_all(writer)?;
         }
+        Ok(())
     }
 
-    fn did_change(&mut self, message: &Value) {
+    fn did_change(&mut self, message: &Value, writer: &mut impl Write) -> io::Result<()> {
         let Some(uri) = message
             .pointer("/params/textDocument/uri")
             .and_then(Value::as_str)
         else {
-            return;
+            return Ok(());
         };
         let Some(text) = message
             .pointer("/params/contentChanges/0/text")
             .and_then(Value::as_str)
         else {
-            return;
+            return Ok(());
         };
         if let Some(path) = file_uri_to_path(uri) {
             self.documents.insert(normalize_path(path), text.to_owned());
+            self.revalidate_all(writer)?;
         }
+        Ok(())
     }
 
-    fn did_close(&mut self, message: &Value) {
+    fn did_close(&mut self, message: &Value, writer: &mut impl Write) -> io::Result<()> {
         let Some(uri) = message
             .pointer("/params/textDocument/uri")
             .and_then(Value::as_str)
         else {
-            return;
+            return Ok(());
         };
         if let Some(path) = file_uri_to_path(uri) {
             self.documents.remove(&normalize_path(path));
+            self.revalidate_all(writer)?;
         }
+        Ok(())
+    }
+
+    fn revalidate_all(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        let mut entries = BTreeMap::new();
+        for path in self.documents.keys() {
+            entries
+                .entry(project_scope(path))
+                .or_insert_with(|| path.clone());
+        }
+
+        let stale_scopes = self
+            .published
+            .keys()
+            .filter(|scope| !entries.contains_key(*scope))
+            .cloned()
+            .collect::<Vec<_>>();
+        for scope in stale_scopes {
+            if let Some(paths) = self.published.remove(&scope) {
+                for path in paths {
+                    publish_diagnostics(writer, &path, &[])?;
+                }
+            }
+        }
+
+        for (scope, entry) in entries {
+            let diagnostics = self.project_diagnostics(&entry).unwrap_or_default();
+            let paths = diagnostics.keys().cloned().collect::<BTreeSet<_>>();
+            let previous = self.published.remove(&scope).unwrap_or_default();
+            for path in previous.difference(&paths) {
+                publish_diagnostics(writer, path, &[])?;
+            }
+            for (path, diagnostics) in diagnostics {
+                publish_diagnostics(writer, &path, &diagnostics)?;
+            }
+            self.published.insert(scope, paths);
+        }
+        Ok(())
+    }
+
+    fn project_diagnostics(&self, entry: &Path) -> Option<BTreeMap<PathBuf, Vec<Value>>> {
+        let (sources, entry_source) =
+            load_project_documents_with_overlays(entry, &self.documents).ok()?;
+        let mut diagnostics = sources
+            .iter()
+            .map(|source| (source.path.clone(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        let mut parsed = Vec::with_capacity(sources.len());
+        let mut syntax_failed = false;
+
+        for (source_id, source) in sources.iter().enumerate() {
+            match parse(&source.text) {
+                Ok(mut program) => {
+                    program.set_source(source_id);
+                    parsed.push(program);
+                }
+                Err(error) => {
+                    syntax_failed = true;
+                    diagnostics.get_mut(&source.path)?.push(diagnostic(
+                        &source.text,
+                        error.span,
+                        &error.message,
+                        "syntax",
+                    ));
+                }
+            }
+        }
+        if syntax_failed {
+            return Some(diagnostics);
+        }
+
+        let project = combine_parsed_sources(sources, parsed, entry_source);
+        if let Err(errors) = compile_with_capabilities(&project.program, CAPABILITIES) {
+            for error in errors {
+                let source: &SourceDocument = project
+                    .sources
+                    .get(error.span.source)
+                    .unwrap_or(&project.sources[entry_source]);
+                diagnostics.get_mut(&source.path)?.push(diagnostic(
+                    &source.text,
+                    error.span,
+                    &error.message,
+                    "compile",
+                ));
+            }
+        }
+        Some(diagnostics)
     }
 
     fn definition(&self, params: &Value) -> Option<Value> {
@@ -149,6 +249,40 @@ impl Server {
             "range": span_range(&target_source.text, target)
         }))
     }
+}
+
+fn project_scope(path: &Path) -> PathBuf {
+    path.parent()
+        .and_then(find_project_root)
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn diagnostic(source: &str, span: Span, message: &str, code: &str) -> Value {
+    json!({
+        "range": span_range(source, span),
+        "severity": 1,
+        "source": "mettle",
+        "code": code,
+        "message": message,
+    })
+}
+
+fn publish_diagnostics(
+    writer: &mut impl Write,
+    path: &Path,
+    diagnostics: &[Value],
+) -> io::Result<()> {
+    write_message(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": path_to_file_uri(path),
+                "diagnostics": diagnostics,
+            }
+        }),
+    )
 }
 
 fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
@@ -316,21 +450,173 @@ fn path_to_file_uri(path: &Path) -> String {
 mod tests {
     use super::{
         Server, byte_offset, file_uri_to_path, normalize_path, path_to_file_uri, position,
+        read_message,
     };
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
+    use std::io::BufReader;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMPORARY_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn project_directory() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("flow-lsp-test-{}-{unique}", std::process::id()));
+        let counter = TEMPORARY_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "flow-lsp-test-{}-{unique}-{counter}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("test project should be creatable");
         path
+    }
+
+    fn messages(bytes: &[u8]) -> Vec<Value> {
+        let mut reader = BufReader::new(bytes);
+        let mut messages = Vec::new();
+        while let Some(message) = read_message(&mut reader).expect("LSP message should decode") {
+            messages.push(message);
+        }
+        messages
+    }
+
+    fn diagnostics_for(messages: &[Value], path: &Path) -> Vec<Value> {
+        let uri = path_to_file_uri(&normalize_path(path.to_path_buf()));
+        messages
+            .iter()
+            .find(|message| {
+                message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == uri
+            })
+            .expect("diagnostics should be published for the file")["params"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics should be an array")
+            .clone()
+    }
+
+    #[test]
+    fn publishes_and_clears_unsaved_syntax_and_compile_diagnostics() {
+        let directory = project_directory();
+        let entry = directory.join("main.mettle");
+        fs::write(&entry, "flow main() = true\n").expect("entry should be writable");
+        let uri = path_to_file_uri(&entry);
+        let mut server = Server::default();
+
+        let mut output = Vec::new();
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didOpen",
+                    "params": { "textDocument": { "uri": uri, "text": "flow main() = (" } }
+                }),
+                &mut output,
+            )
+            .expect("open should publish diagnostics");
+        let diagnostics = diagnostics_for(&messages(&output), &entry);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "syntax");
+        assert_eq!(diagnostics[0]["severity"], 1);
+
+        output.clear();
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri },
+                        "contentChanges": [{ "text": "flow main() = missing\n" }]
+                    }
+                }),
+                &mut output,
+            )
+            .expect("change should publish diagnostics");
+        let diagnostics = diagnostics_for(&messages(&output), &entry);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "compile");
+        assert!(
+            diagnostics[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing")
+        );
+
+        output.clear();
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri },
+                        "contentChanges": [{ "text": "flow main() = true\n" }]
+                    }
+                }),
+                &mut output,
+            )
+            .expect("fix should clear diagnostics");
+        assert!(diagnostics_for(&messages(&output), &entry).is_empty());
+
+        output.clear();
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didClose",
+                    "params": { "textDocument": { "uri": uri } }
+                }),
+                &mut output,
+            )
+            .expect("close should clear diagnostics");
+        assert!(diagnostics_for(&messages(&output), &entry).is_empty());
+        fs::remove_dir_all(directory).expect("test project should be removable");
+    }
+
+    #[test]
+    fn includes_unsaved_new_project_files_in_diagnostics() {
+        let directory = project_directory();
+        fs::write(directory.join("mettle.toml"), "name = \"lsp-test\"\n")
+            .expect("manifest should be writable");
+        let entry = directory.join("main.mettle");
+        let unsaved = directory.join("new.mettle");
+        fs::write(&entry, "flow main() = true\n").expect("entry should be writable");
+        let mut server = Server::default();
+        let mut output = Vec::new();
+
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": path_to_file_uri(&entry),
+                            "text": "flow main() = true\n"
+                        }
+                    }
+                }),
+                &mut output,
+            )
+            .expect("entry should open");
+        output.clear();
+        server
+            .handle(
+                &json!({
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": path_to_file_uri(&unsaved),
+                            "text": "flow extra() = missing\n"
+                        }
+                    }
+                }),
+                &mut output,
+            )
+            .expect("unsaved project file should be validated");
+        let diagnostics = diagnostics_for(&messages(&output), &unsaved);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0]["code"], "compile");
+        fs::remove_dir_all(directory).expect("test project should be removable");
     }
 
     #[test]

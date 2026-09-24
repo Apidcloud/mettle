@@ -1,7 +1,7 @@
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const vscode = require("vscode");
-const { selectCurrentFlow } = require("./mettle-selection");
+const { selectCurrentFlow, selectCurrentTest } = require("./mettle-selection");
 const { listProfiles, profileLocations } = require("./mettle-profiles");
 
 const MAX_DISCOVERY_OUTPUT = 1024 * 1024;
@@ -13,8 +13,9 @@ function mettleExecutable() {
     .get("executablePath", "mettle");
 }
 
-function discoverFlows(document, output, token) {
+function discoverDeclarations(document, output, token) {
   return new Promise((resolve) => {
+    const empty = () => ({ flows: [], tests: [] });
     const executable = mettleExecutable();
     const child = spawn(executable, ["list", document.uri.fsPath, "--json"], {
       cwd: path.dirname(document.uri.fsPath),
@@ -41,37 +42,35 @@ function discoverFlows(document, output, token) {
     child.on("error", (error) => {
       cancellation.dispose();
       output.appendLine(`Could not start ${executable}: ${error.message}`);
-      resolve([]);
+      resolve(empty());
     });
     child.on("close", (code) => {
       cancellation.dispose();
       if (token.isCancellationRequested) {
-        resolve([]);
+        resolve(empty());
         return;
       }
       if (oversized) {
         output.appendLine("Mettle discovery output exceeded 1 MiB.");
-        resolve([]);
+        resolve(empty());
         return;
       }
       if (code !== 0) {
         output.appendLine(stderr.trim() || `Mettle discovery exited with status ${code}.`);
-        resolve([]);
+        resolve(empty());
         return;
       }
       try {
         const result = JSON.parse(stdout);
-        const flows = Array.isArray(result.flows) ? result.flows : [];
-        resolve(
-          flows.filter(
-            (flow) =>
-              !flow.path ||
-              path.resolve(flow.path) === path.resolve(document.uri.fsPath),
-          ),
-        );
+        const inDocument = (item) =>
+          !item.path || path.resolve(item.path) === path.resolve(document.uri.fsPath);
+        resolve({
+          flows: (Array.isArray(result.flows) ? result.flows : []).filter(inDocument),
+          tests: (Array.isArray(result.tests) ? result.tests : []).filter(inDocument),
+        });
       } catch (error) {
         output.appendLine(`Could not parse Mettle discovery output: ${error.message}`);
-        resolve([]);
+        resolve(empty());
       }
     });
   });
@@ -93,8 +92,8 @@ class FlowCodeLensProvider {
   }
 
   async provideCodeLenses(document, token) {
-    const flows = await discoverFlows(document, this.output, token);
-    return flows.map((flow) => {
+    const { flows, tests } = await discoverDeclarations(document, this.output, token);
+    const flowLenses = flows.map((flow) => {
       const line = Math.max(0, Number(flow.line) - 1);
       const range = new vscode.Range(line, 0, line, 0);
       const label = flow.name
@@ -115,25 +114,37 @@ class FlowCodeLensProvider {
         ],
       });
     });
+    const testLenses = tests.map((test) => {
+      const line = Math.max(0, Number(test.line) - 1);
+      return new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+        title: `$(play) Run test: ${test.name}`,
+        command: "mettle.runTest",
+        arguments: [{ uri: document.uri.toString(), name: test.name }],
+      });
+    });
+    return [...flowLenses, ...testLenses];
   }
 }
 
 class MettleLanguageServer {
-  constructor(output) {
+  constructor(output, diagnostics) {
     this.output = output;
+    this.diagnostics = diagnostics;
     this.child = undefined;
     this.starting = undefined;
     this.buffer = Buffer.alloc(0);
     this.nextId = 1;
     this.pending = new Map();
+    this.openDocuments = new Set();
+    this.initialized = false;
   }
 
   async start() {
-    if (this.child) {
-      return;
-    }
     if (this.starting) {
       return this.starting;
+    }
+    if (this.child) {
+      return;
     }
     this.starting = this.startProcess();
     try {
@@ -153,6 +164,8 @@ class MettleLanguageServer {
     });
     this.child = child;
     this.buffer = Buffer.alloc(0);
+    this.openDocuments.clear();
+    this.initialized = false;
     child.stdout.on("data", (chunk) => this.receive(chunk));
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => this.output.append(chunk));
@@ -163,6 +176,9 @@ class MettleLanguageServer {
     child.on("close", (code) => {
       if (this.child === child) {
         this.child = undefined;
+        this.openDocuments.clear();
+        this.initialized = false;
+        this.diagnostics.clear();
       }
       this.failPending(new Error(`Mettle language server exited with status ${code}.`));
     });
@@ -176,9 +192,10 @@ class MettleLanguageServer {
       rootUri: folder?.uri.toString() || null,
       workspaceFolders: folders,
       capabilities: {},
-      clientInfo: { name: "Mettle VS Code", version: "0.11.0" },
+      clientInfo: { name: "Mettle VS Code", version: "0.13.0" },
     });
     this.notify("initialized", {});
+    this.initialized = true;
     for (const document of vscode.workspace.textDocuments) {
       if (document.languageId === "mettle") {
         this.open(document);
@@ -221,6 +238,10 @@ class MettleLanguageServer {
   }
 
   handleMessage(message) {
+    if (message.method === "textDocument/publishDiagnostics") {
+      this.publishDiagnostics(message.params);
+      return;
+    }
     if (message.id === undefined) {
       return;
     }
@@ -233,6 +254,41 @@ class MettleLanguageServer {
       pending.reject(new Error(message.error.message || "Mettle language server request failed."));
     } else {
       pending.resolve(message.result);
+    }
+  }
+
+  publishDiagnostics(params) {
+    try {
+      if (typeof params?.uri !== "string" || !Array.isArray(params.diagnostics)) {
+        throw new Error("invalid diagnostic notification");
+      }
+      const uri = vscode.Uri.parse(params.uri);
+      const severities = [
+        undefined,
+        vscode.DiagnosticSeverity.Error,
+        vscode.DiagnosticSeverity.Warning,
+        vscode.DiagnosticSeverity.Information,
+        vscode.DiagnosticSeverity.Hint,
+      ];
+      const diagnostics = params.diagnostics.map((item) => {
+        const range = new vscode.Range(
+          item.range.start.line,
+          item.range.start.character,
+          item.range.end.line,
+          item.range.end.character,
+        );
+        const diagnostic = new vscode.Diagnostic(
+          range,
+          item.message,
+          severities[item.severity] ?? vscode.DiagnosticSeverity.Error,
+        );
+        diagnostic.source = item.source || "mettle";
+        diagnostic.code = item.code;
+        return diagnostic;
+      });
+      this.diagnostics.set(uri, diagnostics);
+    } catch (error) {
+      this.output.appendLine(`Could not display Mettle diagnostics: ${error.message}`);
     }
   }
 
@@ -282,6 +338,14 @@ class MettleLanguageServer {
   }
 
   open(document) {
+    if (document.uri.scheme !== "file" || !this.initialized || !this.child?.stdin.writable) {
+      return;
+    }
+    const uri = document.uri.toString();
+    if (this.openDocuments.has(uri)) {
+      return;
+    }
+    this.openDocuments.add(uri);
     this.notify("textDocument/didOpen", {
       textDocument: {
         uri: document.uri.toString(),
@@ -293,6 +357,13 @@ class MettleLanguageServer {
   }
 
   change(event) {
+    if (!this.initialized) {
+      return;
+    }
+    if (!this.openDocuments.has(event.document.uri.toString())) {
+      this.open(event.document);
+      return;
+    }
     this.notify("textDocument/didChange", {
       textDocument: {
         uri: event.document.uri.toString(),
@@ -303,9 +374,28 @@ class MettleLanguageServer {
   }
 
   close(document) {
+    if (!this.openDocuments.delete(document.uri.toString())) {
+      return;
+    }
     this.notify("textDocument/didClose", {
       textDocument: { uri: document.uri.toString() },
     });
+  }
+
+  save(document) {
+    if (!this.initialized) {
+      return;
+    }
+    this.notify("textDocument/didSave", {
+      textDocument: { uri: document.uri.toString() },
+    });
+  }
+
+  revalidate() {
+    if (!this.initialized) {
+      return;
+    }
+    this.notify("mettle/revalidate", {});
   }
 
   async definition(document, position, token) {
@@ -451,7 +541,7 @@ async function runFlow(flow, output, context) {
   }
 
   const cancellationSource = new vscode.CancellationTokenSource();
-  const currentFlows = await discoverFlows(
+  const { flows: currentFlows } = await discoverDeclarations(
     document,
     output,
     cancellationSource.token,
@@ -513,6 +603,51 @@ async function runFlow(flow, output, context) {
   await vscode.tasks.executeTask(task);
 }
 
+async function runTest(test, output, context) {
+  const uri = vscode.Uri.parse(test.uri);
+  const document = await vscode.workspace.openTextDocument(uri);
+  if (document.isDirty && !(await document.save())) {
+    void vscode.window.showErrorMessage("Save the Mettle file before running it.");
+    return;
+  }
+
+  const cancellationSource = new vscode.CancellationTokenSource();
+  const { tests } = await discoverDeclarations(document, output, cancellationSource.token);
+  cancellationSource.dispose();
+  const current = selectCurrentTest(test, tests);
+  if (!current) {
+    void vscode.window.showErrorMessage(
+      "The selected test changed. Use the refreshed Run Test action.",
+    );
+    return;
+  }
+
+  const environmentArgs = profileArguments(context, uri.fsPath);
+  if (!environmentArgs) {
+    return;
+  }
+  const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+  const scope = workspaceFolder || vscode.TaskScope.Workspace;
+  const execution = new vscode.ProcessExecution(
+    mettleExecutable(),
+    ["test", uri.fsPath, current.name, ...environmentArgs],
+    { cwd: path.dirname(uri.fsPath) },
+  );
+  const task = new vscode.Task(
+    { type: "mettle", test: current.name },
+    scope,
+    `Run test: ${current.name}`,
+    "Mettle",
+    execution,
+  );
+  task.presentationOptions = {
+    reveal: vscode.TaskRevealKind.Always,
+    panel: vscode.TaskPanelKind.Dedicated,
+    clear: true,
+  };
+  await vscode.tasks.executeTask(task);
+}
+
 async function runFileTask(context, operation, label, extraArguments) {
   const document = vscode.window.activeTextEditor?.document;
   if (!document || document.languageId !== "mettle") {
@@ -553,23 +688,37 @@ async function runFileTask(context, operation, label, extraArguments) {
 
 function activate(context) {
   const output = vscode.window.createOutputChannel("Mettle");
+  const diagnostics = vscode.languages.createDiagnosticCollection("mettle");
   const provider = new FlowCodeLensProvider(output);
-  const languageServer = new MettleLanguageServer(output);
+  const languageServer = new MettleLanguageServer(output, diagnostics);
   const profileStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   profileStatus.command = "mettle.selectProfile";
   const profileWatcher = vscode.workspace.createFileSystemWatcher("**/.env*");
   const projectWatcher = vscode.workspace.createFileSystemWatcher("**/mettle.toml");
+  const sourceWatcher = vscode.workspace.createFileSystemWatcher("**/*.mettle");
   context.subscriptions.push(
     output,
+    diagnostics,
     provider,
     profileStatus,
     profileWatcher,
     projectWatcher,
+    sourceWatcher,
     profileWatcher.onDidCreate(() => refreshProfileStatus(context, profileStatus, output)),
     profileWatcher.onDidDelete(() => refreshProfileStatus(context, profileStatus, output)),
     profileWatcher.onDidChange(() => refreshProfileStatus(context, profileStatus, output)),
-    projectWatcher.onDidCreate(() => refreshProfileStatus(context, profileStatus, output)),
-    projectWatcher.onDidDelete(() => refreshProfileStatus(context, profileStatus, output)),
+    projectWatcher.onDidCreate(() => {
+      refreshProfileStatus(context, profileStatus, output);
+      languageServer.revalidate();
+    }),
+    projectWatcher.onDidDelete(() => {
+      refreshProfileStatus(context, profileStatus, output);
+      languageServer.revalidate();
+    }),
+    projectWatcher.onDidChange(() => languageServer.revalidate()),
+    sourceWatcher.onDidCreate(() => languageServer.revalidate()),
+    sourceWatcher.onDidChange(() => languageServer.revalidate()),
+    sourceWatcher.onDidDelete(() => languageServer.revalidate()),
     vscode.window.onDidChangeActiveTextEditor(() => refreshProfileStatus(context, profileStatus, output)),
     vscode.window.onDidChangeWindowState((state) => {
       if (state.focused) {
@@ -594,6 +743,7 @@ function activate(context) {
     vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.languageId === "mettle") {
         provider.refresh();
+        languageServer.save(document);
       }
     }),
     vscode.workspace.onDidCloseTextDocument((document) => {
@@ -602,6 +752,7 @@ function activate(context) {
       }
     }),
     vscode.commands.registerCommand("mettle.runFlow", (flow) => runFlow(flow, output, context)),
+    vscode.commands.registerCommand("mettle.runTest", (test) => runTest(test, output, context)),
     vscode.commands.registerCommand("mettle.runAllFlows", () =>
       runFileTask(context, "run", "Run All Eligible Flows", ["--all"])),
     vscode.commands.registerCommand("mettle.runTests", () =>

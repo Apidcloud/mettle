@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { selectCurrentFlow } = require("../mettle-selection");
+const { selectCurrentFlow, selectCurrentTest } = require("../mettle-selection");
 
 test("keeps an anonymous flow selected when its request text changes", () => {
   const selected = {
@@ -44,4 +44,21 @@ test("does not guess between multiple anonymous flows after structural edits", (
   ];
 
   assert.equal(selectCurrentFlow(selected, current), undefined);
+});
+
+test("tracks a test by its unique file-level name after edits shift its line", () => {
+  const selected = { name: "responds with 200", line: 4 };
+  const current = [
+    { name: "returns JSON", line: 5 },
+    { name: "responds with 200", line: 12 },
+  ];
+
+  assert.equal(selectCurrentTest(selected, current), current[1]);
+});
+
+test("does not run a test whose name was removed", () => {
+  assert.equal(
+    selectCurrentTest({ name: "old name" }, [{ name: "new name", line: 3 }]),
+    undefined,
+  );
 });

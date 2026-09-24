@@ -63,13 +63,13 @@ mettle --version
 ### VS Code extension
 
 The repository includes the Mettle Language extension for syntax highlighting,
-flow CodeLens actions, and go-to-definition. Build and install its VSIX from
+parser/compiler diagnostics, flow and test CodeLens actions, and go-to-definition. Build and install its VSIX from
 the repository checkout:
 
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.11.0.vsix --force
+code --install-extension dist/mettle-language-0.13.0.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -147,6 +147,7 @@ mettle run checks.mettle --all
 Declare checks with `test("name") { ... }`. Tests have no parameters or return
 value, and a failed `assert(...)` fails that test without stopping the rest of
 the file. `mettle test <file>` runs tests declared in that file in source order;
+`mettle test <file> "test name"` or `mettle test <file> --line <line>` runs one test;
 `mettle run <file> --all` still runs only zero-argument flows. The test command
 exits nonzero when any test fails or the file has no tests, and supports `--verbose`, `--quiet`, and
 `--output json` (JSON Lines) for CI.
@@ -161,7 +162,8 @@ test("post 1 is available") {
 }
 ```
 
-Run the full example with `mettle test examples/http-tests.mettle`.
+Run the full example with `mettle test examples/http-tests.mettle`, or run one
+test by name with `mettle test examples/http-tests.mettle "post 1 is available"`.
 
 ## Build a workflow from operation results
 
@@ -490,12 +492,12 @@ error: unknown option `banana`
 
 ## VS Code extension
 
-The included extension provides `.mettle` recognition, syntax highlighting, snippets, folding, CodeLens actions to run flows, and Ctrl+Click navigation for flows, contexts, parameters, and local bindings. Navigation is backed by `mettle lsp`, so it follows the same project and namespace rules as the CLI.
+The included extension provides `.mettle` recognition, syntax highlighting, snippets, folding, parser/compiler diagnostics for unsaved edits, CodeLens play buttons to run individual flows and tests, and Ctrl+Click navigation for flows, contexts, parameters, and local bindings. Navigation and diagnostics are backed by `mettle lsp`, so they follow the same project and namespace rules as the CLI.
 
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.11.0.vsix --force
+code --install-extension dist/mettle-language-0.13.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.

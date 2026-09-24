@@ -26,7 +26,7 @@ Usage:
   mettle check <file>
   mettle list <file> [--json]
   mettle run <file> [flow-name] [--all | --line <line>] [--arg <name=value>]... [--profile <name>] [output options]
-  mettle test <file> [--profile <name>] [--verbose | --quiet | --output json] [--no-progress] [--no-color]
+  mettle test <file> [test-name | --line <line>] [--profile <name>] [--verbose | --quiet | --output json] [--no-progress] [--no-color]
   mettle lsp
   mettle --help
   mettle --version
@@ -35,7 +35,7 @@ Commands:
   check   Parse and validate a Mettle source file
   list    List compiler-discovered runnable flows
   run     Validate the source and execute a selected flow, or every zero-argument flow
-  test    Execute tests in the selected file; fail if none are declared
+  test    Execute tests in the selected file, or one selected test
   lsp     Start the Mettle language server over standard input/output
 
 Run output options:
@@ -482,18 +482,19 @@ fn run(path: &Path, options: &RunOptions) -> Result<(), CliError> {
 
 fn run_tests(path: &Path, options: &RunOptions) -> Result<(), CliError> {
     if options.all
-        || options.selector.is_some()
+        || matches!(options.selector, Some(MettleSelector::Id(_)))
         || !options.arguments.is_empty()
         || options.output == OutputMode::Raw
     {
         return Err(CliError::Usage(
-            "`mettle test` accepts output options only; tests are selected by file".to_owned(),
+            "`mettle test` accepts a test name or `--line` selector, plus output options"
+                .to_owned(),
         ));
     }
     let project = load_project(path)?;
     let plan = compile_project(&project)?;
     let environment = execution_environment(&project, options.profile.as_deref())?;
-    let test_ids = plan
+    let available_test_ids = plan
         .flows
         .iter()
         .enumerate()
@@ -502,9 +503,38 @@ fn run_tests(path: &Path, options: &RunOptions) -> Result<(), CliError> {
                 .then_some(id)
         })
         .collect::<Vec<_>>();
+    let test_ids = available_test_ids
+        .iter()
+        .copied()
+        .filter(|&id| match options.selector.as_ref() {
+            Some(MettleSelector::Name(name)) => plan.flows[id].display_name == *name,
+            Some(MettleSelector::Line(line)) => {
+                source_location(
+                    &project.sources[project.entry_source].text,
+                    plan.flows[id].span.start,
+                )
+                .0 == *line
+            }
+            _ => true,
+        })
+        .collect::<Vec<_>>();
+    if let Some(MettleSelector::Line(line)) = options.selector.as_ref()
+        && test_ids.len() > 1
+    {
+        eprintln!("error: more than one test starts on line {line}; select by name");
+        return Err(CliError::Failure);
+    }
     let total = test_ids.len();
     if total == 0 {
-        eprintln!("error: no tests are declared in {}", path.display());
+        match options.selector.as_ref() {
+            Some(MettleSelector::Name(name)) => {
+                eprintln!("error: test `{name}` was not found in {}", path.display());
+            }
+            Some(MettleSelector::Line(line)) => {
+                eprintln!("error: no test starts on line {line} in {}", path.display());
+            }
+            _ => eprintln!("error: no tests are declared in {}", path.display()),
+        }
         return Err(CliError::Failure);
     }
     let async_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1028,13 +1058,27 @@ fn load_project_with_overlays(
     path: &Path,
     overlays: &HashMap<PathBuf, String>,
 ) -> Result<LoadedProject, CliError> {
+    let (sources, entry_source) = load_project_documents_with_overlays(path, overlays)?;
+    load_sources(sources, entry_source)
+}
+
+fn load_project_documents_with_overlays(
+    path: &Path,
+    overlays: &HashMap<PathBuf, String>,
+) -> Result<(Vec<SourceDocument>, usize), CliError> {
     if path == Path::new("-") {
         let mut text = String::new();
         io::stdin().read_to_string(&mut text).map_err(|error| {
             eprintln!("error: could not read Mettle source from standard input: {error}");
             CliError::Failure
         })?;
-        return load_sources(vec![(PathBuf::from("<stdin>"), text)], 0);
+        return Ok((
+            vec![SourceDocument {
+                path: PathBuf::from("<stdin>"),
+                text,
+            }],
+            0,
+        ));
     }
 
     let entry = path
@@ -1051,18 +1095,29 @@ fn load_project_with_overlays(
             CliError::Failure
         })?;
     let project_root = entry.parent().and_then(find_project_root);
-    let mut paths = if let Some(root) = project_root {
+    let mut paths = if let Some(root) = &project_root {
         let mut paths = Vec::new();
-        collect_flow_files(&root, &mut paths)?;
-        paths.sort();
+        collect_flow_files(root, &mut paths)?;
         paths
     } else {
         vec![entry.clone()]
     };
-    if !paths.contains(&entry) {
-        paths.push(entry.clone());
-        paths.sort();
+    if let Some(root) = &project_root {
+        paths.extend(
+            overlays
+                .keys()
+                .filter(|overlay| {
+                    overlay.starts_with(root)
+                        && overlay
+                            .extension()
+                            .is_some_and(|extension| extension == "mettle")
+                })
+                .cloned(),
+        );
     }
+    paths.push(entry.clone());
+    paths.sort();
+    paths.dedup();
     let entry_source = paths
         .iter()
         .position(|candidate| candidate == &entry)
@@ -1074,14 +1129,17 @@ fn load_project_with_overlays(
                 .get(&path)
                 .cloned()
                 .map_or_else(|| fs::read_to_string(&path), Ok)
-                .map(|text| (path.clone(), text))
+                .map(|text| SourceDocument {
+                    path: path.clone(),
+                    text,
+                })
                 .map_err(|error| {
                     eprintln!("error: could not read {}: {error}", path.display());
                     CliError::Failure
                 })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    load_sources(sources, entry_source)
+    Ok((sources, entry_source))
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -1121,13 +1179,9 @@ fn collect_flow_files(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), 
 }
 
 fn load_sources(
-    sources: Vec<(PathBuf, String)>,
+    documents: Vec<SourceDocument>,
     entry_source: usize,
 ) -> Result<LoadedProject, CliError> {
-    let documents = sources
-        .into_iter()
-        .map(|(path, text)| SourceDocument { path, text })
-        .collect::<Vec<_>>();
     let mut parsed = Vec::with_capacity(documents.len());
     for (source_id, source) in documents.iter().enumerate() {
         let mut program = parse(&source.text).map_err(|error: SyntaxError| {
@@ -1144,6 +1198,14 @@ fn load_sources(
         parsed.push(program);
     }
 
+    Ok(combine_parsed_sources(documents, parsed, entry_source))
+}
+
+fn combine_parsed_sources(
+    documents: Vec<SourceDocument>,
+    parsed: Vec<mettle_syntax::Program>,
+    entry_source: usize,
+) -> LoadedProject {
     let entry = &parsed[entry_source];
     let mut program = mettle_syntax::Program {
         namespace: entry.namespace.clone(),
@@ -1157,11 +1219,11 @@ fn load_sources(
         program.file_contexts.extend(source.file_contexts);
         program.flows.extend(source.flows);
     }
-    Ok(LoadedProject {
+    LoadedProject {
         program,
         sources: documents,
         entry_source,
-    })
+    }
 }
 
 fn compile_project(project: &LoadedProject) -> Result<ExecutionPlan, CliError> {

@@ -1,5 +1,15 @@
 # Change Log
 
+## 0.13.0
+
+- Add a play button above each test declaration to run that test alone.
+- Support selecting one test by name or source line with `mettle test`.
+
+## 0.12.0
+
+- Show parser and compiler diagnostics in VS Code as files change, including
+  unsaved project files, and clear stale diagnostics after fixes or closing files.
+
 ## 0.11.0
 
 - Discover `.env` profiles for standalone files and projects in a status-bar picker.

@@ -85,6 +85,19 @@ fn receive_lsp(stdout: &mut BufReader<ChildStdout>) -> serde_json::Value {
     serde_json::from_slice(&body).expect("LSP body should be JSON")
 }
 
+fn receive_lsp_response(stdout: &mut BufReader<ChildStdout>, id: u64) -> serde_json::Value {
+    loop {
+        let message = receive_lsp(stdout);
+        if message["id"] == id {
+            return message;
+        }
+        assert_eq!(
+            message["method"], "textDocument/publishDiagnostics",
+            "unexpected LSP message: {message}"
+        );
+    }
+}
+
 #[test]
 fn check_validates_a_source_file() {
     let path = source_file("flow main() { return \"valid\" }");
@@ -564,6 +577,66 @@ fn test_command_only_executes_tests_in_selected_file() {
 }
 
 #[test]
+fn test_command_can_select_one_test_by_name_or_line() {
+    let path = source_file(
+        "test(\"first passes\") { assert(true) }\ntest(\"second fails\") { assert(false) }\n",
+    );
+    let named = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .arg("first passes")
+        .args(["--output", "json"])
+        .output()
+        .expect("selected test should start");
+    let lined = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .args(["--line", "1"])
+        .output()
+        .expect("selected test should start");
+    let missing = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .arg("missing")
+        .output()
+        .expect("missing test should report an error");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(named.status.success(), "{named:?}");
+    let records = String::from_utf8_lossy(&named.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0]["eligible"], 1);
+    assert_eq!(records[1]["test"], "first passes");
+    assert_eq!(records[2]["passed"], 1);
+    assert!(lined.status.success(), "{lined:?}");
+    let stdout = String::from_utf8_lossy(&lined.stdout);
+    assert!(stdout.contains("first passes"), "{stdout}");
+    assert!(!stdout.contains("second fails"), "{stdout}");
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("was not found"));
+}
+
+#[test]
+fn test_line_selector_rejects_ambiguous_declarations() {
+    let path = source_file("test(\"first\") {} test(\"second\") {}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .args(["--line", "1"])
+        .output()
+        .expect("test command should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("more than one test starts on line 1")
+    );
+}
+
+#[test]
 fn test_command_fails_when_selected_file_has_no_tests() {
     let path = source_file("flow main() = 1\n");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
@@ -983,7 +1056,7 @@ fn lsp_navigates_from_an_unsaved_document_to_another_file() {
         &mut stdin,
         &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
     );
-    assert_eq!(receive_lsp(&mut stdout)["id"], 1);
+    assert_eq!(receive_lsp_response(&mut stdout, 1)["id"], 1);
     send_lsp(
         &mut stdin,
         &serde_json::json!({
@@ -1011,7 +1084,7 @@ fn lsp_navigates_from_an_unsaved_document_to_another_file() {
             }
         }),
     );
-    let definition = receive_lsp(&mut stdout);
+    let definition = receive_lsp_response(&mut stdout, 2);
     assert_eq!(definition["id"], 2);
     let definition_uri = definition["result"]["uri"]
         .as_str()
@@ -1027,7 +1100,7 @@ fn lsp_navigates_from_an_unsaved_document_to_another_file() {
         &mut stdin,
         &serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null }),
     );
-    assert_eq!(receive_lsp(&mut stdout)["id"], 3);
+    assert_eq!(receive_lsp_response(&mut stdout, 3)["id"], 3);
     send_lsp(
         &mut stdin,
         &serde_json::json!({ "jsonrpc": "2.0", "method": "exit", "params": null }),
