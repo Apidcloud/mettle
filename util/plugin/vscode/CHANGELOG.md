@@ -1,5 +1,9 @@
 # Change Log
 
+## 0.14.0
+
+- Add an assertion-with-message snippet for the new test failure reporting syntax.
+
 ## 0.13.0
 
 - Add a play button above each test declaration to run that test alone.

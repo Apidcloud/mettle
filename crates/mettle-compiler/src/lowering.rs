@@ -527,7 +527,11 @@ impl<'a> Compiler<'a> {
                     }
                     returned = true;
                 }
-                Statement::Assert { expression, .. } => {
+                Statement::Assert {
+                    expression,
+                    message,
+                    ..
+                } => {
                     if let Some(expression) =
                         self.compile_expression(Some(flow_id), expression, &locals, active_context)
                     {
@@ -540,7 +544,24 @@ impl<'a> Compiler<'a> {
                                 expression.span,
                             ));
                         }
-                        instructions.push(Instruction::Assert(expression));
+                        let message = message.as_ref().and_then(|message| {
+                            self.compile_expression(Some(flow_id), message, &locals, active_context)
+                        });
+                        if let Some(message) = &message
+                            && !matches!(
+                                message.value_type,
+                                ValueType::String | ValueType::Inferred
+                            )
+                        {
+                            self.errors.push(CompileError::new(
+                                "assertion message must be a string",
+                                message.span,
+                            ));
+                        }
+                        instructions.push(Instruction::Assert {
+                            condition: expression,
+                            message,
+                        });
                     }
                 }
                 Statement::UseContext { .. } => unreachable!("context statements were skipped"),

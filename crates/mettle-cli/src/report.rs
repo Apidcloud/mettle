@@ -366,7 +366,9 @@ pub fn failure_summary(
     test: bool,
 ) -> String {
     let mut output = String::new();
-    writeln!(output, "{}\n", style(flow, "1", color)).expect("writing to a string cannot fail");
+    if !test {
+        writeln!(output, "{}\n", style(flow, "1", color)).expect("writing to a string cannot fail");
+    }
     for operation in operations {
         render_operation(&mut output, operation, color, false);
     }

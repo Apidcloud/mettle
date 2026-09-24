@@ -48,6 +48,13 @@
       "assert(${1:response.status == 200})"
     ]
   },
+  "Assertion with message": {
+    "prefix": "assertm",
+    "description": "Assert with a failure message",
+    "body": [
+      "assert(${1:response.status == 200}, \"${2:expected HTTP 200}\")"
+    ]
+  },
   "File test": {
     "prefix": "mettle-test",
     "description": "Declare a named test in this file",

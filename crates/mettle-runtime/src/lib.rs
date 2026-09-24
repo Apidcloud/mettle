@@ -50,6 +50,14 @@ pub struct RuntimeError {
     pub message: String,
     pub span: Span,
     pub flow_stack: Vec<String>,
+    pub assertions: Vec<AssertionFailure>,
+    pub assertion_only: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssertionFailure {
+    pub message: String,
+    pub span: Span,
 }
 
 impl fmt::Display for RuntimeError {
@@ -483,6 +491,7 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -705,6 +714,49 @@ mod tests {
         let error = block_on(Runtime::default().execute(&failing))
             .expect_err("false assertion should fail");
         assert_eq!(error.message, "assertion failed");
+    }
+
+    #[test]
+    fn collects_test_assertions_and_preserves_earlier_failures_on_runtime_error() {
+        let syntax = parse(
+            "test(\"checks\") { assert(false, \"first failure\") assert(true) assert(false, \"second failure\") }",
+        )
+        .expect("test should parse");
+        let plan = compile(&syntax).expect("test should compile");
+        let error = block_on(Runtime::default().execute_selected(&plan, 0, Vec::new()))
+            .expect_err("test should fail");
+        assert!(error.assertion_only);
+        assert_eq!(error.message, "2 assertions failed");
+        assert_eq!(error.assertions.len(), 2);
+        assert_eq!(error.assertions[0].message, "first failure");
+        assert_eq!(error.assertions[1].message, "second failure");
+
+        let syntax = parse(
+            "test(\"checks\") { assert(false, \"first failure\") value = env(\"METTLE_MISSING\") assert(false, \"unreached\") }",
+        )
+        .expect("test should parse");
+        let plan = compile(&syntax).expect("test should compile");
+        let runtime = Runtime::default().with_environment(Arc::new(HashMap::new()));
+        let error = block_on(runtime.execute_selected(&plan, 0, Vec::new()))
+            .expect_err("missing environment should stop the test");
+        assert!(!error.assertion_only);
+        assert!(error.message.contains("METTLE_MISSING"));
+        assert_eq!(error.assertions.len(), 1);
+        assert_eq!(error.assertions[0].message, "first failure");
+    }
+
+    #[test]
+    fn assertion_messages_interpolate_values_only_when_the_assertion_fails() {
+        let syntax = parse(
+            "test(\"messages\") { expected = 200 assert(true, \"missing ${UNSET_VALUE}\") assert(false, \"expected ${expected}\") }",
+        )
+        .expect("test should parse");
+        let plan = compile(&syntax).expect("test should compile");
+        let runtime = Runtime::default().with_environment(Arc::new(HashMap::new()));
+        let error = block_on(runtime.execute_selected(&plan, 0, Vec::new()))
+            .expect_err("second assertion should fail");
+        assert_eq!(error.assertions.len(), 1);
+        assert_eq!(error.assertions[0].message, "expected 200");
     }
 
     #[test]

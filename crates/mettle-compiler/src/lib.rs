@@ -58,7 +58,10 @@ pub enum Instruction {
         expression: PlanExpression,
     },
     Evaluate(PlanExpression),
-    Assert(PlanExpression),
+    Assert {
+        condition: PlanExpression,
+        message: Option<PlanExpression>,
+    },
     Return(PlanExpression),
 }
 

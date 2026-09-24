@@ -69,7 +69,7 @@ the repository checkout:
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.13.0.vsix --force
+code --install-extension dist/mettle-language-0.14.0.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -145,8 +145,12 @@ mettle run checks.mettle --all
 ## Write executable tests
 
 Declare checks with `test("name") { ... }`. Tests have no parameters or return
-value, and a failed `assert(...)` fails that test without stopping the rest of
-the file. `mettle test <file>` runs tests declared in that file in source order;
+value. Use `assert(condition, "message")` to explain a failure; the message is
+optional and may interpolate values. A test collects false assertions and reports
+each one with its source location, then continues to the next test. A runtime
+error stops the current test but preserves any earlier assertion failures.
+Assertions inside ordinary flows still fail immediately. `mettle test <file>`
+runs tests declared in that file in source order;
 `mettle test <file> "test name"` or `mettle test <file> --line <line>` runs one test;
 `mettle run <file> --all` still runs only zero-argument flows. The test command
 exits nonzero when any test fails or the file has no tests, and supports `--verbose`, `--quiet`, and
@@ -157,8 +161,8 @@ flow getPost(id) = http.get("https://jsonplaceholder.typicode.com/posts/${id}")
 
 test("post 1 is available") {
     response = getPost(1)
-    assert(response.status == 200)
-    assert(response.json.id == 1)
+    assert(response.status == 200, "post 1 should return 200")
+    assert(response.json.id == 1, "post 1 should have ID 1")
 }
 ```
 
@@ -497,7 +501,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.13.0.vsix --force
+code --install-extension dist/mettle-language-0.14.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.

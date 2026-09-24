@@ -741,6 +741,26 @@ fn print_failure(
             );
             object.insert("status".to_owned(), serde_json::json!("failed"));
             object.remove("flow");
+            if !error.assertions.is_empty() {
+                let assertions = error
+                    .assertions
+                    .iter()
+                    .map(|assertion| {
+                        let source = project
+                            .sources
+                            .get(assertion.span.source)
+                            .unwrap_or_else(|| &project.sources[project.entry_source]);
+                        let (line, column) = source_location(&source.text, assertion.span.start);
+                        serde_json::json!({
+                            "message": assertion.message,
+                            "path": source.path,
+                            "line": line,
+                            "column": column,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                output["error"]["assertions"] = serde_json::json!(assertions);
+            }
         } else if options.all {
             output
                 .as_object_mut()
@@ -761,8 +781,23 @@ fn print_failure(
             plan.flows[flow_id].kind == DeclarationKind::Test
         )
     );
-    eprintln!("{}", render_diagnostic(project, &error.message, error.span));
-    if !error.flow_stack.is_empty() {
+    if !error.assertion_only {
+        eprintln!("{}", render_diagnostic(project, &error.message, error.span));
+    }
+    if !error.assertions.is_empty() {
+        eprintln!(
+            "{} assertion{} failed:",
+            error.assertions.len(),
+            if error.assertions.len() == 1 { "" } else { "s" }
+        );
+        for assertion in &error.assertions {
+            eprintln!(
+                "{}",
+                render_diagnostic(project, &assertion.message, assertion.span)
+            );
+        }
+    }
+    if !error.flow_stack.is_empty() && !error.assertion_only {
         eprintln!("flow stack: {}", error.flow_stack.join(" -> "));
     }
     Err(CliError::Failure)

@@ -551,6 +551,80 @@ fn tests_are_discovered_separately_and_continue_after_failure() {
 }
 
 #[test]
+fn test_reports_every_assertion_message_in_human_and_json_output() {
+    let path = source_file(
+        "test(\"checks\") {\n    assert(false, \"status should be 200\")\n    assert(true)\n    assert(false, \"body should contain an ID\")\n}\n",
+    );
+    let human = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .output()
+        .expect("test should start");
+    let json = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .args(["--output", "json"])
+        .output()
+        .expect("test should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!human.status.success(), "{human:?}");
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("2 assertions failed:"), "{stderr}");
+    assert!(stderr.contains("status should be 200"), "{stderr}");
+    assert!(stderr.contains("body should contain an ID"), "{stderr}");
+    assert!(stderr.contains(":2:"), "{stderr}");
+    assert!(stderr.contains(":4:"), "{stderr}");
+
+    assert!(!json.status.success(), "{json:?}");
+    let records = String::from_utf8_lossy(&json.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[1]["status"], "failed");
+    assert_eq!(records[1]["error"]["message"], "2 assertions failed");
+    assert_eq!(
+        records[1]["error"]["assertions"][0]["message"],
+        "status should be 200"
+    );
+    assert_eq!(records[1]["error"]["assertions"][0]["line"], 2);
+    assert_eq!(
+        records[1]["error"]["assertions"][1]["message"],
+        "body should contain an ID"
+    );
+    assert_eq!(records[1]["error"]["assertions"][1]["line"], 4);
+    assert_eq!(records[2]["failed"], 1);
+}
+
+#[test]
+fn assertion_messages_redact_secret_interpolation() {
+    let path = source_file(
+        "use context { token: senv(\"METTLE_ASSERTION_MESSAGE_SECRET\") }\ntest(\"secret message\") { assert(false, \"token ${token}\") }\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .args(["--output", "json"])
+        .env("METTLE_ASSERTION_MESSAGE_SECRET", "never-print-this")
+        .output()
+        .expect("test should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("never-print-this"), "{stdout}");
+    let records = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON record"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        records[1]["error"]["assertions"][0]["message"],
+        "[REDACTED]"
+    );
+}
+
+#[test]
 fn test_command_only_executes_tests_in_selected_file() {
     let directory = project_directory();
     fs::write(directory.join("mettle.toml"), "name = \"tests\"\n")

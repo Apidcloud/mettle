@@ -155,10 +155,22 @@ impl<'a> DefinitionFinder<'a> {
                     }
                     locals.insert(name.value.clone(), name.span);
                 }
-                Statement::Return { expression, .. }
-                | Statement::Assert { expression, .. }
-                | Statement::Expression(expression) => {
+                Statement::Return { expression, .. } | Statement::Expression(expression) => {
                     if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                        return Some(target);
+                    }
+                }
+                Statement::Assert {
+                    expression,
+                    message,
+                    ..
+                } => {
+                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                        return Some(target);
+                    }
+                    if let Some(message) = message
+                        && let Some(target) = self.find_in_expression(message, &locals, Some(flow))
+                    {
                         return Some(target);
                     }
                 }

@@ -117,9 +117,20 @@ fn set_statement_source(statement: &mut Statement, source: usize) {
             name.span = name.span.with_source(source);
             *span = span.with_source(source);
         }
-        Statement::Return { expression, span } | Statement::Assert { expression, span } => {
+        Statement::Return { expression, span } => {
             *span = span.with_source(source);
             set_expression_source(expression, source);
+        }
+        Statement::Assert {
+            expression,
+            message,
+            span,
+        } => {
+            *span = span.with_source(source);
+            set_expression_source(expression, source);
+            if let Some(message) = message {
+                set_expression_source(message, source);
+            }
         }
         Statement::Expression(expression) => set_expression_source(expression, source),
     }
@@ -305,6 +316,7 @@ pub enum Statement {
     },
     Assert {
         expression: Expression,
+        message: Option<Expression>,
         span: Span,
     },
     Expression(Expression),
@@ -757,6 +769,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parses_assertion_messages_and_rejects_non_literals() {
+        let program = parse("test(\"checks\") { assert(false, \"expected a response\") }")
+            .expect("assertion message should parse");
+        let Statement::Assert {
+            message: Some(message),
+            ..
+        } = &program.flows[0].body[0]
+        else {
+            panic!("expected a message-bearing assertion");
+        };
+        assert!(matches!(message.kind, ExpressionKind::String(_)));
+
+        let error = parse("test(\"checks\") { assert(false, 123) }")
+            .expect_err("non-string assertion message should be rejected");
+        assert_eq!(error.message, "assertion message must be a string literal");
     }
 
     #[test]

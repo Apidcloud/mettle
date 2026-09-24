@@ -1,13 +1,13 @@
 //! Flow execution and runtime orchestration.
 
 use super::{
-    ActiveContext, ActiveIteration, Arc, Capability, Clock, Constant, ContextPlan, DeclarationKind,
-    Duration, ExecutionObserver, ExecutionPlan, Future, HashMap, Instant, Instruction,
-    MAX_CALL_DEPTH, MettlePlan, NoopObserver, Object, OperationEvent, Pin, PlanExpression,
-    PlanExpressionKind, PlanField, Poll, RateSettings, RuntimeError, Span, StringPart, TokioClock,
-    Value, WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL, WorkloadEvent, WorkloadMetrics,
-    WorkloadPhase, WorkloadPolicy, cooperative_yield, evaluate_binary, format_duration,
-    process_environment,
+    ActiveContext, ActiveIteration, Arc, AssertionFailure, Capability, Clock, Constant,
+    ContextPlan, DeclarationKind, Duration, ExecutionObserver, ExecutionPlan, Future, HashMap,
+    Instant, Instruction, MAX_CALL_DEPTH, MettlePlan, NoopObserver, Object, OperationEvent, Pin,
+    PlanExpression, PlanExpressionKind, PlanField, Poll, RateSettings, RuntimeError, Span,
+    StringPart, TokioClock, Value, WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL,
+    WorkloadEvent, WorkloadMetrics, WorkloadPhase, WorkloadPolicy, cooperative_yield,
+    evaluate_binary, format_duration, process_environment,
 };
 
 pub struct Runtime {
@@ -70,6 +70,8 @@ impl Runtime {
                 message: "execution requires an explicitly selected flow".to_owned(),
                 span: Span::default(),
                 flow_stack: Vec::new(),
+                assertions: Vec::new(),
+                assertion_only: false,
             });
         };
         self.execute_selected(plan, flow, Vec::new()).await
@@ -107,6 +109,8 @@ impl Runtime {
                 message: "execution plan and runtime have different capability sets".to_owned(),
                 span: Span::default(),
                 flow_stack: Vec::new(),
+                assertions: Vec::new(),
+                assertion_only: false,
             });
         }
         for (expected, actual) in plan.capability_names.iter().zip(&self.capabilities) {
@@ -118,6 +122,8 @@ impl Runtime {
                     ),
                     span: Span::default(),
                     flow_stack: Vec::new(),
+                    assertions: Vec::new(),
+                    assertion_only: false,
                 });
             }
         }
@@ -242,6 +248,7 @@ impl Executor<'_> {
         context: ActiveContext,
     ) -> Result<Value, RuntimeError> {
         let mut locals = vec![None; flow.local_count];
+        let mut assertions = Vec::new();
         for (slot, argument) in arguments.into_iter().enumerate() {
             locals[slot] = Some(argument);
         }
@@ -249,43 +256,61 @@ impl Executor<'_> {
         for instruction in &flow.instructions {
             match instruction {
                 Instruction::Bind { slot, expression } => {
-                    let value = self.evaluate(expression, &locals, &context).await?;
+                    let value = self
+                        .evaluate(expression, &locals, &context)
+                        .await
+                        .map_err(|error| error.with_assertions(&assertions))?;
                     let Some(destination) = locals.get_mut(*slot) else {
-                        return Err(self.error(
-                            "execution plan references an invalid local slot",
-                            expression.span,
-                        ));
+                        return Err(self
+                            .error(
+                                "execution plan references an invalid local slot",
+                                expression.span,
+                            )
+                            .with_assertions(&assertions));
                     };
                     *destination = Some(value);
                 }
                 Instruction::Evaluate(expression) => {
-                    self.evaluate(expression, &locals, &context).await?;
+                    self.evaluate(expression, &locals, &context)
+                        .await
+                        .map_err(|error| error.with_assertions(&assertions))?;
                 }
-                Instruction::Assert(expression) => {
-                    let value = self.evaluate(expression, &locals, &context).await?;
-                    match value.revealed() {
-                        Value::Boolean(true) => {}
-                        Value::Boolean(false) => {
-                            return Err(self.error("assertion failed", expression.span));
-                        }
-                        _ => {
-                            return Err(self.error(
-                                format!(
-                                    "assertion produced {}, expected boolean",
-                                    value.type_name()
-                                ),
-                                expression.span,
-                            ));
-                        }
+                Instruction::Assert { condition, message } => {
+                    if let Some(failure) = self
+                        .evaluate_assertion(
+                            condition,
+                            message.as_ref(),
+                            &locals,
+                            &context,
+                            flow.kind == DeclarationKind::Test,
+                        )
+                        .await
+                        .map_err(|error| error.with_assertions(&assertions))?
+                    {
+                        assertions.push(failure);
                     }
                 }
                 Instruction::Return(expression) => {
-                    return self.evaluate(expression, &locals, &context).await;
+                    return self
+                        .evaluate(expression, &locals, &context)
+                        .await
+                        .map_err(|error| error.with_assertions(&assertions));
                 }
             }
         }
 
         if flow.kind == DeclarationKind::Test {
+            if let Some(first) = assertions.first() {
+                let message = if assertions.len() == 1 {
+                    first.message.clone()
+                } else {
+                    format!("{} assertions failed", assertions.len())
+                };
+                let mut error = self.error(message, first.span);
+                error.assertions = assertions;
+                error.assertion_only = true;
+                return Err(error);
+            }
             return Ok(Value::Null);
         }
         Err(self.error(
@@ -295,6 +320,50 @@ impl Executor<'_> {
             ),
             Span::default(),
         ))
+    }
+
+    async fn evaluate_assertion(
+        &mut self,
+        condition: &PlanExpression,
+        message: Option<&PlanExpression>,
+        locals: &[Option<Value>],
+        context: &ActiveContext,
+        collect: bool,
+    ) -> Result<Option<AssertionFailure>, RuntimeError> {
+        let value = self.evaluate(condition, locals, context).await?;
+        match value.revealed() {
+            Value::Boolean(true) => Ok(None),
+            Value::Boolean(false) => {
+                let message = if let Some(message) = message {
+                    let value = self.evaluate(message, locals, context).await?;
+                    match value.revealed() {
+                        Value::String(_) if value.is_sensitive() => "[REDACTED]".to_owned(),
+                        Value::String(text) => text.clone(),
+                        _ => {
+                            return Err(self.error(
+                                "assertion message produced a non-string value",
+                                message.span,
+                            ));
+                        }
+                    }
+                } else {
+                    "assertion failed".to_owned()
+                };
+                let error = self.error(message, condition.span);
+                if collect {
+                    Ok(Some(AssertionFailure {
+                        message: error.message,
+                        span: condition.span,
+                    }))
+                } else {
+                    Err(error)
+                }
+            }
+            _ => Err(self.error(
+                format!("assertion produced {}, expected boolean", value.type_name()),
+                condition.span,
+            )),
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -961,6 +1030,15 @@ impl Executor<'_> {
             message,
             span,
             flow_stack: self.flow_stack.clone(),
+            assertions: Vec::new(),
+            assertion_only: false,
         }
+    }
+}
+
+impl RuntimeError {
+    fn with_assertions(mut self, assertions: &[AssertionFailure]) -> Self {
+        self.assertions.extend_from_slice(assertions);
+        self
     }
 }

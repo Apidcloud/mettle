@@ -307,9 +307,22 @@ impl Parser {
             let start = self.advance().span;
             self.take(&TokenKind::LeftParen)?;
             let expression = self.parse_expression()?;
+            let message = if self.take_if(&TokenKind::Comma) {
+                let message = self.parse_expression()?;
+                if !matches!(message.kind, ExpressionKind::String(_)) {
+                    return Err(SyntaxError::new(
+                        "assertion message must be a string literal",
+                        message.span,
+                    ));
+                }
+                Some(message)
+            } else {
+                None
+            };
             let end = self.take(&TokenKind::RightParen)?.span;
             return Ok(Statement::Assert {
                 expression,
+                message,
                 span: start.join(end),
             });
         }
