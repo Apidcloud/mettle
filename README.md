@@ -69,7 +69,7 @@ the repository checkout:
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.14.0.vsix --force
+code --install-extension dist/mettle-language-0.15.0.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -211,6 +211,27 @@ mettle run examples/http.mettle
 
 An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, `url`, and `duration`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious. Header names containing punctuation use string-key access, such as `response.headers["content-type"]`.
 
+## Make decisions and select values
+
+Use `if (condition) { ... }`, optional `else if (condition) { ... }`, and optional `else { ... }` in flows and tests. Conditions must be booleans. `not` binds before comparisons, comparisons before `and`, and `and` before `or`; parentheses group explicitly. `and` and `or` short-circuit, so a skipped side does no I/O or environment lookup. A flow may return from every branch instead of ending with a separate `return`. Bindings declared inside a branch are visible only in that branch.
+
+```mettle
+flow label(users, position) {
+    user = users[position]
+    if (user.active and not user.disabled) {
+        return user.name
+    } else if (user.active == false) {
+        return "inactive"
+    } else {
+        return "disabled"
+    }
+}
+```
+
+`array[0]` is zero-based; `object["key"]` and `object[keyExpression]` select string keys. Array indexes must be non-negative integers. Invalid key types, missing keys, and out-of-range positions report runtime errors. Dot access remains convenient for identifier-style object keys.
+
+Separate statements with newlines. Object and context fields, and `parallel` branches, may use either newlines or commas; same-line entries need commas. Arrays and call arguments always use commas. Execution-policy bodies still contain exactly one expression: put multi-step work in a helper flow and call it from the policy. Try the complete network-free [language example](examples/language-refinements.mettle) with `mettle run examples/language-refinements.mettle` and `mettle test examples/language-refinements.mettle`.
+
 ## Put shared setup in contexts
 
 Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. A file-level `use context` applies a default to every flow and test in that source file, regardless of where the directive appears; placing it near the top is the recommended convention. For one-file setup, use an anonymous `use context { ... }`. Name it with `use context name { ... }` only when it should also be reusable. Plain `context name { ... }` remains reusable without applying itself. A flow-level context overrides the file default. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
@@ -287,12 +308,13 @@ variables. Outside these allowlisted examples, `.env` files are Git-ignored.
 Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. Mettle currently implements `within`, `retry`, bounded `parallel`, `rate`, and fixed `concurrency`:
 
 ```mettle
-flow probe(path) {
-    response = retry(attempts: 3, delay: 100ms) {
-        http.get("https://jsonplaceholder.typicode.com${path}")
-    }
+flow fetchStatus(path) {
+    response = http.get("https://jsonplaceholder.typicode.com${path}")
+    assert(response.status == 200)
     return response.status
 }
+
+flow probe(path) = retry(attempts: 3, delay: 100ms) { fetchStatus(path) }
 
 flow readiness() {
     return within(timeout: 5s) {
@@ -425,11 +447,12 @@ Mettle validates options during `mettle check`, before it opens a connection.
 
 `json` and `body` are mutually exclusive and Mettle rejects the combination during compilation. An explicit `Content-Type` used with `json` must be `application/json` or a media type ending in `+json`. A response that declares one of those media types but contains malformed JSON fails with a clear protocol error. The response size limit is enforced from `Content-Length` when available and while streaming the body.
 
-External data does not have to use Mettle identifier names. Use a quoted key after brackets for HTTP headers or JSON properties containing punctuation:
+External data does not have to use Mettle identifier names. Use a quoted or computed string key after brackets for HTTP headers or JSON properties containing punctuation:
 
 ```mettle
 requestId = response.headers["x-request-id"]
 displayName = response.json["display-name"]
+firstRole = response.json.roles[0]
 ```
 
 HTTPS certificate and hostname validation is enabled by default. A controlled test system with an intentionally untrusted certificate can opt out explicitly:
@@ -501,7 +524,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.14.0.vsix --force
+code --install-extension dist/mettle-language-0.15.0.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.

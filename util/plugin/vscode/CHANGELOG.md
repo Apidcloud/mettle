@@ -1,5 +1,11 @@
 # Change Log
 
+## 0.15.0
+
+- Highlight `if`, `else`, `and`, `or`, and `not`; add a conditional snippet.
+- Stop highlighting unsupported `data`, `race`, and `repeat` as language constructs.
+- Document explicit statement and field separators, indexing, and short-circuit conditions.
+
 ## 0.14.0
 
 - Add an assertion-with-message snippet for the new test failure reporting syntax.

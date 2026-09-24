@@ -53,6 +53,10 @@ pub struct MettlePlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
+    If {
+        branches: Vec<ConditionalBranch>,
+        else_body: Option<Vec<Instruction>>,
+    },
     Bind {
         slot: usize,
         expression: PlanExpression,
@@ -63,6 +67,12 @@ pub enum Instruction {
         message: Option<PlanExpression>,
     },
     Return(PlanExpression),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConditionalBranch {
+    pub condition: PlanExpression,
+    pub instructions: Vec<Instruction>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +95,11 @@ pub enum PlanExpressionKind {
         value: Box<PlanExpression>,
         member: String,
     },
+    Index {
+        value: Box<PlanExpression>,
+        index: Box<PlanExpression>,
+    },
+    Not(Box<PlanExpression>),
     Binary {
         left: Box<PlanExpression>,
         operator: BinaryOperator,
@@ -453,7 +468,7 @@ mod tests {
     #[test]
     fn rejects_mutually_exclusive_operation_options() {
         let messages =
-            http_errors(r#"flow main() = http.post("/") { json: { ok: true } body: "no" }"#);
+            http_errors(r#"flow main() = http.post("/") { json: { ok: true }, body: "no" }"#);
         assert!(
             messages
                 .iter()
@@ -467,7 +482,7 @@ mod tests {
             r#"
             context api {
                 apiUrl: env("API_URL")
-                defaults http { baseUrl: apiUrl timeout: 1s }
+                defaults http { baseUrl: apiUrl, timeout: 1s }
             }
             flow main() {
                 use context api
@@ -545,6 +560,31 @@ mod tests {
                 .expect("source should parse");
         let plan = compile(&program).expect("program should compile");
         assert_eq!(plan.default_flow, Some(1));
+    }
+
+    #[test]
+    fn conditional_returns_are_exhaustive_and_branch_bindings_stay_local() {
+        let program = parse("flow main() { if (true) { return 1 } else { return 2 } }")
+            .expect("source should parse");
+        compile(&program).expect("both branches return");
+        let messages = errors("flow main() { if (true) { return 1 } }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("must end with a return"))
+        );
+        let messages = errors("flow main() { if (true) { value = 1 }\n return value }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("value") && message.contains("defined"))
+        );
+        let messages = errors("flow main() { if (1) { return 1 } else { return 2 } }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message == "if condition must be boolean")
+        );
     }
 
     #[test]
@@ -667,7 +707,7 @@ mod tests {
             flow second() = 2
             flow main() = within(timeout: 2s) {
                 retry(attempts: 3, delay: 10ms) {
-                    parallel(limit: 1) { first() second() }
+                    parallel(limit: 1) { first(), second() }
                 }
             }
             ",

@@ -485,7 +485,10 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
         BinaryOperator::LessEqual => ordering.is_le(),
         BinaryOperator::Greater => ordering.is_gt(),
         BinaryOperator::GreaterEqual => ordering.is_ge(),
-        BinaryOperator::Equal | BinaryOperator::NotEqual => unreachable!(),
+        BinaryOperator::Equal
+        | BinaryOperator::NotEqual
+        | BinaryOperator::And
+        | BinaryOperator::Or => unreachable!(),
     })
 }
 
@@ -709,7 +712,7 @@ mod tests {
         );
 
         let failing =
-            parse("flow main() { assert(false) return null }").expect("program should parse");
+            parse("flow main() { assert(false)\n return null }").expect("program should parse");
         let failing = compile(&failing).expect("program should compile");
         let error = block_on(Runtime::default().execute(&failing))
             .expect_err("false assertion should fail");
@@ -717,9 +720,73 @@ mod tests {
     }
 
     #[test]
+    fn conditionals_short_circuit_and_index_objects_and_arrays() {
+        let syntax = parse(
+            r#"
+            flow main() {
+                values = [{ name: "Ada" }, { name: "Lin" }]
+                if (false and env("MISSING") == "x") { return "bad" }
+                else if (true or env("MISSING") == "x") {
+                    selected = values[1]["name"]
+                    if (not false and selected == "Lin") { return values[0].name }
+                    else { return "bad" }
+                } else { return "bad" }
+            }
+        "#,
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let runtime = Runtime::default().with_environment(Arc::new(HashMap::new()));
+        assert_eq!(
+            block_on(runtime.execute(&plan)).expect("flow should run"),
+            Value::String("Ada".to_owned())
+        );
+    }
+
+    #[test]
+    fn indexing_and_conditions_report_runtime_type_errors() {
+        for (source, expected) in [
+            ("flow main() = [1][2]", "out of range"),
+            (
+                "flow main() = { key: 1 }[0]",
+                "object index must be a string",
+            ),
+        ] {
+            let syntax = parse(source).expect("source should parse");
+            let plan = compile(&syntax).expect("source should compile");
+            let error = block_on(Runtime::default().execute(&plan))
+                .expect_err("source should fail at runtime");
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+        let syntax = parse("flow main(flag) { if (flag) { return true } else { return false } }")
+            .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let error = block_on(Runtime::default().execute_selected(
+            &plan,
+            0,
+            vec![Value::String("true".to_owned())],
+        ))
+        .expect_err("string is not a boolean");
+        assert!(
+            error.message.contains("expected boolean"),
+            "{}",
+            error.message
+        );
+
+        let syntax = parse("flow main() = { name: \"Ada\" }[secret(\"name\")]")
+            .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let value = block_on(Runtime::default().execute(&plan)).expect("flow should run");
+        assert!(
+            value.is_sensitive(),
+            "a sensitive key should taint its selection"
+        );
+    }
+
+    #[test]
     fn collects_test_assertions_and_preserves_earlier_failures_on_runtime_error() {
         let syntax = parse(
-            "test(\"checks\") { assert(false, \"first failure\") assert(true) assert(false, \"second failure\") }",
+            "test(\"checks\") { assert(false, \"first failure\")\n assert(true)\n assert(false, \"second failure\") }",
         )
         .expect("test should parse");
         let plan = compile(&syntax).expect("test should compile");
@@ -732,7 +799,7 @@ mod tests {
         assert_eq!(error.assertions[1].message, "second failure");
 
         let syntax = parse(
-            "test(\"checks\") { assert(false, \"first failure\") value = env(\"METTLE_MISSING\") assert(false, \"unreached\") }",
+            "test(\"checks\") { assert(false, \"first failure\")\n value = env(\"METTLE_MISSING\")\n assert(false, \"unreached\") }",
         )
         .expect("test should parse");
         let plan = compile(&syntax).expect("test should compile");
@@ -748,7 +815,7 @@ mod tests {
     #[test]
     fn assertion_messages_interpolate_values_only_when_the_assertion_fails() {
         let syntax = parse(
-            "test(\"messages\") { expected = 200 assert(true, \"missing ${UNSET_VALUE}\") assert(false, \"expected ${expected}\") }",
+            "test(\"messages\") { expected = 200\n assert(true, \"missing ${UNSET_VALUE}\")\n assert(false, \"expected ${expected}\") }",
         )
         .expect("test should parse");
         let plan = compile(&syntax).expect("test should compile");
@@ -788,7 +855,7 @@ mod tests {
             flow first() = 1
             flow second() = 2
             flow third() = 3
-            flow main() = parallel(limit: 2) { third() first() second() }
+            flow main() = parallel(limit: 2) { third(), first(), second() }
             ",
         )
         .expect("source should parse");
@@ -844,7 +911,7 @@ mod tests {
     fn parallel_admission_never_exceeds_its_limit() {
         let branches = std::iter::repeat_n("probe.wait()", 100)
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(", ");
         let syntax = parse(&format!(
             "flow main() = parallel(limit: 7) {{ {branches} }}"
         ))
@@ -865,7 +932,7 @@ mod tests {
     fn failed_parallel_branch_cancels_and_joins_its_siblings() {
         let variable = format!("METTLE_PARALLEL_MISSING_{}", std::process::id());
         let syntax = parse(&format!(
-            "flow main() = parallel() {{ probe.wait() env(\"{variable}\") }}"
+            "flow main() = parallel() {{ probe.wait(), env(\"{variable}\") }}"
         ))
         .expect("source should parse");
         let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");

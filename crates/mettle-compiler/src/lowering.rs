@@ -472,101 +472,16 @@ impl<'a> Compiler<'a> {
         }
         let active_context = contexts.first().copied();
 
-        let mut instructions = Vec::new();
-        let mut returned = false;
-        for statement in &flow.body {
-            if matches!(statement, Statement::UseContext { .. }) {
-                continue;
-            }
-            if returned {
-                self.errors.push(CompileError::new(
-                    "statement is unreachable because the flow already returned",
-                    statement.span(),
-                ));
-                continue;
-            }
-
-            match statement {
-                Statement::Bind {
-                    name, expression, ..
-                } => {
-                    if locals.contains_key(&name.value) {
-                        self.errors.push(CompileError::new(
-                            format!("name `{}` is already defined in this flow", name.value),
-                            name.span,
-                        ));
-                        continue;
-                    }
-                    let expression =
-                        self.compile_expression(Some(flow_id), expression, &locals, active_context);
-                    let slot = locals.len();
-                    locals.insert(name.value.clone(), slot);
-                    if let Some(expression) = expression {
-                        instructions.push(Instruction::Bind { slot, expression });
-                    }
-                }
-                Statement::Expression(expression) => {
-                    if let Some(expression) =
-                        self.compile_expression(Some(flow_id), expression, &locals, active_context)
-                    {
-                        instructions.push(Instruction::Evaluate(expression));
-                    }
-                }
-                Statement::Return { expression, .. } => {
-                    if flow.kind == DeclarationKind::Test {
-                        self.errors.push(CompileError::new(
-                            "`return` is not allowed in a test",
-                            statement.span(),
-                        ));
-                        continue;
-                    }
-                    if let Some(expression) =
-                        self.compile_expression(Some(flow_id), expression, &locals, active_context)
-                    {
-                        instructions.push(Instruction::Return(expression));
-                    }
-                    returned = true;
-                }
-                Statement::Assert {
-                    expression,
-                    message,
-                    ..
-                } => {
-                    if let Some(expression) =
-                        self.compile_expression(Some(flow_id), expression, &locals, active_context)
-                    {
-                        if !matches!(
-                            expression.value_type,
-                            ValueType::Boolean | ValueType::Inferred
-                        ) {
-                            self.errors.push(CompileError::new(
-                                "assertion expression must be boolean",
-                                expression.span,
-                            ));
-                        }
-                        let message = message.as_ref().and_then(|message| {
-                            self.compile_expression(Some(flow_id), message, &locals, active_context)
-                        });
-                        if let Some(message) = &message
-                            && !matches!(
-                                message.value_type,
-                                ValueType::String | ValueType::Inferred
-                            )
-                        {
-                            self.errors.push(CompileError::new(
-                                "assertion message must be a string",
-                                message.span,
-                            ));
-                        }
-                        instructions.push(Instruction::Assert {
-                            condition: expression,
-                            message,
-                        });
-                    }
-                }
-                Statement::UseContext { .. } => unreachable!("context statements were skipped"),
-            }
-        }
+        let mut next_slot = locals.len();
+        let (instructions, returned) = self.compile_statements(
+            flow_id,
+            flow,
+            &flow.body,
+            &mut locals,
+            &mut next_slot,
+            active_context,
+            true,
+        );
 
         if !returned && flow.kind == DeclarationKind::Flow {
             let display_name = flow_display_name(flow, flow_id);
@@ -590,12 +505,187 @@ impl<'a> Compiler<'a> {
                 .map(|parameter| parameter.value.clone())
                 .collect(),
             span: flow.span,
-            local_count: locals.len(),
+            local_count: next_slot,
             contexts,
             instructions,
         }
     }
 
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn compile_statements(
+        &mut self,
+        flow_id: usize,
+        flow: &MettleDecl,
+        statements: &[Statement],
+        locals: &mut HashMap<String, usize>,
+        next_slot: &mut usize,
+        active_context: Option<usize>,
+        top_level: bool,
+    ) -> (Vec<Instruction>, bool) {
+        let mut instructions = Vec::new();
+        let mut returned = false;
+        for statement in statements {
+            if returned {
+                self.errors.push(CompileError::new(
+                    "statement is unreachable because the flow already returned",
+                    statement.span(),
+                ));
+                continue;
+            }
+            match statement {
+                Statement::UseContext { span, .. } => {
+                    if !top_level {
+                        self.errors.push(CompileError::new(
+                            "`use context` is only allowed at flow entry",
+                            *span,
+                        ));
+                    }
+                }
+                Statement::Bind {
+                    name, expression, ..
+                } => {
+                    if locals.contains_key(&name.value) {
+                        self.errors.push(CompileError::new(
+                            format!("name `{}` is already defined in this flow", name.value),
+                            name.span,
+                        ));
+                        continue;
+                    }
+                    let expression =
+                        self.compile_expression(Some(flow_id), expression, locals, active_context);
+                    let slot = *next_slot;
+                    *next_slot += 1;
+                    locals.insert(name.value.clone(), slot);
+                    if let Some(expression) = expression {
+                        instructions.push(Instruction::Bind { slot, expression });
+                    }
+                }
+                Statement::Expression(expression) => {
+                    if let Some(expression) =
+                        self.compile_expression(Some(flow_id), expression, locals, active_context)
+                    {
+                        instructions.push(Instruction::Evaluate(expression));
+                    }
+                }
+                Statement::Return { expression, .. } => {
+                    if flow.kind == DeclarationKind::Test {
+                        self.errors.push(CompileError::new(
+                            "`return` is not allowed in a test",
+                            statement.span(),
+                        ));
+                        continue;
+                    }
+                    if let Some(expression) =
+                        self.compile_expression(Some(flow_id), expression, locals, active_context)
+                    {
+                        instructions.push(Instruction::Return(expression));
+                    }
+                    returned = true;
+                }
+                Statement::Assert {
+                    expression,
+                    message,
+                    ..
+                } => {
+                    if let Some(expression) =
+                        self.compile_expression(Some(flow_id), expression, locals, active_context)
+                    {
+                        if !matches!(
+                            expression.value_type,
+                            ValueType::Boolean | ValueType::Inferred
+                        ) {
+                            self.errors.push(CompileError::new(
+                                "assertion expression must be boolean",
+                                expression.span,
+                            ));
+                        }
+                        let message = message.as_ref().and_then(|message| {
+                            self.compile_expression(Some(flow_id), message, locals, active_context)
+                        });
+                        if let Some(message) = &message
+                            && !matches!(
+                                message.value_type,
+                                ValueType::String | ValueType::Inferred
+                            )
+                        {
+                            self.errors.push(CompileError::new(
+                                "assertion message must be a string",
+                                message.span,
+                            ));
+                        }
+                        instructions.push(Instruction::Assert {
+                            condition: expression,
+                            message,
+                        });
+                    }
+                }
+                Statement::If {
+                    branches,
+                    else_body,
+                    ..
+                } => {
+                    let mut lowered = Vec::new();
+                    let mut all_returned = true;
+                    for branch in branches {
+                        let condition = self.compile_expression(
+                            Some(flow_id),
+                            &branch.condition,
+                            locals,
+                            active_context,
+                        );
+                        if let Some(condition) = &condition
+                            && !matches!(
+                                condition.value_type,
+                                ValueType::Boolean | ValueType::Inferred
+                            )
+                        {
+                            self.errors.push(CompileError::new(
+                                "if condition must be boolean",
+                                condition.span,
+                            ));
+                        }
+                        let (body, branch_returned) = self.compile_statements(
+                            flow_id,
+                            flow,
+                            &branch.body,
+                            &mut locals.clone(),
+                            next_slot,
+                            active_context,
+                            false,
+                        );
+                        all_returned &= branch_returned;
+                        if let Some(condition) = condition {
+                            lowered.push(super::ConditionalBranch {
+                                condition,
+                                instructions: body,
+                            });
+                        }
+                    }
+                    let else_instructions = else_body.as_ref().map(|body| {
+                        let (instructions, branch_returned) = self.compile_statements(
+                            flow_id,
+                            flow,
+                            body,
+                            &mut locals.clone(),
+                            next_slot,
+                            active_context,
+                            false,
+                        );
+                        all_returned &= branch_returned;
+                        instructions
+                    });
+                    returned = all_returned && else_instructions.is_some();
+                    instructions.push(Instruction::If {
+                        branches: lowered,
+                        else_body: else_instructions,
+                    });
+                }
+            }
+        }
+        (instructions, returned)
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn compile_expression(
         &mut self,
         current_flow: Option<usize>,
@@ -653,6 +743,34 @@ impl<'a> Compiler<'a> {
                     ValueType::Inferred,
                 )
             }
+            ExpressionKind::Index { value, index } => {
+                let value = self.compile_expression(current_flow, value, locals, context)?;
+                let index = self.compile_expression(current_flow, index, locals, context)?;
+                if !matches!(
+                    index.value_type,
+                    ValueType::String | ValueType::Integer | ValueType::Inferred
+                ) {
+                    self.errors.push(CompileError::new(
+                        "index must be a string key or integer position",
+                        index.span,
+                    ));
+                }
+                (
+                    PlanExpressionKind::Index {
+                        value: Box::new(value),
+                        index: Box::new(index),
+                    },
+                    ValueType::Inferred,
+                )
+            }
+            ExpressionKind::Not(value) => {
+                let value = self.compile_expression(current_flow, value, locals, context)?;
+                if !matches!(value.value_type, ValueType::Boolean | ValueType::Inferred) {
+                    self.errors
+                        .push(CompileError::new("`not` requires a boolean", value.span));
+                }
+                (PlanExpressionKind::Not(Box::new(value)), ValueType::Boolean)
+            }
             ExpressionKind::Binary {
                 left,
                 operator,
@@ -660,6 +778,19 @@ impl<'a> Compiler<'a> {
             } => {
                 let left = self.compile_expression(current_flow, left, locals, context)?;
                 let right = self.compile_expression(current_flow, right, locals, context)?;
+                if matches!(
+                    operator,
+                    super::BinaryOperator::And | super::BinaryOperator::Or
+                ) {
+                    for value in [&left, &right] {
+                        if !matches!(value.value_type, ValueType::Boolean | ValueType::Inferred) {
+                            self.errors.push(CompileError::new(
+                                "logical operators require booleans",
+                                value.span,
+                            ));
+                        }
+                    }
+                }
                 (
                     PlanExpressionKind::Binary {
                         left: Box::new(left),

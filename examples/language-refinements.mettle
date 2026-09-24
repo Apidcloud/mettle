@@ -1,0 +1,25 @@
+// Pure, network-free examples of conditionals, boolean logic, and indexing.
+flow chooseUser(users, position) {
+    user = users[position]
+    if (user.active and not user.disabled) {
+        return user.name
+    } else if (user.active == false) {
+        return "inactive"
+    } else {
+        return "disabled"
+    }
+}
+
+flow main() {
+    users = [
+        { name: "Ada", active: true, disabled: false },
+        { name: "Lin", active: false, disabled: false }
+    ]
+    return chooseUser(users, 0)
+}
+
+test("selects an active user") {
+    users = [{ name: "Ada", active: true, disabled: false }]
+    assert(chooseUser(users, 0) == "Ada")
+    assert(users[0]["name"] == "Ada")
+}

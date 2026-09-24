@@ -92,13 +92,6 @@
             "1": { "name": "storage.type.namespace.mettle" },
             "3": { "name": "entity.name.namespace.mettle" }
           }
-        },
-        {
-          "match": "\\b(data)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
-          "captures": {
-            "1": { "name": "storage.type.mettle" },
-            "3": { "name": "entity.name.variable.mettle" }
-          }
         }
       ]
     },
@@ -124,7 +117,11 @@
       "patterns": [
         {
           "name": "keyword.control.mettle",
-          "match": "\\b(?:return|assert|concurrency|parallel|race|rate|repeat|retry|within)\\b"
+          "match": "\\b(?:return|assert|if|else|concurrency|parallel|rate|retry|within)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.mettle",
+          "match": "\\b(?:and|or|not)\\b"
         },
         {
           "name": "storage.type.mettle",

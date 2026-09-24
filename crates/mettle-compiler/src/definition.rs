@@ -133,8 +133,41 @@ impl<'a> DefinitionFinder<'a> {
                 return Some(parameter.span);
             }
         }
-        for statement in &flow.body {
+        self.find_in_statements(&flow.body, &mut locals, flow)
+    }
+
+    fn find_in_statements(
+        &self,
+        statements: &[Statement],
+        locals: &mut HashMap<String, Span>,
+        flow: &MettleDecl,
+    ) -> Option<Span> {
+        for statement in statements {
             match statement {
+                Statement::If {
+                    branches,
+                    else_body,
+                    ..
+                } => {
+                    for branch in branches {
+                        if let Some(target) =
+                            self.find_in_expression(&branch.condition, locals, Some(flow))
+                        {
+                            return Some(target);
+                        }
+                        if let Some(target) =
+                            self.find_in_statements(&branch.body, &mut locals.clone(), flow)
+                        {
+                            return Some(target);
+                        }
+                    }
+                    if let Some(body) = else_body
+                        && let Some(target) =
+                            self.find_in_statements(body, &mut locals.clone(), flow)
+                    {
+                        return Some(target);
+                    }
+                }
                 Statement::UseContext { name, .. } => {
                     if self.at(name.span) {
                         return self.resolve_context(
@@ -150,13 +183,13 @@ impl<'a> DefinitionFinder<'a> {
                     if self.at(name.span) {
                         return Some(name.span);
                     }
-                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                    if let Some(target) = self.find_in_expression(expression, locals, Some(flow)) {
                         return Some(target);
                     }
                     locals.insert(name.value.clone(), name.span);
                 }
                 Statement::Return { expression, .. } | Statement::Expression(expression) => {
-                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                    if let Some(target) = self.find_in_expression(expression, locals, Some(flow)) {
                         return Some(target);
                     }
                 }
@@ -165,11 +198,11 @@ impl<'a> DefinitionFinder<'a> {
                     message,
                     ..
                 } => {
-                    if let Some(target) = self.find_in_expression(expression, &locals, Some(flow)) {
+                    if let Some(target) = self.find_in_expression(expression, locals, Some(flow)) {
                         return Some(target);
                     }
                     if let Some(message) = message
-                        && let Some(target) = self.find_in_expression(message, &locals, Some(flow))
+                        && let Some(target) = self.find_in_expression(message, locals, Some(flow))
                     {
                         return Some(target);
                     }
@@ -240,6 +273,12 @@ impl<'a> DefinitionFinder<'a> {
             ExpressionKind::Member { value, .. } => {
                 return self.find_in_expression(value, locals, flow);
             }
+            ExpressionKind::Index { value, index } => {
+                return self
+                    .find_in_expression(value, locals, flow)
+                    .or_else(|| self.find_in_expression(index, locals, flow));
+            }
+            ExpressionKind::Not(value) => return self.find_in_expression(value, locals, flow),
             ExpressionKind::Binary { left, right, .. } => {
                 return self
                     .find_in_expression(left, locals, flow)

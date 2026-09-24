@@ -192,7 +192,7 @@ class MettleLanguageServer {
       rootUri: folder?.uri.toString() || null,
       workspaceFolders: folders,
       capabilities: {},
-      clientInfo: { name: "Mettle VS Code", version: "0.14.0" },
+      clientInfo: { name: "Mettle VS Code", version: "0.15.0" },
     });
     this.notify("initialized", {});
     this.initialized = true;

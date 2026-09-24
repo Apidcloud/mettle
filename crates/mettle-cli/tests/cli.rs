@@ -166,7 +166,7 @@ fn run_prints_the_main_flow_result() {
 #[test]
 fn verbose_prints_nested_results_for_humans() {
     let path = source_file(
-        "flow main() { return { active: true user: { name: \"Ada\" roles: [\"tester\"] } } }",
+        "flow main() { return { active: true, user: { name: \"Ada\", roles: [\"tester\"] } } }",
     );
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
@@ -188,7 +188,7 @@ fn verbose_prints_nested_results_for_humans() {
 #[test]
 fn ordinary_objects_are_not_mistaken_for_capability_results() {
     let path = source_file(
-        "flow main() { return { body: \"ignored\" headers: { server: \"test\" } json: { active: true } method: \"GET\" status: 200 url: \"https://example.test/users\" } }",
+        "flow main() { return { body: \"ignored\", headers: { server: \"test\" }, json: { active: true }, method: \"GET\", status: 200, url: \"https://example.test/users\" } }",
     );
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
@@ -330,7 +330,7 @@ fn anonymous_file_contexts_compose_and_do_not_leak_between_files() {
 #[test]
 fn secret_values_are_redacted_after_interpolation_and_in_json() {
     let path = source_file(
-        "flow main() { credentials = secret({ token: env(\"METTLE_TEST_SECRET\") }) return \"Bearer ${credentials.token}\" }",
+        "flow main() { credentials = secret({ token: env(\"METTLE_TEST_SECRET\") })\n return \"Bearer ${credentials.token}\" }",
     );
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
@@ -412,7 +412,7 @@ fn invalid_source_has_a_location_and_nonzero_exit() {
 #[test]
 fn runs_a_selected_parameterized_flow_with_typed_arguments() {
     let path = source_file(
-        "flow describe(name, active, timeout) { return { name: name active: active timeout: timeout } }",
+        "flow describe(name, active, timeout) { return { name: name, active: active, timeout: timeout } }",
     );
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
@@ -874,7 +874,7 @@ fn all_only_runs_zero_argument_flows_in_the_requested_file() {
 #[test]
 fn all_continues_after_a_failed_flow_and_returns_failure() {
     let path =
-        source_file("flow broken() { assert(false) return true }\nflow healthy() = \"ok\"\n");
+        source_file("flow broken() { assert(false)\n return true }\nflow healthy() = \"ok\"\n");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
         .arg(&path)
@@ -1057,7 +1057,7 @@ fn json_output_is_a_stable_execution_envelope() {
 
 #[test]
 fn json_output_reports_failures_without_human_text() {
-    let path = source_file("flow health() { assert(false) return true }");
+    let path = source_file("flow health() { assert(false)\n return true }");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
         .arg(&path)

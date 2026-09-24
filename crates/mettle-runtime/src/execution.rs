@@ -253,50 +253,17 @@ impl Executor<'_> {
             locals[slot] = Some(argument);
         }
 
-        for instruction in &flow.instructions {
-            match instruction {
-                Instruction::Bind { slot, expression } => {
-                    let value = self
-                        .evaluate(expression, &locals, &context)
-                        .await
-                        .map_err(|error| error.with_assertions(&assertions))?;
-                    let Some(destination) = locals.get_mut(*slot) else {
-                        return Err(self
-                            .error(
-                                "execution plan references an invalid local slot",
-                                expression.span,
-                            )
-                            .with_assertions(&assertions));
-                    };
-                    *destination = Some(value);
-                }
-                Instruction::Evaluate(expression) => {
-                    self.evaluate(expression, &locals, &context)
-                        .await
-                        .map_err(|error| error.with_assertions(&assertions))?;
-                }
-                Instruction::Assert { condition, message } => {
-                    if let Some(failure) = self
-                        .evaluate_assertion(
-                            condition,
-                            message.as_ref(),
-                            &locals,
-                            &context,
-                            flow.kind == DeclarationKind::Test,
-                        )
-                        .await
-                        .map_err(|error| error.with_assertions(&assertions))?
-                    {
-                        assertions.push(failure);
-                    }
-                }
-                Instruction::Return(expression) => {
-                    return self
-                        .evaluate(expression, &locals, &context)
-                        .await
-                        .map_err(|error| error.with_assertions(&assertions));
-                }
-            }
+        let returned = self
+            .run_instructions(
+                &flow.instructions,
+                &mut locals,
+                &context,
+                &mut assertions,
+                flow.kind == DeclarationKind::Test,
+            )
+            .await?;
+        if let Some(value) = returned {
+            return Ok(value);
         }
 
         if flow.kind == DeclarationKind::Test {
@@ -320,6 +287,109 @@ impl Executor<'_> {
             ),
             Span::default(),
         ))
+    }
+
+    fn run_instructions<'b>(
+        &'b mut self,
+        instructions: &'b [Instruction],
+        locals: &'b mut [Option<Value>],
+        context: &'b ActiveContext,
+        assertions: &'b mut Vec<AssertionFailure>,
+        collect_assertions: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Value>, RuntimeError>> + Send + 'b>> {
+        Box::pin(async move {
+            for instruction in instructions {
+                match instruction {
+                    Instruction::If {
+                        branches,
+                        else_body,
+                    } => {
+                        let mut selected = None;
+                        for branch in branches {
+                            let value = self
+                                .evaluate(&branch.condition, locals, context)
+                                .await
+                                .map_err(|error| error.with_assertions(assertions))?;
+                            match value.revealed() {
+                                Value::Boolean(true) => {
+                                    selected = Some(branch.instructions.as_slice());
+                                    break;
+                                }
+                                Value::Boolean(false) => {}
+                                _ => {
+                                    return Err(self
+                                        .error(
+                                            format!(
+                                                "if condition produced {}, expected boolean",
+                                                value.type_name()
+                                            ),
+                                            branch.condition.span,
+                                        )
+                                        .with_assertions(assertions));
+                                }
+                            }
+                        }
+                        if let Some(body) = selected.or(else_body.as_deref())
+                            && let Some(value) = self
+                                .run_instructions(
+                                    body,
+                                    locals,
+                                    context,
+                                    assertions,
+                                    collect_assertions,
+                                )
+                                .await?
+                        {
+                            return Ok(Some(value));
+                        }
+                    }
+                    Instruction::Bind { slot, expression } => {
+                        let value = self
+                            .evaluate(expression, locals, context)
+                            .await
+                            .map_err(|error| error.with_assertions(assertions))?;
+                        let Some(destination) = locals.get_mut(*slot) else {
+                            return Err(self
+                                .error(
+                                    "execution plan references an invalid local slot",
+                                    expression.span,
+                                )
+                                .with_assertions(assertions));
+                        };
+                        *destination = Some(value);
+                    }
+                    Instruction::Evaluate(expression) => {
+                        self.evaluate(expression, locals, context)
+                            .await
+                            .map_err(|error| error.with_assertions(assertions))?;
+                    }
+                    Instruction::Assert { condition, message } => {
+                        if let Some(failure) = self
+                            .evaluate_assertion(
+                                condition,
+                                message.as_ref(),
+                                locals,
+                                context,
+                                collect_assertions,
+                            )
+                            .await
+                            .map_err(|error| error.with_assertions(assertions))?
+                        {
+                            assertions.push(failure);
+                        }
+                    }
+                    Instruction::Return(expression) => {
+                        return self
+                            .evaluate(expression, locals, context)
+                            .await
+                            .map(Some)
+                            .map_err(|error| error.with_assertions(assertions));
+                    }
+                }
+            }
+
+            Ok(None)
+        })
     }
 
     async fn evaluate_assertion(
@@ -449,12 +519,111 @@ impl Executor<'_> {
                             self.error(format!("object has no member `{member}`"), expression.span)
                         })
                 }
+                PlanExpressionKind::Index { value, index } => {
+                    let value = self.evaluate(value, locals, context).await?;
+                    let index = self.evaluate(index, locals, context).await?;
+                    let inherited_sensitivity = value.is_sensitive() || index.is_sensitive();
+                    let result = match (value.revealed(), index.revealed()) {
+                        (Value::Object(fields), Value::String(key)) => {
+                            fields.get(key).cloned().ok_or_else(|| {
+                                self.error(format!("object has no member `{key}`"), expression.span)
+                            })?
+                        }
+                        (Value::Array(values), Value::Integer(position)) if *position >= 0 => {
+                            usize::try_from(*position)
+                                .ok()
+                                .and_then(|position| values.get(position))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    self.error(
+                                        format!("array index {position} is out of range"),
+                                        expression.span,
+                                    )
+                                })?
+                        }
+                        (Value::Array(_), Value::Integer(position)) => {
+                            return Err(self.error(
+                                format!("array index {position} must be non-negative"),
+                                expression.span,
+                            ));
+                        }
+                        (Value::Object(_), _) => {
+                            return Err(self.error(
+                                format!(
+                                    "object index must be a string, found {}",
+                                    index.type_name()
+                                ),
+                                expression.span,
+                            ));
+                        }
+                        (Value::Array(_), _) => {
+                            return Err(self.error(
+                                format!(
+                                    "array index must be an integer, found {}",
+                                    index.type_name()
+                                ),
+                                expression.span,
+                            ));
+                        }
+                        _ => {
+                            return Err(self.error(
+                                format!("cannot index {}", value.type_name()),
+                                expression.span,
+                            ));
+                        }
+                    };
+                    Ok(if inherited_sensitivity {
+                        result.sensitive()
+                    } else {
+                        result
+                    })
+                }
+                PlanExpressionKind::Not(value) => {
+                    let value = self.evaluate(value, locals, context).await?;
+                    match value.revealed() {
+                        Value::Boolean(value) => Ok(Value::Boolean(!value)),
+                        _ => Err(self.error(
+                            format!("`not` requires boolean, found {}", value.type_name()),
+                            expression.span,
+                        )),
+                    }
+                }
                 PlanExpressionKind::Binary {
                     left,
                     operator,
                     right,
                 } => {
                     let left = self.evaluate(left, locals, context).await?;
+                    if matches!(
+                        operator,
+                        super::BinaryOperator::And | super::BinaryOperator::Or
+                    ) {
+                        let Value::Boolean(left_value) = left.revealed() else {
+                            return Err(self.error(
+                                format!(
+                                    "logical operator requires boolean, found {}",
+                                    left.type_name()
+                                ),
+                                expression.span,
+                            ));
+                        };
+                        if (*operator == super::BinaryOperator::And && !left_value)
+                            || (*operator == super::BinaryOperator::Or && *left_value)
+                        {
+                            return Ok(Value::Boolean(*left_value));
+                        }
+                        let right = self.evaluate(right, locals, context).await?;
+                        let Value::Boolean(right_value) = right.revealed() else {
+                            return Err(self.error(
+                                format!(
+                                    "logical operator requires boolean, found {}",
+                                    right.type_name()
+                                ),
+                                expression.span,
+                            ));
+                        };
+                        return Ok(Value::Boolean(*right_value));
+                    }
                     let right = self.evaluate(right, locals, context).await?;
                     evaluate_binary(&left, *operator, &right)
                         .map(Value::Boolean)

@@ -113,6 +113,25 @@ impl Program {
 
 fn set_statement_source(statement: &mut Statement, source: usize) {
     match statement {
+        Statement::If {
+            branches,
+            else_body,
+            span,
+        } => {
+            *span = span.with_source(source);
+            for branch in branches {
+                branch.span = branch.span.with_source(source);
+                set_expression_source(&mut branch.condition, source);
+                for statement in &mut branch.body {
+                    set_statement_source(statement, source);
+                }
+            }
+            if let Some(body) = else_body {
+                for statement in body {
+                    set_statement_source(statement, source);
+                }
+            }
+        }
         Statement::UseContext { name, span } | Statement::Bind { name, span, .. } => {
             name.span = name.span.with_source(source);
             *span = span.with_source(source);
@@ -175,10 +194,16 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
             set_expression_source(value, source);
             member.span = member.span.with_source(source);
         }
-        ExpressionKind::Binary { left, right, .. } => {
-            set_expression_source(left, source);
-            set_expression_source(right, source);
+        ExpressionKind::Index { value, index }
+        | ExpressionKind::Binary {
+            left: value,
+            right: index,
+            ..
+        } => {
+            set_expression_source(value, source);
+            set_expression_source(index, source);
         }
+        ExpressionKind::Not(value) => set_expression_source(value, source),
         ExpressionKind::Within { timeout, body } => {
             set_expression_source(timeout, source);
             set_expression_source(body, source);
@@ -301,6 +326,11 @@ pub enum DeclarationKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
+    If {
+        branches: Vec<IfBranch>,
+        else_body: Option<Vec<Statement>>,
+        span: Span,
+    },
     UseContext {
         name: Spanned<String>,
         span: Span,
@@ -326,13 +356,21 @@ impl Statement {
     #[must_use]
     pub const fn span(&self) -> Span {
         match self {
-            Self::UseContext { span, .. }
+            Self::If { span, .. }
+            | Self::UseContext { span, .. }
             | Self::Bind { span, .. }
             | Self::Return { span, .. }
             | Self::Assert { span, .. } => *span,
             Self::Expression(expression) => expression.span,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IfBranch {
+    pub condition: Expression,
+    pub body: Vec<Statement>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -361,6 +399,11 @@ pub enum ExpressionKind {
         value: Box<Expression>,
         member: Spanned<String>,
     },
+    Index {
+        value: Box<Expression>,
+        index: Box<Expression>,
+    },
+    Not(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
@@ -395,6 +438,8 @@ pub enum ExpressionKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryOperator {
+    And,
+    Or,
     Equal,
     NotEqual,
     Less,
@@ -434,6 +479,11 @@ struct Token {
 
 #[derive(Clone, Debug, PartialEq)]
 enum TokenKind {
+    If,
+    Else,
+    And,
+    Or,
+    Not,
     Mettle,
     Test,
     Context,
@@ -564,6 +614,11 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
     }
     let text = &source[start..*cursor];
     let kind = match text {
+        "if" => TokenKind::If,
+        "else" => TokenKind::Else,
+        "and" => TokenKind::And,
+        "or" => TokenKind::Or,
+        "not" => TokenKind::Not,
         "flow" => TokenKind::Mettle,
         "test" => TokenKind::Test,
         "context" => TokenKind::Context,
@@ -736,6 +791,55 @@ mod tests {
     };
 
     #[test]
+    fn parses_conditionals_boolean_precedence_and_indexes() {
+        let program = parse(
+            r#"
+            flow main() {
+                values = [{ name: "Ada" }, { name: "Lin" }]
+                if (not false and values[1]["name"] == "Lin" or false) {
+                    return values[0].name
+                } else if (false) {
+                    return "other"
+                } else {
+                    return "fallback"
+                }
+            }
+        "#,
+        )
+        .expect("conditional source should parse");
+        let Statement::If {
+            branches,
+            else_body: Some(_),
+            ..
+        } = &program.flows[0].body[1]
+        else {
+            panic!("expected conditional");
+        };
+        assert_eq!(branches.len(), 2);
+        assert!(matches!(
+            branches[0].condition.kind,
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Or,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn requires_explicit_separators() {
+        for source in [
+            "flow main() { value = 1 return value }",
+            "flow main() = { a: 1 b: 2 }",
+            "flow main() = parallel() { first() second() }",
+        ] {
+            let error = parse(source).expect_err("adjacent items should fail");
+            assert!(error.message.contains("separate"), "{}", error.message);
+        }
+        parse("flow main() = { a: 1, b: 2 }").expect("comma-separated fields should parse");
+        parse("flow main() = { a: 1\n b: 2 }").expect("newline-separated fields should parse");
+    }
+
+    #[test]
     fn parses_namespaces_context_composition_and_assertions() {
         let program = parse(
             r"
@@ -796,7 +900,7 @@ mod tests {
             flow main() {
                 return within(timeout: 2s) {
                     retry(attempts: 3, delay: 10ms) {
-                        parallel(limit: 2) { first() second() third() }
+                        parallel(limit: 2) { first(), second(), third() }
                     }
                 }
             }
@@ -893,7 +997,7 @@ mod tests {
     #[test]
     fn parses_floats_and_duration_units() {
         let program =
-            parse("flow main() { value = 1.25 return 200ms }").expect("source should parse");
+            parse("flow main() { value = 1.25\n return 200ms }").expect("source should parse");
         let Statement::Bind { expression, .. } = &program.flows[0].body[0] else {
             panic!("expected binding");
         };

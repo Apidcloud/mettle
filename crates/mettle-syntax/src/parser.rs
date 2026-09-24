@@ -2,8 +2,8 @@
 
 use super::{
     BinaryOperator, ContextDecl, ContextMember, DeclarationKind, Expression, ExpressionKind,
-    FileContextUse, MettleDecl, ObjectField, Program, Span, Spanned, Statement, SyntaxError, Token,
-    TokenKind, lex,
+    FileContextUse, IfBranch, MettleDecl, ObjectField, Program, Span, Spanned, Statement,
+    SyntaxError, Token, TokenKind, lex,
 };
 
 /// Parse a complete Mettle source file.
@@ -12,7 +12,7 @@ use super::{
 ///
 /// Returns the first lexical or grammatical error with a byte span into `source`.
 pub fn parse(source: &str) -> Result<Program, SyntaxError> {
-    Parser::new(lex(source)?).parse_program()
+    Parser::new(lex(source)?, source).parse_program()
 }
 
 /// Parse one standalone value expression, primarily for CLI flow arguments.
@@ -21,7 +21,7 @@ pub fn parse(source: &str) -> Result<Program, SyntaxError> {
 ///
 /// Returns a lexical or grammatical error when the complete input is not one expression.
 pub fn parse_value(source: &str) -> Result<Expression, SyntaxError> {
-    let mut parser = Parser::new(lex(source)?);
+    let mut parser = Parser::new(lex(source)?, source);
     let expression = parser.parse_expression()?;
     if !parser.at(&TokenKind::End) {
         return Err(parser.expected("the end of the value"));
@@ -29,14 +29,19 @@ pub fn parse_value(source: &str) -> Result<Expression, SyntaxError> {
     Ok(expression)
 }
 
-struct Parser {
+struct Parser<'a> {
     tokens: Vec<Token>,
     cursor: usize,
+    source: &'a str,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, cursor: 0 }
+impl<'a> Parser<'a> {
+    fn new(tokens: Vec<Token>, source: &'a str) -> Self {
+        Self {
+            tokens,
+            cursor: 0,
+            source,
+        }
     }
 
     fn parse_program(mut self) -> Result<Program, SyntaxError> {
@@ -160,6 +165,7 @@ impl Parser {
             } else {
                 members.push(ContextMember::Field(self.parse_object_field()?));
             }
+            self.require_separator("context members")?;
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
         Ok(ContextDecl {
@@ -258,6 +264,7 @@ impl Parser {
                 return Err(self.expected("a statement or `}`"));
             }
             body.push(self.parse_statement()?);
+            self.require_newline("statements")?;
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
         Ok((body, end))
@@ -284,6 +291,38 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, SyntaxError> {
+        if self.at(&TokenKind::If) {
+            let start = self.advance().span;
+            let mut branch_start = start;
+            let mut branches = Vec::new();
+            let mut else_body = None;
+            loop {
+                self.take(&TokenKind::LeftParen)?;
+                let condition = self.parse_expression()?;
+                self.take(&TokenKind::RightParen)?;
+                let (body, end) = self.parse_statement_block()?;
+                branches.push(IfBranch {
+                    condition,
+                    body,
+                    span: branch_start.join(end),
+                });
+                if !self.take_if(&TokenKind::Else) {
+                    break;
+                }
+                if self.at(&TokenKind::If) {
+                    branch_start = self.advance().span;
+                    continue;
+                }
+                else_body = Some(self.parse_statement_block()?.0);
+                break;
+            }
+            let end = self.tokens[self.cursor - 1].span;
+            return Ok(Statement::If {
+                branches,
+                else_body,
+                span: start.join(end),
+            });
+        }
         if self.at(&TokenKind::Use) {
             let start = self.advance().span;
             self.take(&TokenKind::Context)?;
@@ -344,7 +383,29 @@ impl Parser {
     }
 
     fn parse_expression(&mut self) -> Result<Expression, SyntaxError> {
-        let left = self.parse_primary_expression()?;
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expression, SyntaxError> {
+        let mut left = self.parse_and()?;
+        while self.take_if(&TokenKind::Or) {
+            let right = self.parse_and()?;
+            left = binary(left, BinaryOperator::Or, right);
+        }
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<Expression, SyntaxError> {
+        let mut left = self.parse_comparison()?;
+        while self.take_if(&TokenKind::And) {
+            let right = self.parse_comparison()?;
+            left = binary(left, BinaryOperator::And, right);
+        }
+        Ok(left)
+    }
+
+    fn parse_comparison(&mut self) -> Result<Expression, SyntaxError> {
+        let left = self.parse_unary()?;
         let operator = match self.current().kind {
             TokenKind::EqualEqual => BinaryOperator::Equal,
             TokenKind::BangEqual => BinaryOperator::NotEqual,
@@ -355,26 +416,30 @@ impl Parser {
             _ => return Ok(left),
         };
         self.advance();
-        let right = self.parse_primary_expression()?;
-        let span = left.span.join(right.span);
-        Ok(Expression {
-            kind: ExpressionKind::Binary {
-                left: Box::new(left),
-                operator,
-                right: Box::new(right),
-            },
-            span,
-        })
+        let right = self.parse_unary()?;
+        Ok(binary(left, operator, right))
+    }
+
+    fn parse_unary(&mut self) -> Result<Expression, SyntaxError> {
+        if self.at(&TokenKind::Not) {
+            let start = self.advance().span;
+            let value = self.parse_unary()?;
+            return Ok(Expression {
+                span: start.join(value.span),
+                kind: ExpressionKind::Not(Box::new(value)),
+            });
+        }
+        self.parse_primary_expression()
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression, SyntaxError> {
         let token = self.advance();
         let mut expression = match token.kind {
-            TokenKind::Within => return self.parse_within(token.span),
-            TokenKind::Retry => return self.parse_retry(token.span),
-            TokenKind::Parallel => return self.parse_parallel(token.span),
-            TokenKind::Rate => return self.parse_rate(token.span),
-            TokenKind::Concurrency => return self.parse_concurrency(token.span),
+            TokenKind::Within => self.parse_within(token.span)?,
+            TokenKind::Retry => self.parse_retry(token.span)?,
+            TokenKind::Parallel => self.parse_parallel(token.span)?,
+            TokenKind::Rate => self.parse_rate(token.span)?,
+            TokenKind::Concurrency => self.parse_concurrency(token.span)?,
             TokenKind::Null => literal(ExpressionKind::Null, token.span),
             TokenKind::True => literal(ExpressionKind::Boolean(true), token.span),
             TokenKind::False => literal(ExpressionKind::Boolean(false), token.span),
@@ -384,6 +449,11 @@ impl Parser {
                 literal(ExpressionKind::DurationNanos(value), token.span)
             }
             TokenKind::String(value) => literal(ExpressionKind::String(value), token.span),
+            TokenKind::LeftParen => {
+                let mut value = self.parse_expression()?;
+                value.span = token.span.join(self.take(&TokenKind::RightParen)?.span);
+                value
+            }
             TokenKind::Identifier(value) => {
                 let mut name = value;
                 let mut span = token.span;
@@ -454,32 +524,30 @@ impl Parser {
         mut expression: Expression,
     ) -> Result<Expression, SyntaxError> {
         loop {
-            let member = if self.take_if(&TokenKind::Dot) {
-                self.take_identifier("a member name after `.`")?
-            } else if self.take_if(&TokenKind::LeftBracket) {
-                let token = self.advance();
-                let TokenKind::String(value) = token.kind else {
-                    return Err(SyntaxError::new(
-                        "object key access requires a string literal",
-                        token.span,
-                    ));
+            if self.take_if(&TokenKind::Dot) {
+                let member = self.take_identifier("a member name after `.`")?;
+                let span = expression.span.join(member.span);
+                expression = Expression {
+                    kind: ExpressionKind::Member {
+                        value: Box::new(expression),
+                        member,
+                    },
+                    span,
                 };
+            } else if self.take_if(&TokenKind::LeftBracket) {
+                let index = self.parse_expression()?;
                 let close = self.take(&TokenKind::RightBracket)?.span;
-                Spanned {
-                    value,
-                    span: token.span.join(close),
-                }
+                let span = expression.span.join(close);
+                expression = Expression {
+                    kind: ExpressionKind::Index {
+                        value: Box::new(expression),
+                        index: Box::new(index),
+                    },
+                    span,
+                };
             } else {
                 break;
-            };
-            let span = expression.span.join(member.span);
-            expression = Expression {
-                kind: ExpressionKind::Member {
-                    value: Box::new(expression),
-                    member,
-                },
-                span,
-            };
+            }
         }
 
         Ok(expression)
@@ -542,6 +610,7 @@ impl Parser {
                 return Err(self.expected("a parallel branch or `}`"));
             }
             branches.push(self.parse_expression()?);
+            self.require_separator("parallel branches")?;
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
         Ok(Expression {
@@ -644,7 +713,7 @@ impl Parser {
                 return Err(self.expected("an object field or `}`"));
             }
             fields.push(self.parse_object_field()?);
-            self.take_if(&TokenKind::Comma);
+            self.require_separator("object fields")?;
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
         Ok((fields, end))
@@ -726,6 +795,47 @@ impl Parser {
     fn expected(&self, expected: &'static str) -> SyntaxError {
         SyntaxError::new(format!("expected {expected}"), self.current().span)
     }
+
+    fn has_newline_before_current(&self) -> bool {
+        let previous_end = self.tokens[self.cursor - 1].span.end;
+        self.source[previous_end..self.current().span.start].contains('\n')
+    }
+
+    fn require_newline(&self, what: &'static str) -> Result<(), SyntaxError> {
+        if self.at(&TokenKind::RightBrace) || self.has_newline_before_current() {
+            Ok(())
+        } else {
+            Err(SyntaxError::new(
+                format!("separate {what} with a newline"),
+                self.current().span,
+            ))
+        }
+    }
+
+    fn require_separator(&mut self, what: &'static str) -> Result<(), SyntaxError> {
+        if self.take_if(&TokenKind::Comma)
+            || self.at(&TokenKind::RightBrace)
+            || self.has_newline_before_current()
+        {
+            Ok(())
+        } else {
+            Err(SyntaxError::new(
+                format!("separate {what} with a comma or newline"),
+                self.current().span,
+            ))
+        }
+    }
+}
+
+fn binary(left: Expression, operator: BinaryOperator, right: Expression) -> Expression {
+    Expression {
+        span: left.span.join(right.span),
+        kind: ExpressionKind::Binary {
+            left: Box::new(left),
+            operator,
+            right: Box::new(right),
+        },
+    }
 }
 
 fn literal(kind: ExpressionKind, span: Span) -> Expression {
@@ -738,6 +848,11 @@ fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
 
 const fn token_description(token: &TokenKind) -> &'static str {
     match token {
+        TokenKind::If => "`if`",
+        TokenKind::Else => "`else`",
+        TokenKind::And => "`and`",
+        TokenKind::Or => "`or`",
+        TokenKind::Not => "`not`",
         TokenKind::Mettle => "`flow`",
         TokenKind::Test => "`test`",
         TokenKind::Context => "`context`",

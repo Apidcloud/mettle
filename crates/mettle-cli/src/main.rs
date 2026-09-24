@@ -1053,6 +1053,8 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
             .map(Value::Object),
         ExpressionKind::Call { .. }
         | ExpressionKind::Member { .. }
+        | ExpressionKind::Index { .. }
+        | ExpressionKind::Not(_)
         | ExpressionKind::Binary { .. }
         | ExpressionKind::Within { .. }
         | ExpressionKind::Retry { .. }
