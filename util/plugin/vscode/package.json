@@ -2,7 +2,7 @@
   "name": "mettle-language",
   "displayName": "Mettle Language",
   "description": "Language support for the Mettle I/O-oriented programming language.",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "mettle-lang",
   "license": "UNLICENSED",
   "engines": {
@@ -12,7 +12,9 @@
   "activationEvents": [
     "onLanguage:mettle",
     "onCommand:mettle.runFlow",
-    "onCommand:mettle.runAllFlows"
+    "onCommand:mettle.runAllFlows",
+    "onCommand:mettle.runTests",
+    "onCommand:mettle.selectProfile"
   ],
   "categories": [
     "Programming Languages",
@@ -26,7 +28,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.10.0.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-0.11.0.vsix"
   },
   "contributes": {
     "commands": [
@@ -39,6 +41,16 @@
         "command": "mettle.runAllFlows",
         "title": "Mettle: Run All Eligible Flows in File",
         "icon": "$(run-all)"
+      },
+      {
+        "command": "mettle.runTests",
+        "title": "Mettle: Run Tests in File",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "mettle.selectProfile",
+        "title": "Mettle: Select Profile",
+        "icon": "$(settings-gear)"
       }
     ],
     "configuration": {
@@ -83,6 +95,16 @@
           "command": "mettle.runAllFlows",
           "when": "editorLangId == mettle",
           "group": "navigation@1"
+        },
+        {
+          "command": "mettle.runTests",
+          "when": "editorLangId == mettle",
+          "group": "navigation@2"
+        },
+        {
+          "command": "mettle.selectProfile",
+          "when": "editorLangId == mettle",
+          "group": "navigation@3"
         }
       ]
     }

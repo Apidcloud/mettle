@@ -1,0 +1,21 @@
+// Functional checks against the public JSONPlaceholder test API.
+// These require an internet connection but no credentials.
+use context {
+    defaults http {
+        baseUrl: "https://jsonplaceholder.typicode.com"
+        timeout: 10s
+    }
+}
+
+flow getPost(id) = http.get("/posts/${id}")
+
+test("post 1 is available") {
+    response = getPost(1)
+    assert(response.status == 200)
+    assert(response.json.id == 1)
+}
+
+test("unknown post returns 404") {
+    response = getPost(999999)
+    assert(response.status == 404)
+}

@@ -41,6 +41,7 @@ The project is experimental. Its compiler, runtime, and capability boundary are 
 A Mettle project is made from a few general concepts:
 
 - **flows** name reusable sequences of operations;
+- **tests** run assertions against flows and capability results;
 - **capabilities** provide protocol operations such as `http.get()` and the planned `sip.options()`;
 - **contexts** compose environment values and capability defaults;
 - **execution policies** control deadlines, retries, parallelism, concurrency, and rate;
@@ -68,7 +69,7 @@ the repository checkout:
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.10.0.vsix --force
+code --install-extension dist/mettle-language-0.11.0.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -141,6 +142,27 @@ record.
 mettle run checks.mettle --all
 ```
 
+## Write executable tests
+
+Declare checks with `test("name") { ... }`. Tests have no parameters or return
+value, and a failed `assert(...)` fails that test without stopping the rest of
+the file. `mettle test <file>` runs tests declared in that file in source order;
+`mettle run <file> --all` still runs only zero-argument flows. The test command
+exits nonzero when any test fails or the file has no tests, and supports `--verbose`, `--quiet`, and
+`--output json` (JSON Lines) for CI.
+
+```mettle
+flow getPost(id) = http.get("https://jsonplaceholder.typicode.com/posts/${id}")
+
+test("post 1 is available") {
+    response = getPost(1)
+    assert(response.status == 200)
+    assert(response.json.id == 1)
+}
+```
+
+Run the full example with `mettle test examples/http-tests.mettle`.
+
 ## Build a workflow from operation results
 
 Capability operations return values. Bind one to a name, use its result to construct the next operation, then return what matters. Bindings are immutable, which keeps the data path easy to follow. The current HTTP capability exposes parsed JSON directly:
@@ -185,7 +207,7 @@ An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `meth
 
 ## Put shared setup in contexts
 
-Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. A file-level `use context` applies a default to every flow in that source file, regardless of where the directive appears; placing it near the top is the recommended convention. A flow-level context overrides the file default. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
+Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. A file-level `use context` applies a default to every flow and test in that source file, regardless of where the directive appears; placing it near the top is the recommended convention. For one-file setup, use an anonymous `use context { ... }`. Name it with `use context name { ... }` only when it should also be reusable. Plain `context name { ... }` remains reusable without applying itself. A flow-level context overrides the file default. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
 
 ```mettle
 context baseApi {
@@ -198,9 +220,9 @@ context baseApi {
     }
 }
 
-context authenticatedApi {
+use context {
     use context baseApi
-    apiToken: secret(env("API_TOKEN"))
+    apiToken: senv("API_TOKEN")
 
     defaults http {
         headers: {
@@ -210,18 +232,49 @@ context authenticatedApi {
 }
 
 flow currentUser() {
-    use context authenticatedApi
     return http.get("/me")
 }
 ```
 
 `env("API_URL")` requires an environment variable. Within a string, `${API_URL}` first resolves a flow local, parameter, or context value, then falls back to the process environment. That keeps a one-off file pleasant to use:
 
-`env()` does not make a value secret by itself. Wrap credentials with `secret(...)`; sensitivity propagates through interpolation and structured values, and normal CLI, JSON, diagnostic, and capability report output replaces them with `[REDACTED]`. HTTP also redacts credential-bearing headers such as `Authorization`, `Cookie`, and `Set-Cookie`.
-
 ```mettle
 flow health() = http.get("${API_URL}/health")
 ```
+
+`env()` does not make a value secret by itself. Use `senv("API_TOKEN")` as shorthand
+for `secret(env("API_TOKEN"))`, or wrap a value from another source with
+`secret(...)`. Sensitivity propagates through interpolation and structured
+values, and runtime CLI, JSON, and capability report output replaces
+them with `[REDACTED]`. Syntax and compile diagnostics can print source lines,
+so never put literal credentials in `.mettle` files; load them with `senv()`.
+HTTP also redacts credential-bearing headers such as
+`Authorization`, `Cookie`, and `Set-Cookie`. See
+[`examples/secrets.mettle`](examples/secrets.mettle) for both forms; set
+`API_TOKEN` before running it.
+
+### Environment files and profiles
+
+`mettle run` and `mettle test` load `.env` automatically beside the selected
+entry file. In a project, they load the project-root `.env` first and then the
+entry file's directory `.env` if it differs. Choose an overlay with
+`--profile qa`, which loads `.env.qa` from the same locations; `--profile prod`
+similarly loads `.env.prod`. A requested profile must exist. Process environment
+variables override file values, and neither `check`, `list`, nor the language
+server needs an env file. `env()` and `${NAME}` see the same resolved values;
+use `senv()` for values that must be redacted.
+
+```bash
+mettle run examples/profile-standalone/main.mettle
+mettle run examples/profile-standalone/main.mettle --profile qa
+mettle run examples/project/main.mettle --profile qa
+```
+
+The [standalone profile example](examples/profile-standalone/main.mettle) and
+[project example](examples/project/main.mettle) include safe demo `.env`,
+`.env.qa`, and `.env.prod` files. Dotenv files support `NAME=value`, optional
+`export`, comments, and quoted values; they do not execute shell code or expand
+variables. Outside these allowlisted examples, `.env` files are Git-ignored.
 
 ## Control how work executes
 
@@ -442,10 +495,10 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.10.0.vsix --force
+code --install-extension dist/mettle-language-0.11.0.vsix --force
 ```
 
-The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
+The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
 
 ## For contributors
 
@@ -498,6 +551,10 @@ docs/                      Language, runtime, and dependency documentation
 ```
 
 The [language proposal](docs/language-proposal.md) describes the language direction. The [technical strategy](docs/mettle-technical.md) explains the runtime and compiler approach. Third-party Rust dependencies and licences are documented in [docs/dependencies.md](docs/dependencies.md) and [docs/third-party-licenses.md](docs/third-party-licenses.md).
+
+The larger Rust crates keep their public API in `lib.rs` and separate parsing,
+declaration navigation, semantic lowering, execution, and HTTP schemas into
+focused source modules.
 
 ## Current limits
 

@@ -220,15 +220,15 @@ API_URL=http://localhost:8080
 API_TOKEN=development-token
 ```
 
-The runner may support `.env` files and explicit environment-file selection. A proposed precedence is base `.env`, then the selected environment file, then the actual process environment. Exact discovery and command-line syntax are runner decisions, not properties of `env()` itself. Missing required variables should fail clearly before work starts, and values should remain strings unless explicitly converted.
+The runner now loads `.env` files for `run` and `test`. Standalone files use the selected entry file's directory; projects load the project root and then the entry directory if distinct. `--profile qa` overlays `.env.qa` from those locations, and a requested profile must exist. The precedence is project `.env`, entry `.env`, project profile, entry profile, then the actual process environment. Files are parsed as data, not evaluated as shell scripts; their values remain strings. Arbitrary env-file paths and manifest-defined profile mappings are not implemented.
 
 Environment selection is not required to live outside source code: named contexts can still represent intentional environment-specific settings. The common case should work with a shared `base` context and externally supplied values, without duplicating every request for local and staging environments.
 
-Value retrieval and sensitivity are separate concerns. `env()` does not inherently promise redaction. The implemented `secret(value)` wrapper marks a value obtained from any source, propagates through interpolation and structured values, and redacts normal CLI, JSON, diagnostic, and capability report output. Capabilities additionally identify sensitive protocol fields; HTTP redacts credential-bearing request and response headers.
+Value retrieval and sensitivity are separate concerns. `env()` does not inherently promise redaction. The implemented `secret(value)` wrapper marks a value obtained from any source; `senv("NAME")` is shorthand for `secret(env("NAME"))`. Sensitivity propagates through interpolation and structured values, and normal CLI, JSON, diagnostic, and capability report output redacts it. Capabilities additionally identify sensitive protocol fields; HTTP redacts credential-bearing request and response headers.
 
 ## Context lifetime and flow boundaries
 
-`use context` may appear at file level as a default for every flow in that source file. Its position does not change its scope, though placing it with the other file directives near the top is the conventional form. A flow-level `use context` overrides the file default. Context composition remains the way to combine more than one reusable context.
+`use context` may appear at file level as a default for every flow and test in that source file. Its position does not change its scope, though placing it with the other file directives near the top is the conventional form. `use context { ... }` defines an anonymous file-local context; `use context name { ... }` both declares a reusable context and applies it. A plain `context name { ... }` remains inert until applied; a flow-level `use context` overrides the file default. Context composition remains the way to combine more than one reusable context.
 
 ```text
 flow getUser(id) {
@@ -409,7 +409,7 @@ test("user lookup") {
 
 This load example selects IDs from known test data. Randomly generating identifiers would change the error distribution being measured unless missing users are intentionally part of the workload.
 
-Illustrative runner commands are `mettle run main.mettle` and `mettle run tests/users-load.mettle`. There are no `import` or `export` declarations, and loading `users` does not itself perform I/O.
+Illustrative runner commands are `mettle run main.mettle` and `mettle test tests/users-load.mettle`. There are no `import` or `export` declarations, and loading `users` does not itself perform I/O.
 
 ## Mettles and tests
 
@@ -451,6 +451,14 @@ load = rate(target: 1_000, period: 1s, duration: 30s) {
 ```
 
 Calling a flow does not imply assertion collection, a CI exit status, or a test report. Those belong to `test`. Explicit `return` is preferred in the examples because it remains clear when a flow expands from one operation to several. The language may later permit an implicit final-expression return as shorthand.
+
+The first test model is implemented: `test("name") { ... }` declares a
+parameterless test that may call flows, perform I/O, and use `assert(...)`.
+Tests do not return values and cannot be called as flows. `mettle test <file>`
+executes the tests in that file in source order, reports each result and a
+summary, and exits nonzero if any test fails or the selected file has no tests. `mettle run --all` remains
+exclusively for zero-argument flows. Assertion messages, tags, filters, and
+aggregate assertion collection remain future work.
 
 ### Driving a flow from an operation result
 
@@ -665,7 +673,7 @@ test("create user", tags: ["smoke", "users"]) {
 }
 ```
 
-This could support commands such as `flow test --tag smoke`. The project manifest should define test roots or discovery patterns when conventions are insufficient. Namespace membership and directory placement should not double as implicit test tags.
+This could support commands such as `mettle test tests/users.mettle --tag smoke`. The project manifest should define test roots or discovery patterns when conventions are insufficient. Namespace membership and directory placement should not double as implicit test tags.
 
 ## Execution policies
 

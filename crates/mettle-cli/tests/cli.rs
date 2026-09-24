@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -231,6 +232,89 @@ fn file_contexts_apply_to_every_flow_in_their_own_source_file() {
 }
 
 #[test]
+fn combined_context_declaration_applies_to_flows_and_tests() {
+    let path = source_file(
+        "use context credentials { token: senv(\"METTLE_TEST_SECRET\") }\nflow main() = token\ntest(\"has token\") { assert(token == senv(\"METTLE_TEST_SECRET\")) }\n",
+    );
+    let flow_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .env("METTLE_TEST_SECRET", "never-print-this")
+        .output()
+        .expect("flow should start");
+    let test_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .env("METTLE_TEST_SECRET", "never-print-this")
+        .output()
+        .expect("test should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(flow_output.status.success(), "{flow_output:?}");
+    let flow_stdout = String::from_utf8_lossy(&flow_output.stdout);
+    assert!(flow_stdout.contains("[REDACTED]"), "{flow_stdout}");
+    assert!(!flow_stdout.contains("never-print-this"), "{flow_stdout}");
+    assert!(test_output.status.success(), "{test_output:?}");
+    let test_stdout = String::from_utf8_lossy(&test_output.stdout);
+    assert!(test_stdout.contains("\"passed\":1"), "{test_stdout}");
+}
+
+#[test]
+fn anonymous_file_contexts_compose_and_do_not_leak_between_files() {
+    let directory = project_directory();
+    fs::write(
+        directory.join("mettle.toml"),
+        "name = \"anonymous-contexts\"\n",
+    )
+    .expect("manifest should be writable");
+    let entry = directory.join("main.mettle");
+    fs::write(
+        &entry,
+        "context base { marker: \"entry\" }\nflow main() = marker\ntest(\"sees entry\") { assert(marker == \"entry\") }\nuse context { use context base }\n",
+    )
+    .expect("entry source should be writable");
+    fs::write(
+        directory.join("other.mettle"),
+        "use context { marker: \"other\" }\nflow other() = marker\n",
+    )
+    .expect("other source should be writable");
+    let main = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&entry)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("main flow should run");
+    let other = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&entry)
+        .arg("other")
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("other flow should run");
+    let tests = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&entry)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("test should run");
+    fs::remove_dir_all(directory).expect("project should be removable");
+
+    assert!(main.status.success(), "{main:?}");
+    assert!(other.status.success(), "{other:?}");
+    assert!(tests.status.success(), "{tests:?}");
+    assert!(String::from_utf8_lossy(&main.stdout).contains("\"result\":\"entry\""));
+    assert!(String::from_utf8_lossy(&other.stdout).contains("\"result\":\"other\""));
+    assert!(String::from_utf8_lossy(&tests.stdout).contains("\"passed\":1"));
+}
+
+#[test]
 fn secret_values_are_redacted_after_interpolation_and_in_json() {
     let path = source_file(
         "flow main() { credentials = secret({ token: env(\"METTLE_TEST_SECRET\") }) return \"Bearer ${credentials.token}\" }",
@@ -249,6 +333,50 @@ fn secret_values_are_redacted_after_interpolation_and_in_json() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("[REDACTED]"));
     assert!(!stdout.contains("never-print-this"));
+}
+
+#[test]
+fn senv_reads_environment_and_redacts_derived_values() {
+    let path = source_file(
+        "context credentials { token: senv(\"METTLE_TEST_SECRET\") }\nuse context credentials\nflow main() = \"Bearer ${token}\"\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .env("METTLE_TEST_SECRET", "never-print-this")
+        .output()
+        .expect("flow should run");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[REDACTED]"), "{stdout}");
+    assert!(!stdout.contains("never-print-this"), "{stdout}");
+}
+
+#[test]
+fn test_declarations_require_unique_names_and_cannot_return() {
+    let duplicate = source_file("test(\"same\") {}\ntest(\"same\") {}\n");
+    let duplicate_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("check")
+        .arg(&duplicate)
+        .output()
+        .expect("check should start");
+    fs::remove_file(duplicate).expect("test source should be removable");
+    assert!(!duplicate_output.status.success());
+    assert!(String::from_utf8_lossy(&duplicate_output.stderr).contains("declared more than once"));
+
+    let returning = source_file("test(\"returns\") { return true }\n");
+    let returning_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("check")
+        .arg(&returning)
+        .output()
+        .expect("check should start");
+    fs::remove_file(returning).expect("test source should be removable");
+    assert!(!returning_output.status.success());
+    assert!(String::from_utf8_lossy(&returning_output.stderr).contains("not allowed in a test"));
 }
 
 #[test]
@@ -358,6 +486,181 @@ fn all_runs_zero_argument_flows_and_skips_parameterized_flows() {
 }
 
 #[test]
+fn tests_are_discovered_separately_and_continue_after_failure() {
+    let path = source_file(
+        "flow helper() = 42\ntest(\"first passes\") { assert(helper() == 42) }\ntest(\"fails\") { assert(false) }\ntest(\"last passes\") { assert(true) }\n",
+    );
+    let list = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("list")
+        .arg(&path)
+        .arg("--json")
+        .output()
+        .expect("list should start");
+    let run_all = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&path)
+        .arg("--all")
+        .output()
+        .expect("run should start");
+    let tests = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .arg("--output")
+        .arg("json")
+        .output()
+        .expect("test should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(list.status.success(), "{list:?}");
+    let discovered: serde_json::Value =
+        serde_json::from_slice(&list.stdout).expect("discovery should be JSON");
+    assert_eq!(discovered["flows"].as_array().expect("flows").len(), 1);
+    assert_eq!(discovered["tests"].as_array().expect("tests").len(), 3);
+    assert!(run_all.status.success(), "{run_all:?}");
+    let flow_output = String::from_utf8_lossy(&run_all.stdout);
+    assert!(flow_output.contains("Passed: 1   Failed: 0   Skipped: 0"));
+    assert!(!flow_output.contains("first passes"));
+    assert!(!tests.status.success(), "{tests:?}");
+    let records = String::from_utf8_lossy(&tests.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 5);
+    assert_eq!(records[0]["kind"], "test");
+    assert_eq!(records[1]["test"], "first passes");
+    assert_eq!(records[1]["status"], "passed");
+    assert_eq!(records[2]["test"], "fails");
+    assert_eq!(records[2]["status"], "failed");
+    assert_eq!(records[2]["error"]["message"], "assertion failed");
+    assert_eq!(records[3]["test"], "last passes");
+    assert_eq!(records[4]["passed"], 2);
+    assert_eq!(records[4]["failed"], 1);
+}
+
+#[test]
+fn test_command_only_executes_tests_in_selected_file() {
+    let directory = project_directory();
+    fs::write(directory.join("mettle.toml"), "name = \"tests\"\n")
+        .expect("manifest should be writable");
+    let entry = directory.join("main.mettle");
+    fs::write(&entry, "test(\"entry\") { assert(true) }\n").expect("entry should be writable");
+    fs::write(
+        directory.join("other.mettle"),
+        "test(\"other\") { assert(false) }\n",
+    )
+    .expect("other should be writable");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&entry)
+        .output()
+        .expect("test should start");
+    fs::remove_dir_all(directory).expect("project should be removable");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("entry"));
+    assert!(!stdout.contains("other"));
+    assert!(stdout.contains("Passed: 1   Failed: 0"));
+}
+
+#[test]
+fn test_command_fails_when_selected_file_has_no_tests() {
+    let path = source_file("flow main() = 1\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&path)
+        .args(["--output", "json"])
+        .output()
+        .expect("test command should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no tests are declared"));
+    assert!(output.stdout.is_empty(), "{output:?}");
+}
+
+#[test]
+fn duplicate_file_context_is_reported_once_per_file() {
+    let path = source_file(
+        "use context { marker: 1 }\nuse context { marker: 2 }\nflow first() = marker\nflow second() = marker\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("check should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("a file may apply only one default context")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn secret_http_urls_are_redacted_in_verbose_and_json_reports() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("local server should bind");
+    let address = listener
+        .local_addr()
+        .expect("local address should be available");
+    let server = std::thread::spawn(move || {
+        for _ in 0..3 {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let mut request = [0_u8; 1024];
+            let bytes_read = stream
+                .read(&mut request)
+                .expect("request should be readable");
+            assert!(bytes_read > 0, "request should not be empty");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
+                .expect("response should be writable");
+        }
+    });
+    let path = source_file("flow main() = http.get(secret(env(\"METTLE_SECRET_URL\")))");
+    let url = format!("http://{address}/health?token=never-print-this");
+    for output_options in [vec!["--verbose"], vec!["--output", "json"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .arg("run")
+            .arg(&path)
+            .args(output_options)
+            .env("METTLE_SECRET_URL", &url)
+            .output()
+            .expect("flow should start");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("[REDACTED]"), "{stdout}");
+        assert!(!stdout.contains("never-print-this"), "{stdout}");
+    }
+    let context_path = source_file(
+        "context api { defaults http { baseUrl: senv(\"METTLE_SECRET_URL\") } }\nuse context api\nflow main() = http.get(\"/health\")\n",
+    );
+    let context_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&context_path)
+        .args(["--output", "json"])
+        .env(
+            "METTLE_SECRET_URL",
+            format!("http://{address}/never-print-this"),
+        )
+        .output()
+        .expect("flow should start");
+    assert!(context_output.status.success(), "{context_output:?}");
+    let context_stdout = String::from_utf8_lossy(&context_output.stdout);
+    assert!(context_stdout.contains("[REDACTED]"), "{context_stdout}");
+    assert!(
+        !context_stdout.contains("never-print-this"),
+        "{context_stdout}"
+    );
+    fs::remove_file(path).expect("test source should be removable");
+    fs::remove_file(context_path).expect("test source should be removable");
+    server.join().expect("local server should complete");
+}
+
+#[test]
 fn all_json_output_is_atomic_json_lines_with_batch_records() {
     let path = source_file(
         "flow first() = \"one\"\nflow needsArgument(value) = value\nflow second() = \"two\"\n",
@@ -459,6 +762,130 @@ fn interpolation_falls_back_to_the_environment() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("endpoint"));
     assert!(stdout.contains("http://localhost:4020/health"));
+}
+
+#[test]
+fn standalone_files_load_default_and_selected_profile_beside_the_entry() {
+    let directory = project_directory();
+    let entry = directory.join("main.mettle");
+    fs::write(
+        &entry,
+        "flow main() = \"${METTLE_PROFILE_TEST_VALUE}\"\nflow secretValue() = senv(\"METTLE_PROFILE_SECRET\")\ntest(\"qa profile\") { assert(env(\"METTLE_PROFILE_TEST_VALUE\") == \"qa\") }\n",
+    )
+        .expect("source should be writable");
+    fs::write(
+        directory.join(".env"),
+        "METTLE_PROFILE_TEST_VALUE=default\n",
+    )
+    .expect("base env should be writable");
+    fs::write(
+        directory.join(".env.qa"),
+        "METTLE_PROFILE_TEST_VALUE=qa\nMETTLE_PROFILE_SECRET=never-print-this\n",
+    )
+    .expect("profile env should be writable");
+
+    let default = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .arg("--output")
+        .arg("json")
+        .env_remove("METTLE_PROFILE_TEST_VALUE")
+        .output()
+        .expect("default run should start");
+    let qa = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .args(["--profile", "qa", "--output", "json"])
+        .env_remove("METTLE_PROFILE_TEST_VALUE")
+        .output()
+        .expect("profile run should start");
+    let qa_tests = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("test")
+        .arg(&entry)
+        .args(["--profile", "qa", "--output", "json"])
+        .env_remove("METTLE_PROFILE_TEST_VALUE")
+        .output()
+        .expect("profile test should start");
+    let secret = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .arg("secretValue")
+        .args(["--profile", "qa", "--output", "json"])
+        .env_remove("METTLE_PROFILE_SECRET")
+        .output()
+        .expect("secret flow should start");
+    let missing = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .args(["--profile", "missing"])
+        .output()
+        .expect("missing profile run should start");
+    fs::remove_dir_all(directory).expect("test directory should be removable");
+
+    assert!(default.status.success(), "{default:?}");
+    assert!(qa.status.success(), "{qa:?}");
+    assert!(qa_tests.status.success(), "{qa_tests:?}");
+    assert!(secret.status.success(), "{secret:?}");
+    assert!(String::from_utf8_lossy(&default.stdout).contains("\"result\":\"default\""));
+    assert!(String::from_utf8_lossy(&qa.stdout).contains("\"result\":\"qa\""));
+    assert!(String::from_utf8_lossy(&qa_tests.stdout).contains("\"passed\":1"));
+    let secret_stdout = String::from_utf8_lossy(&secret.stdout);
+    assert!(secret_stdout.contains("[REDACTED]"));
+    assert!(!secret_stdout.contains("never-print-this"));
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("no `.env.missing`"));
+}
+
+#[test]
+fn project_profiles_overlay_root_and_entry_files_but_not_process_values() {
+    let directory = project_directory();
+    let entry_directory = directory.join("checks");
+    fs::create_dir_all(&entry_directory).expect("entry directory should be creatable");
+    fs::write(directory.join("mettle.toml"), "name = \"profiles\"\n")
+        .expect("manifest should be writable");
+    fs::write(
+        directory.join(".env"),
+        "METTLE_PROFILE_TEST_VALUE=root-default\n",
+    )
+    .expect("project base env should be writable");
+    fs::write(
+        entry_directory.join(".env"),
+        "METTLE_PROFILE_TEST_VALUE=entry-default\n",
+    )
+    .expect("entry base env should be writable");
+    fs::write(
+        directory.join(".env.qa"),
+        "METTLE_PROFILE_TEST_VALUE=root-qa\n",
+    )
+    .expect("project profile should be writable");
+    fs::write(
+        entry_directory.join(".env.qa"),
+        "METTLE_PROFILE_TEST_VALUE=entry-qa\n",
+    )
+    .expect("entry profile should be writable");
+    let entry = entry_directory.join("main.mettle");
+    fs::write(&entry, "flow main() = env(\"METTLE_PROFILE_TEST_VALUE\")\n")
+        .expect("entry source should be writable");
+    let qa = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .args(["--profile", "qa", "--output", "json"])
+        .env_remove("METTLE_PROFILE_TEST_VALUE")
+        .output()
+        .expect("profile run should start");
+    let overridden = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("run")
+        .arg(&entry)
+        .args(["--profile", "qa", "--output", "json"])
+        .env("METTLE_PROFILE_TEST_VALUE", "process")
+        .output()
+        .expect("process override run should start");
+    fs::remove_dir_all(directory).expect("project should be removable");
+
+    assert!(qa.status.success(), "{qa:?}");
+    assert!(overridden.status.success(), "{overridden:?}");
+    assert!(String::from_utf8_lossy(&qa.stdout).contains("\"result\":\"entry-qa\""));
+    assert!(String::from_utf8_lossy(&overridden.stdout).contains("\"result\":\"process\""));
 }
 
 #[test]

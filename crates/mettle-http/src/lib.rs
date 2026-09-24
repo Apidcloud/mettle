@@ -15,170 +15,15 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use mettle_capability::{
-    Capability, CapabilityDescriptor, CapabilityError, CapabilityFuture, FieldSchema, Object,
-    OperationReport, OperationSchema, ReportOutcome, ReportSection, SchemaType, Span, Value,
-    merge_objects,
+    Capability, CapabilityError, CapabilityFuture, Object, OperationReport, ReportOutcome,
+    ReportSection, Span, Value, merge_objects,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
-const TLS_FIELDS: &[FieldSchema] = &[FieldSchema {
-    name: "verifyCertificates",
-    value_type: SchemaType::Boolean,
-}];
-
-const COMMON_OPTIONS: &[FieldSchema] = &[
-    FieldSchema {
-        name: "baseUrl",
-        value_type: SchemaType::String,
-    },
-    FieldSchema {
-        name: "timeout",
-        value_type: SchemaType::Duration,
-    },
-    FieldSchema {
-        name: "headers",
-        value_type: SchemaType::StringMap,
-    },
-    FieldSchema {
-        name: "tls",
-        value_type: SchemaType::Object(TLS_FIELDS),
-    },
-    FieldSchema {
-        name: "maxResponseBytes",
-        value_type: SchemaType::Integer,
-    },
-];
-
-const NO_BODY_OPTIONS: &[FieldSchema] = COMMON_OPTIONS;
-
-const BODY_OPTIONS: &[FieldSchema] = &[
-    FieldSchema {
-        name: "baseUrl",
-        value_type: SchemaType::String,
-    },
-    FieldSchema {
-        name: "timeout",
-        value_type: SchemaType::Duration,
-    },
-    FieldSchema {
-        name: "headers",
-        value_type: SchemaType::StringMap,
-    },
-    FieldSchema {
-        name: "tls",
-        value_type: SchemaType::Object(TLS_FIELDS),
-    },
-    FieldSchema {
-        name: "maxResponseBytes",
-        value_type: SchemaType::Integer,
-    },
-    FieldSchema {
-        name: "json",
-        value_type: SchemaType::Json,
-    },
-    FieldSchema {
-        name: "body",
-        value_type: SchemaType::String,
-    },
-];
-
-const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
-const NO_CONFLICTS: &[&[&str]] = &[];
-
-const RESPONSE_FIELDS: &[FieldSchema] = &[
-    FieldSchema {
-        name: "body",
-        value_type: SchemaType::String,
-    },
-    FieldSchema {
-        name: "bodyBytes",
-        value_type: SchemaType::Bytes,
-    },
-    FieldSchema {
-        name: "duration",
-        value_type: SchemaType::Duration,
-    },
-    FieldSchema {
-        name: "headers",
-        value_type: SchemaType::StringMap,
-    },
-    FieldSchema {
-        name: "json",
-        value_type: SchemaType::Json,
-    },
-    FieldSchema {
-        name: "method",
-        value_type: SchemaType::String,
-    },
-    FieldSchema {
-        name: "status",
-        value_type: SchemaType::Integer,
-    },
-    FieldSchema {
-        name: "url",
-        value_type: SchemaType::String,
-    },
-];
-
-const OPERATIONS: &[OperationSchema] = &[
-    OperationSchema {
-        name: "get",
-        parameters: &[SchemaType::String],
-        options: NO_BODY_OPTIONS,
-        mutually_exclusive: NO_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "post",
-        parameters: &[SchemaType::String],
-        options: BODY_OPTIONS,
-        mutually_exclusive: BODY_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "put",
-        parameters: &[SchemaType::String],
-        options: BODY_OPTIONS,
-        mutually_exclusive: BODY_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "patch",
-        parameters: &[SchemaType::String],
-        options: BODY_OPTIONS,
-        mutually_exclusive: BODY_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "delete",
-        parameters: &[SchemaType::String],
-        options: BODY_OPTIONS,
-        mutually_exclusive: BODY_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "head",
-        parameters: &[SchemaType::String],
-        options: NO_BODY_OPTIONS,
-        mutually_exclusive: NO_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-    OperationSchema {
-        name: "options",
-        parameters: &[SchemaType::String],
-        options: NO_BODY_OPTIONS,
-        mutually_exclusive: NO_CONFLICTS,
-        result: SchemaType::Object(RESPONSE_FIELDS),
-    },
-];
-
-pub const DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
-    name: "http",
-    defaults: COMMON_OPTIONS,
-    operations: OPERATIONS,
-};
+mod schema;
+pub use schema::DESCRIPTOR;
 
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -257,6 +102,10 @@ impl HttpCapability {
                 ));
             }
         };
+        let url_sensitive = arguments.first().is_some_and(Value::contains_sensitive)
+            || options
+                .get("baseUrl")
+                .is_some_and(Value::contains_sensitive);
         let path = expect_string(arguments.first(), "HTTP URL", span)?;
         let url = resolve_url(path, &options, span)?;
         let uri = url.parse::<Uri>().map_err(|error| {
@@ -426,7 +275,14 @@ impl HttpCapability {
                 ("json".to_owned(), json),
                 ("method".to_owned(), Value::String(method.to_string())),
                 ("status".to_owned(), Value::Integer(i64::from(status))),
-                ("url".to_owned(), Value::String(url)),
+                (
+                    "url".to_owned(),
+                    if url_sensitive {
+                        Value::String(url).sensitive()
+                    } else {
+                        Value::String(url)
+                    },
+                ),
             ])))
         };
 
@@ -484,7 +340,7 @@ impl Capability for HttpCapability {
     fn report(&self, _operation: usize, result: &Value) -> Option<OperationReport> {
         let fields = result.as_object()?;
         let method = expect_string(fields.get("method"), "method", Span::default()).ok()?;
-        let url = expect_string(fields.get("url"), "url", Span::default()).ok()?;
+        let url = fields.get("url")?.to_string();
         let Value::Integer(status) = fields.get("status")?.revealed() else {
             return None;
         };

@@ -1,7 +1,7 @@
 namespace core
 
 context base {
-    baseUrl: "https://jsonplaceholder.typicode.com"
+    baseUrl: env("API_URL")
 
     defaults http {
         baseUrl: baseUrl

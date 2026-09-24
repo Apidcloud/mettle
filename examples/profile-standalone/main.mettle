@@ -1,0 +1,7 @@
+// Run with: mettle run examples/profile-standalone/main.mettle
+// Add --profile qa (or --profile prod) to select an overlay.
+// No project manifest is needed; the env files live beside this source file.
+flow main() = {
+    profile: env("PROFILE_NAME")
+    apiUrl: env("API_URL")
+}

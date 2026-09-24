@@ -1,5 +1,14 @@
 /target/
 .local/
+.env
+.env.*
+!.env.example
+!examples/profile-standalone/.env
+!examples/profile-standalone/.env.qa
+!examples/profile-standalone/.env.prod
+!examples/project/.env
+!examples/project/.env.qa
+!examples/project/.env.prod
 *.profraw
 __pycache__/
 *.py[cod]

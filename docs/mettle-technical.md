@@ -117,7 +117,7 @@ Values should use compact, immutable representations. Primitive values can be st
 
 Capability defaults are resolved before hot execution where possible. For example, header names can be normalized and static URLs parsed once. Operation-local options produce a derived configuration without changing the active context.
 
-Environment variables are read through `env()` while preparing an execution. Missing required values must fail before load generation begins. Sensitive values need metadata separate from their source so diagnostics and request capture can redact credentials consistently.
+The CLI builds one immutable environment snapshot before `run` or `test`, layering project-root `.env`, entry-directory `.env`, selected `.env.<profile>` files, and finally process variables. `env()` and interpolation read that snapshot during execution. `senv("NAME")` is the sensitive shorthand for `secret(env("NAME"))`. Missing required values fail before their dependent work runs. Sensitive values need metadata separate from their source so diagnostics and request capture can redact credentials consistently.
 
 ### 4.2 Execution plans
 

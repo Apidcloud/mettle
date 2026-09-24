@@ -1,5 +1,14 @@
 # Change Log
 
+## 0.11.0
+
+- Discover `.env` profiles for standalone files and projects in a status-bar picker.
+- Pass the selected profile to Run Flow, Run All, and Run Tests tasks.
+- Add a file-level Run Tests command.
+- Make profile selection available from the editor title bar and label the
+  status-bar selection explicitly.
+- Add snippets for file tests, anonymous file contexts, and `senv()`.
+
 ## 0.10.0
 
 - Add a snippet for POST, PUT, PATCH, and DELETE requests with text bodies.

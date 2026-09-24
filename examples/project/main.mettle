@@ -4,5 +4,8 @@ flow main() {
     response = inspectRequest(1)
     assert(response.status == 200)
     assert(response.json.id == 1)
-    return response.json
+    return {
+        profile: env("PROFILE_NAME")
+        post: response.json
+    }
 }

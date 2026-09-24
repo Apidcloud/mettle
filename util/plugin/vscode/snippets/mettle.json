@@ -48,6 +48,31 @@
       "assert(${1:response.status == 200})"
     ]
   },
+  "File test": {
+    "prefix": "mettle-test",
+    "description": "Declare a named test in this file",
+    "body": [
+      "test(\"${1:name}\") {",
+      "    assert(${2:true})",
+      "}"
+    ]
+  },
+  "Anonymous file context": {
+    "prefix": "usecontext",
+    "description": "Apply a context to every flow and test in this file",
+    "body": [
+      "use context {",
+      "    ${1:baseUrl}: env(\"${2:API_URL}\")",
+      "}"
+    ]
+  },
+  "Secret environment variable": {
+    "prefix": "senv",
+    "description": "Read a secret environment variable",
+    "body": [
+      "senv(\"${1:API_TOKEN}\")"
+    ]
+  },
   "Deadline scope": {
     "prefix": "within",
     "description": "Run one expression within a deadline",

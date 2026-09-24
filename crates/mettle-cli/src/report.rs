@@ -91,6 +91,30 @@ pub struct ExecutionReport<'a> {
 }
 
 impl ExecutionReport<'_> {
+    pub fn test_human(&self, verbose: bool, color: bool) -> String {
+        let mut output = String::from("\n");
+        for operation in self.operations {
+            render_operation(&mut output, operation, color, verbose);
+        }
+        write!(
+            output,
+            "{} Passed in {}",
+            style("✓", "32", color),
+            display_duration(self.duration)
+        )
+        .expect("writing to a string cannot fail");
+        output
+    }
+
+    pub fn test_quiet(&self, color: bool) -> String {
+        format!(
+            "{} {} · {}",
+            style("✓", "32", color),
+            self.flow,
+            display_duration(self.duration)
+        )
+    }
+
     pub fn human(&self, verbose: bool, color: bool) -> String {
         if let Some(summary) = workload_result(self.result, color) {
             return format!("{}\n\n{summary}", style(self.flow, "1", color));
@@ -118,12 +142,12 @@ impl ExecutionReport<'_> {
         let show_result = if verbose {
             final_operation_report.is_none()
         } else {
-            self.operations.is_empty() || payload.is_some()
+            self.operations.is_empty() || payload.is_some() || final_operation_report.is_none()
         };
         if show_result {
             let label = if verbose {
                 "Full result"
-            } else if self.operations.is_empty() {
+            } else if self.operations.is_empty() || final_operation_report.is_none() {
                 "Result"
             } else {
                 "Response"
@@ -335,14 +359,24 @@ fn workload_result(value: &Value, color: bool) -> Option<String> {
     Some(output)
 }
 
-pub fn failure_summary(flow: &str, operations: &[OperationEvent], color: bool) -> String {
+pub fn failure_summary(
+    flow: &str,
+    operations: &[OperationEvent],
+    color: bool,
+    test: bool,
+) -> String {
     let mut output = String::new();
     writeln!(output, "{}\n", style(flow, "1", color)).expect("writing to a string cannot fail");
     for operation in operations {
         render_operation(&mut output, operation, color, false);
     }
-    write!(output, "{} Flow failed", style("✗", "31", color))
-        .expect("writing to a string cannot fail");
+    write!(
+        output,
+        "{} {} failed",
+        style("✗", "31", color),
+        if test { "Test" } else { "Flow" }
+    )
+    .expect("writing to a string cannot fail");
     output
 }
 
@@ -495,13 +529,11 @@ pub fn display_duration(duration: Duration) -> String {
             format!("{:.2}ms", duration.as_secs_f64() * 1_000.0)
         }
     } else if duration >= Duration::from_micros(1) {
-        if duration.as_nanos().is_multiple_of(1_000) {
-            format!("{}us", duration.as_micros())
-        } else {
-            format!("{:.2}us", duration.as_secs_f64() * 1_000_000.0)
-        }
+        format!("{:.3}ms", duration.as_secs_f64() * 1_000.0)
+    } else if duration.is_zero() {
+        "0ms".to_owned()
     } else {
-        format!("{}ns", duration.as_nanos())
+        format!("{:.6}ms", duration.as_secs_f64() * 1_000.0)
     }
 }
 
@@ -526,7 +558,7 @@ fn style(value: &str, code: &str, enabled: bool) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{ExecutionReport, truncate};
+    use super::{ExecutionReport, display_duration, truncate};
     use mettle_capability::{Capability, Span, Value};
     use mettle_http::HttpCapability;
     use mettle_runtime::OperationEvent;
@@ -547,6 +579,52 @@ mod tests {
         assert!(output.contains("health"));
         assert!(output.contains("\"active\": true"));
         assert!(output.contains("✓ Completed in 12ms"));
+    }
+
+    #[test]
+    fn submillisecond_duration_is_displayed_in_milliseconds() {
+        assert_eq!(
+            display_duration(std::time::Duration::from_micros(9)),
+            "0.009ms"
+        );
+        assert_eq!(
+            display_duration(std::time::Duration::from_nanos(9)),
+            "0.000009ms"
+        );
+        assert_eq!(display_duration(std::time::Duration::ZERO), "0ms");
+    }
+
+    #[test]
+    fn human_report_shows_transformed_result_after_an_operation() {
+        let response = Value::Object(BTreeMap::from([
+            ("method".to_owned(), Value::String("GET".to_owned())),
+            ("status".to_owned(), Value::Integer(200)),
+            (
+                "url".to_owned(),
+                Value::String("https://example.test/post".to_owned()),
+            ),
+        ]));
+        let result = Value::Object(BTreeMap::from([(
+            "profile".to_owned(),
+            Value::String("qa".to_owned()),
+        )]));
+        let operation = OperationEvent {
+            capability: "http".to_owned(),
+            operation: "get".to_owned(),
+            duration: std::time::Duration::from_millis(10),
+            span: Span::default(),
+            result: Ok(response.clone()),
+            report: HttpCapability::new().report(0, &response),
+        };
+        let output = ExecutionReport {
+            flow: "main",
+            duration: std::time::Duration::from_millis(12),
+            result: &result,
+            operations: &[operation],
+        }
+        .human(false, false);
+        assert!(output.contains("Result"), "{output}");
+        assert!(output.contains("\"profile\": \"qa\""), "{output}");
     }
 
     #[test]
