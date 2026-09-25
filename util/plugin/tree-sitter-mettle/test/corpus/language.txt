@@ -1,0 +1,765 @@
+================================================================================
+Declarations and file contexts
+================================================================================
+
+namespace checks
+use namespace shared
+context base { url: "https://example.com" }
+use context base
+use context local { use context base, defaults http { timeout: 5s } }
+use context { token: "${TOKEN}" }
+flow identity(value) = value
+flow { echo("ready") }
+http.get("/")
+test("works") { assert(true, "ready") }
+
+---
+
+(source_file
+  (namespace_declaration
+    (identifier))
+  (namespace_use
+    (identifier))
+  (context_declaration
+    (identifier)
+    (context_body
+      (object_field
+        (identifier)
+        (string
+          (string_content)))))
+  (file_context_use
+    (identifier))
+  (file_context_use
+    (identifier)
+    (context_body
+      (context_use
+        (identifier))
+      (defaults_declaration
+        (identifier)
+        (object
+          (object_field
+            (identifier)
+            (duration))))))
+  (file_context_use
+    (context_body
+      (object_field
+        (identifier)
+        (string
+          (interpolation
+            (interpolation_path))))))
+  (flow_declaration
+    (identifier)
+    (parameter_list
+      (identifier))
+    (identifier))
+  (anonymous_flow
+    (block
+      (expression_statement
+        (call_expression
+          (identifier)
+          (argument_list
+            (string
+              (string_content)))))))
+  (call_expression
+    (member_expression
+      (identifier)
+      (identifier))
+    (argument_list
+      (string
+        (string_content))))
+  (test_declaration
+    (string
+      (string_content))
+    (block
+      (assert_statement
+        (boolean)
+        (string
+          (string_content))))))
+
+================================================================================
+Boolean precedence and member access
+================================================================================
+
+flow choose(a, b, c) {
+    result = a or b and not c == false
+    if (result) { return http.get("/").json[0]["name"] }
+    else if (not a) { return null }
+    else { return "fallback" }
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list
+      (identifier)
+      (identifier)
+      (identifier))
+    (block
+      (binding
+        (identifier)
+        (binary_expression
+          (identifier)
+          (binary_expression
+            (identifier)
+            (binary_expression
+              (unary_expression
+                (identifier))
+              (boolean)))))
+      (if_statement
+        (identifier)
+        (block
+          (return_statement
+            (index_expression
+              (index_expression
+                (member_expression
+                  (call_expression
+                    (member_expression
+                      (identifier)
+                      (identifier))
+                    (argument_list
+                      (string
+                        (string_content))))
+                  (identifier))
+                (integer))
+              (string
+                (string_content)))))
+        (if_statement
+          (unary_expression
+            (identifier))
+          (block
+            (return_statement
+              (null)))
+          (block
+            (return_statement
+              (string
+                (string_content)))))))))
+
+================================================================================
+Nested values and strings
+================================================================================
+
+flow values() = {
+    integer: 1_000
+    float: 1_000.25
+    durations: [1ns, 2us, 3ms, 4s, 5m, 6h]
+    "quoted-key": [true, false, null, { nested: [] }],
+    text: "héllo ${user.name}, ${TOKEN}: \\ \" \n \r \t $ $$",
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (object
+      (object_field
+        (identifier)
+        (integer))
+      (object_field
+        (identifier)
+        (float))
+      (object_field
+        (identifier)
+        (array
+          (duration)
+          (duration)
+          (duration)
+          (duration)
+          (duration)
+          (duration)))
+      (object_field
+        (string
+          (string_content))
+        (array
+          (boolean)
+          (boolean)
+          (null)
+          (object
+            (object_field
+              (identifier)
+              (array)))))
+      (object_field
+        (identifier)
+        (string
+          (string_content)
+          (interpolation
+            (interpolation_path))
+          (string_content)
+          (interpolation
+            (interpolation_path))
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (escape_sequence)
+          (string_content)
+          (string_content)
+          (string_content)
+          (string_content)
+          (string_content))))))
+
+================================================================================
+All execution policies
+================================================================================
+
+flow work() = within(timeout: 2s) {
+    retry(attempts: 3, delay: 10ms) {
+        parallel(limit: 2) { fetch(1), fetch(2) }
+    }
+}
+flow one() = retry(attempts: 1) { fetch() }
+flow empty() = parallel() {}
+flow load() = rate(target: 5, period: 1s, duration: 2s) { fetch() }
+flow capped() = rate(target: 5, period: 1s, duration: 2s, limit: 10) { fetch() }
+flow workers() = concurrency(limit: 2, duration: 1s) { fetch() }
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (within_expression
+      (timeout_option
+        (identifier)
+        (duration))
+      (expression_body
+        (expression_statement
+          (retry_expression
+            (attempts_option
+              (identifier)
+              (integer))
+            (delay_option
+              (identifier)
+              (duration))
+            (expression_body
+              (expression_statement
+                (parallel_expression
+                  (limit_option
+                    (identifier)
+                    (integer))
+                  (parallel_body
+                    (call_expression
+                      (identifier)
+                      (argument_list
+                        (integer)))
+                    (call_expression
+                      (identifier)
+                      (argument_list
+                        (integer))))))))))))
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (retry_expression
+      (attempts_option
+        (identifier)
+        (integer))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list))))))
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (parallel_expression
+      (parallel_body)))
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (rate_expression
+      (target_option
+        (identifier)
+        (integer))
+      (period_option
+        (identifier)
+        (duration))
+      (duration_option
+        (identifier)
+        (duration))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list))))))
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (rate_expression
+      (target_option
+        (identifier)
+        (integer))
+      (period_option
+        (identifier)
+        (duration))
+      (duration_option
+        (identifier)
+        (duration))
+      (limit_option
+        (identifier)
+        (integer))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list))))))
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (concurrency_expression
+      (limit_option
+        (identifier)
+        (integer))
+      (duration_option
+        (identifier)
+        (duration))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list)))))))
+
+================================================================================
+Multiline continuations and comments
+================================================================================
+
+flow main() {
+    response = http // keep receiver
+        .get // keep method
+        (
+            "/"
+        ) // options follow on the next line
+        {
+            timeout: 5s
+        }
+    value = response
+        .json
+        [0]
+    valid = value
+        == 1
+        and true
+        or false
+    if (valid) { echo("yes") }
+    // else still belongs to the if
+    else { echo("no") }
+    return valid
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (block
+      (binding
+        (identifier)
+        (call_expression
+          (member_expression
+            (identifier)
+            (comment)
+            (identifier))
+          (comment)
+          (argument_list
+            (string
+              (string_content)))
+          (comment)
+          (object
+            (object_field
+              (identifier)
+              (duration)))))
+      (binding
+        (identifier)
+        (index_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (integer)))
+      (binding
+        (identifier)
+        (binary_expression
+          (binary_expression
+            (binary_expression
+              (identifier)
+              (integer))
+            (boolean))
+          (boolean)))
+      (if_statement
+        (identifier)
+        (block
+          (expression_statement
+            (call_expression
+              (identifier)
+              (argument_list
+                (string
+                  (string_content))))))
+        (comment)
+        (block
+          (expression_statement
+            (call_expression
+              (identifier)
+              (argument_list
+                (string
+                  (string_content)))))))
+      (return_statement
+        (identifier)))))
+
+================================================================================
+Newlines separate statements and fields
+================================================================================
+
+flow main() {
+    use context base
+    // comment before a new parenthesized expression
+    (true)
+    x = 1
+    { a: 1
+      b: 2, }
+    echo("done")
+    // final comment
+}
+context settings {
+    use context base
+    defaults http { timeout: 1s }
+    url: "/"
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list)
+    (block
+      (context_use
+        (identifier))
+      (comment)
+      (expression_statement
+        (parenthesized_expression
+          (boolean)))
+      (binding
+        (identifier)
+        (integer))
+      (expression_statement
+        (object
+          (object_field
+            (identifier)
+            (integer))
+          (object_field
+            (identifier)
+            (integer))))
+      (expression_statement
+        (call_expression
+          (identifier)
+          (argument_list
+            (string
+              (string_content)))))
+      (comment)))
+  (context_declaration
+    (identifier)
+    (context_body
+      (context_use
+        (identifier))
+      (defaults_declaration
+        (identifier)
+        (object
+          (object_field
+            (identifier)
+            (duration))))
+      (object_field
+        (identifier)
+        (string
+          (string_content))))))
+
+================================================================================
+Keyword prefixes and literal dollars
+================================================================================
+
+flow names(flowing, android, orchard, elsewhere) {
+    timeout = "$"
+    andrew = "$$${TOKEN}$"
+    orwell = "cost $5"
+    return [flowing, android, orchard, elsewhere, timeout, andrew, orwell]
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list
+      (identifier)
+      (identifier)
+      (identifier)
+      (identifier))
+    (block
+      (binding
+        (identifier)
+        (string
+          (string_content)))
+      (binding
+        (identifier)
+        (string
+          (string_content)
+          (string_content)
+          (interpolation
+            (interpolation_path))
+          (string_content)))
+      (binding
+        (identifier)
+        (string
+          (string_content)
+          (string_content)
+          (string_content)))
+      (return_statement
+        (array
+          (identifier)
+          (identifier)
+          (identifier)
+          (identifier)
+          (identifier)
+          (identifier)
+          (identifier))))))
+
+================================================================================
+Current declaration and call forms
+================================================================================
+
+flow main {
+    response = http.post("/", body: { value: 1 }, timeout: 5s,)
+    response
+}
+flow value = 42
+test "bare test name" { assert(value() == 42) }
+flow errors(message) = fail(message)
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (block
+      (binding
+        (identifier)
+        (call_expression
+          (member_expression
+            (identifier)
+            (identifier))
+          (argument_list
+            (string
+              (string_content))
+            (named_argument
+              (identifier)
+              (object
+                (object_field
+                  (identifier)
+                  (integer))))
+            (named_argument
+              (identifier)
+              (duration)))))
+      (expression_statement
+        (identifier))))
+  (flow_declaration
+    (identifier)
+    (integer))
+  (test_declaration
+    (string
+      (string_content))
+    (block
+      (assert_statement
+        (binary_expression
+          (call_expression
+            (identifier)
+            (argument_list))
+          (integer)))))
+  (flow_declaration
+    (identifier)
+    (parameter_list
+      (identifier))
+    (fail_expression
+      (identifier))))
+
+================================================================================
+Loops and current numeric forms
+================================================================================
+
+flow flags(values) = for item in values { item > 0 }
+flow main {
+    responses = parallel {
+        first: 0x2A
+        second: 0b10_1010
+    }
+    values = for key, value in responses {
+        assert(value > -1)
+        -value
+    }
+    return [-0x2A, -0b10, -1.5, 1.25e2, 2E-3, 1_000, 1.5ms,]
+}
+flow fetched = for item in fetch() { echo(item) }
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list
+      (identifier))
+    (for_expression
+      (identifier)
+      (identifier)
+      (block
+        (expression_statement
+          (binary_expression
+            (identifier)
+            (integer))))))
+  (flow_declaration
+    (identifier)
+    (block
+      (binding
+        (identifier)
+        (parallel_expression
+          (parallel_body
+            (named_branch
+              (identifier)
+              (integer))
+            (named_branch
+              (identifier)
+              (integer)))))
+      (binding
+        (identifier)
+        (for_expression
+          (identifier)
+          (identifier)
+          (identifier)
+          (block
+            (assert_statement
+              (binary_expression
+                (identifier)
+                (integer)))
+            (expression_statement
+              (unary_expression
+                (identifier))))))
+      (return_statement
+        (array
+          (integer)
+          (integer)
+          (float)
+          (float)
+          (float)
+          (integer)
+          (duration)))))
+  (flow_declaration
+    (identifier)
+    (for_expression
+      (identifier)
+      (call_expression
+        (identifier)
+        (argument_list))
+      (block
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list
+              (identifier))))))))
+
+================================================================================
+Reordered options and statement policy bodies
+================================================================================
+
+flow main = retry(delay: 1.5ms, attempts: 2,) {
+    value = within(timeout: 2s,) {
+        response = fetch()
+        assert(response.status == 200)
+        response
+    }
+    value
+}
+flow load = rate(duration: 2s, limit: 5, period: 1s, target: 10,) {
+    echo("tick")
+    fetch()
+}
+flow workers = concurrency(duration: 1s, limit: 2,) { fetch() }
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (retry_expression
+      (delay_option
+        (identifier)
+        (duration))
+      (attempts_option
+        (identifier)
+        (integer))
+      (expression_body
+        (binding
+          (identifier)
+          (within_expression
+            (timeout_option
+              (identifier)
+              (duration))
+            (expression_body
+              (binding
+                (identifier)
+                (call_expression
+                  (identifier)
+                  (argument_list)))
+              (assert_statement
+                (binary_expression
+                  (member_expression
+                    (identifier)
+                    (identifier))
+                  (integer)))
+              (expression_statement
+                (identifier)))))
+        (expression_statement
+          (identifier)))))
+  (flow_declaration
+    (identifier)
+    (rate_expression
+      (duration_option
+        (identifier)
+        (duration))
+      (limit_option
+        (identifier)
+        (integer))
+      (period_option
+        (identifier)
+        (duration))
+      (target_option
+        (identifier)
+        (integer))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list
+              (string
+                (string_content)))))
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list))))))
+  (flow_declaration
+    (identifier)
+    (concurrency_expression
+      (duration_option
+        (identifier)
+        (duration))
+      (limit_option
+        (identifier)
+        (integer))
+      (expression_body
+        (expression_statement
+          (call_expression
+            (identifier)
+            (argument_list)))))))

@@ -88,6 +88,12 @@ load the optional [Neovim vim-test adapter](util/plugin/neovim/README.md). It
 supports nearest execution, all tests or eligible flows in a file, and vim-test's
 last-run and return-to-source commands.
 
+For syntax highlighting, the repository also includes a
+[Tree-sitter grammar and Neovim setup instructions](util/plugin/tree-sitter-mettle/README.md).
+It provides highlighting, folding, and indentation queries and works alongside
+the language server. The setup instructions cover Neovim 0.11 with the
+`nvim-treesitter` plugin's `master` branch.
+
 ### VS Code extension
 
 The repository includes the Mettle Language extension for syntax highlighting,
@@ -661,18 +667,19 @@ It builds the release binary, starts an isolated fixture, executes 5,000 schedul
 ## Repository map
 
 ```text
-crates/mettle-syntax       Lexer, parser, AST, and source spans
-crates/mettle-capability   Capability schemas, values, and runtime interface
-crates/mettle-compiler     Resolution, validation, and execution-plan lowering
-crates/mettle-runtime      Async execution-plan interpreter and context scopes
-crates/mettle-http         HTTP schema, pooled client, JSON, timeouts, and TLS
-crates/mettle-cli          Native command-line interface and diagnostics
-examples/                  Curated language and HTTP examples; start with examples/README.md
-tests/fixtures/            Deterministic HTTP programs and local TLS material
-tests/projects/            Multi-file project fixtures
-util/plugin/vscode/        Installable VS Code extension
-util/test-server/          Local HTTP and HTTPS acceptance fixture
-docs/                      Language, runtime, and dependency documentation
+crates/mettle-syntax              Lexer, parser, AST, and source spans
+crates/mettle-capability          Capability schemas, values, and runtime interface
+crates/mettle-compiler            Resolution, validation, and execution-plan lowering
+crates/mettle-runtime             Async execution-plan interpreter and context scopes
+crates/mettle-http                HTTP schema, pooled client, JSON, timeouts, and TLS
+crates/mettle-cli                 Native command-line interface and diagnostics
+examples/                         Curated language and HTTP examples; start with examples/README.md
+tests/fixtures/                   Deterministic HTTP programs and local TLS material
+tests/projects/                   Multi-file project fixtures
+util/plugin/vscode/               Installable VS Code extension
+util/plugin/tree-sitter-mettle/   Tree-sitter editor parser, queries, and grammar tests
+util/test-server/                 Local HTTP and HTTPS acceptance fixture
+docs/                             Language, runtime, and dependency documentation
 ```
 
 The [language proposal](docs/language-proposal.md) describes the language direction. The [technical strategy](docs/mettle-technical.md) explains the runtime and compiler approach. Third-party Rust dependencies and licences are documented in [docs/dependencies.md](docs/dependencies.md) and [docs/third-party-licenses.md](docs/third-party-licenses.md).

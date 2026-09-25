@@ -1,0 +1,11 @@
+{
+  "name": "tree-sitter-mettle",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Tree-sitter grammar and editor queries for Mettle",
+  "scripts": {
+    "generate": "tree-sitter generate --abi 15",
+    "test": "tree-sitter test && node scripts/check-examples.js && node scripts/check-syntax.js"
+  }
+}
