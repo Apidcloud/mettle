@@ -81,12 +81,12 @@ it on `PATH`, replace `"mettle"` in `cmd` with the absolute path to
 `target/debug/mettle`. Open a `.mettle` file and run `:checkhealth vim.lsp`
 to confirm that the server attached.
 
-The server reports diagnostics for unsaved edits. For the time being, given Mettle doesn't have separate implementation declarations, go-to-implementation returns the same declaration as go-to-definition.
+The server reports diagnostics for unsaved edits. Go to Implementation navigates from named flow calls and local binding references to their declarations. Go to Definition also resolves parameters and named contexts.
 
 ### VS Code extension
 
 The repository includes the Mettle Language extension for syntax highlighting,
-parser/compiler diagnostics, flow and test CodeLens actions, and go-to-definition (go-to-implementation resolves to the same). Build and install its VSIX from
+parser/compiler diagnostics, flow and test CodeLens actions, Go to Definition, and Go to Implementation for flow calls and local binding references. Build and install its VSIX from
 the repository checkout:
 
 ```bash

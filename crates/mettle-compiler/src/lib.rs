@@ -261,7 +261,7 @@ mod lowering;
 pub use lowering::{compile, compile_with_capabilities};
 
 mod definition;
-pub use definition::find_definition;
+pub use definition::{find_definition, find_implementation};
 
 fn flow_display_name(flow: &MettleDecl, flow_id: usize) -> String {
     if let Some(name) = &flow.name {
@@ -408,7 +408,7 @@ mod tests {
 
     use super::{
         Constant, Instruction, PlanExpressionKind, compile, compile_with_capabilities,
-        find_definition,
+        find_definition, find_implementation,
     };
 
     const TLS_OPTIONS: &[FieldSchema] = &[FieldSchema {
@@ -733,9 +733,11 @@ mod tests {
             Statement::UseContext { name, .. } => name.span,
             _ => panic!("expected context use"),
         };
-        let call = match &entry.flows[0].body[1] {
+        let (call, argument) = match &entry.flows[0].body[1] {
             Statement::Bind { expression, .. } => match &expression.kind {
-                ExpressionKind::Call { callee, .. } => callee.span,
+                ExpressionKind::Call {
+                    callee, arguments, ..
+                } => (callee.span, arguments[0].span),
                 _ => panic!("expected call"),
             },
             _ => panic!("expected binding"),
@@ -759,6 +761,14 @@ mod tests {
         );
         assert_eq!(find_definition(&program, 1, call.start), Some(flow_span));
         assert_eq!(find_definition(&program, 1, local.start), Some(binding));
+        assert_eq!(
+            find_implementation(&program, 1, call.start),
+            Some(flow_span)
+        );
+        assert_eq!(find_implementation(&program, 1, argument.start), None);
+        assert_eq!(find_implementation(&program, 1, local.start), Some(binding));
+        assert_eq!(find_implementation(&program, 1, use_context.start), None);
+        assert_eq!(find_implementation(&program, 1, binding.start), None);
     }
 
     #[test]

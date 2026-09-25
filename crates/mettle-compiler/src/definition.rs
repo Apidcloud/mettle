@@ -14,6 +14,24 @@ pub fn find_definition(program: &Program, source: usize, byte: usize) -> Option<
     DefinitionFinder::new(program, source, byte).find()
 }
 
+/// Find the declaration behind a flow call or local binding reference.
+#[must_use]
+pub fn find_implementation(program: &Program, source: usize, byte: usize) -> Option<Span> {
+    let target = find_definition(program, source, byte)?;
+    let at_declaration = target.source == source && (target.start..=target.end).contains(&byte);
+    let is_context = program
+        .contexts
+        .iter()
+        .filter_map(|context| context.name.as_ref())
+        .any(|name| name.span == target);
+    let is_parameter = program
+        .flows
+        .iter()
+        .flat_map(|flow| &flow.parameters)
+        .any(|parameter| parameter.span == target);
+    (!at_declaration && !is_context && !is_parameter).then_some(target)
+}
+
 struct DefinitionFinder<'a> {
     program: &'a Program,
     source: usize,
