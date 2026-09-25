@@ -33,6 +33,9 @@ Definition** (`Alt+F12`) commands work as well. Cross-file lookup follows the
 same implicit-global, current-namespace, and `use namespace` rules as the
 compiler. Ambiguous and unresolved names deliberately have no destination.
 
+**Go to Implementation** opens the declaration of a named flow call or local
+binding reference. Parameters and named contexts use Go to Definition.
+
 The extension starts `mettle lsp` in the background and synchronizes complete
 in-memory documents, so a file does not need to be saved before navigation.
 

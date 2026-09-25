@@ -5,6 +5,7 @@
 - Align the extension's pre-release version with the Mettle workspace.
 - Add file contexts, profiles, tests, conditionals, terminal `fail()`, load
   workloads, structured HTTP output, and richer execution diagnostics.
+- Add Go to Implementation for named flow calls and local binding references. Parameters and named contexts remain available through Go to Definition.
 
 ## 0.16.0
 

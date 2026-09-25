@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use mettle_compiler::{compile_with_capabilities, find_definition};
+use mettle_compiler::{compile_with_capabilities, find_definition, find_implementation};
 use mettle_syntax::{Span, parse};
 use serde_json::{Value, json};
 
@@ -56,6 +56,7 @@ impl Server {
                 &json!({
                     "capabilities": {
                         "definitionProvider": true,
+                        "implementationProvider": true,
                         "textDocumentSync": {
                             "openClose": true,
                             "change": 1,
@@ -72,10 +73,13 @@ impl Server {
                 self.shutdown = true;
                 write_result(writer, &id, &Value::Null)?;
             }
-            (Some("textDocument/definition"), Some(id)) => {
+            (
+                Some(method @ ("textDocument/definition" | "textDocument/implementation")),
+                Some(id),
+            ) => {
                 let result = message
                     .get("params")
-                    .and_then(|params| self.definition(params));
+                    .and_then(|params| self.navigation(params, method));
                 write_result(writer, &id, &result.unwrap_or(Value::Null))?;
             }
             (Some("textDocument/didOpen"), None) => self.did_open(message, writer)?,
@@ -231,7 +235,7 @@ impl Server {
         Some(diagnostics)
     }
 
-    fn definition(&self, params: &Value) -> Option<Value> {
+    fn navigation(&self, params: &Value, method: &str) -> Option<Value> {
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let path = normalize_path(file_uri_to_path(uri)?);
         let line = usize::try_from(params.pointer("/position/line")?.as_u64()?).ok()?;
@@ -242,7 +246,11 @@ impl Server {
             .iter()
             .position(|source| normalize_path(source.path.clone()) == path)?;
         let byte = byte_offset(&project.sources[source].text, line, character)?;
-        let target = find_definition(&project.program, source, byte)?;
+        let target = match method {
+            "textDocument/definition" => find_definition(&project.program, source, byte),
+            "textDocument/implementation" => find_implementation(&project.program, source, byte),
+            _ => None,
+        }?;
         let target_source = project.sources.get(target.source)?;
         Some(json!({
             "uri": path_to_file_uri(&target_source.path),
@@ -663,22 +671,28 @@ mod tests {
         fs::write(directory.join("mettle.toml"), "name = \"lsp-test\"\n")
             .expect("manifest should be writable");
         let declaration = directory.join("shared.mettle");
-        fs::write(&declaration, "namespace shared\nflow helper() = true\n")
-            .expect("declaration should be writable");
+        fs::write(
+            &declaration,
+            "namespace shared\nflow helper(value) = value\n",
+        )
+        .expect("declaration should be writable");
         let entry = directory.join("main.mettle");
-        fs::write(&entry, "use namespace shared\nflow main() = false\n")
+        fs::write(&entry, "use namespace shared\nflow main(input) = false\n")
             .expect("entry should be writable");
 
-        let unsaved = "use namespace shared\nflow main() = helper()\n";
+        let unsaved = "use namespace shared\nflow main(input) = helper(input)\n";
         let mut server = Server::default();
         server
             .documents
             .insert(normalize_path(entry.clone()), unsaved.to_owned());
         let result = server
-            .definition(&json!({
-                "textDocument": { "uri": path_to_file_uri(&entry) },
-                "position": { "line": 1, "character": 16 }
-            }))
+            .navigation(
+                &json!({
+                    "textDocument": { "uri": path_to_file_uri(&entry) },
+                    "position": { "line": 1, "character": 19 }
+                }),
+                "textDocument/definition",
+            )
             .expect("definition should resolve");
 
         assert_eq!(
@@ -691,6 +705,43 @@ mod tests {
             result["range"]["start"],
             json!({ "line": 1, "character": 5 })
         );
+        let mut output = Vec::new();
+        server
+            .handle(
+                &json!({
+                    "id": 2,
+                    "method": "textDocument/implementation",
+                    "params": {
+                        "textDocument": { "uri": path_to_file_uri(&entry) },
+                        "position": { "line": 1, "character": 19 }
+                    }
+                }),
+                &mut output,
+            )
+            .expect("implementation request should succeed");
+        let response = read_message(&mut BufReader::new(output.as_slice()))
+            .expect("response should be readable")
+            .expect("response should exist");
+        assert_eq!(response["result"], result);
+
+        output.clear();
+        server
+            .handle(
+                &json!({
+                    "id": 3,
+                    "method": "textDocument/implementation",
+                    "params": {
+                        "textDocument": { "uri": path_to_file_uri(&entry) },
+                        "position": { "line": 1, "character": 26 }
+                    }
+                }),
+                &mut output,
+            )
+            .expect("implementation request should succeed");
+        let response = read_message(&mut BufReader::new(output.as_slice()))
+            .expect("response should be readable")
+            .expect("response should exist");
+        assert_eq!(response["result"], Value::Null);
         fs::remove_dir_all(directory).expect("test project should be removable");
     }
 }
