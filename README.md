@@ -83,6 +83,11 @@ to confirm that the server attached.
 
 The server reports diagnostics for unsaved edits. Go to Implementation navigates from named flow calls and local binding references to their declarations. Go to Definition also resolves parameters and named contexts.
 
+To run flows and tests with your existing vim-test shortcuts and output strategy,
+load the optional [Neovim vim-test adapter](util/plugin/neovim/README.md). It
+supports nearest execution, all tests or eligible flows in a file, and vim-test's
+last-run and return-to-source commands.
+
 ### VS Code extension
 
 The repository includes the Mettle Language extension for syntax highlighting,
