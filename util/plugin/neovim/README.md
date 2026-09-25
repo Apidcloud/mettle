@@ -5,22 +5,37 @@ This adapter connects `.mettle` files to an existing
 0.11+ and the Mettle CLI. It adds no mappings and uses your configured vim-test
 output strategy, including Vimux or Neovim terminal splits.
 
-Add the adapter to the runtime path and register it in your Neovim configuration:
+Add this to your existing Mettle configuration module, or to `init.lua`. Replace
+the paths with your checkout and executable locations:
 
 ```lua
-vim.opt.runtimepath:append("/path/to/mettle/util/plugin/neovim")
-require("mettle_vim_test").setup({
-  executable = "/path/to/mettle/target/debug/mettle", -- defaults to "mettle" on PATH
+local function setup_vim_test()
+  vim.opt.runtimepath:append("/path/to/mettle/util/plugin/neovim")
+  require("mettle_vim_test").setup({
+    executable = "/path/to/mettle/target/debug/mettle", -- or "mettle" on PATH
+  })
+
+  -- Optional: hide the duplicate command echo for all vim-test runners.
+  vim.g["test#echo_command"] = 0
+end
+
+-- lazy.nvim resets runtimepath during startup; restore the adapter afterwards.
+vim.api.nvim_create_autocmd("User", {
+  group = vim.api.nvim_create_augroup("MettleVimTest", { clear = true }),
+  pattern = "LazyDone",
+  once = true,
+  callback = setup_vim_test,
 })
+setup_vim_test()
 ```
 
 The executable is a path, not a shell command. Use the same binary as your Mettle
 LSP configuration. No change to your existing vim-test mappings is needed.
 
-With lazy.nvim, run this setup **after** `require("lazy").setup(...)`, or in a
-`User LazyDone` autocmd if your Mettle configuration loads earlier. Lazy resets
-the runtime path during startup; a path added only before that reset disappears,
-causing `Unknown function: test#mettle#mettle#test_file` when running a test.
+The example works whether it loads before or after lazy.nvim. The `LazyDone`
+callback restores the runtime path if lazy resets it, avoiding
+`Unknown function: test#mettle#mettle#test_file`. If you do not use lazy.nvim,
+you can omit the autocmd and keep the `setup_vim_test()` call.
 
 | Command | Behavior |
 | --- | --- |
@@ -49,6 +64,11 @@ automatically.
 To display output in a reusable Neovim terminal instead of an external pane,
 vim-test supports `vim.g["test#strategy"] = "neovim_sticky"`. This adapter leaves
 that choice to your existing configuration.
+
+To avoid vim-test printing a second copy of the shell command before the output,
+set `vim.g["test#echo_command"] = 0` in your vim-test configuration. This setting
+applies to all vim-test runners. With Vimux, the shell command may still be
+visible in scrollback; the default screen clearing keeps the current results tidy.
 
 ## Verify the adapter
 
