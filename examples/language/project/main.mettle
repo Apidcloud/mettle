@@ -1,10 +1,12 @@
+// Run: mettle run examples/language/project/main.mettle --profile qa
+// The project manifest discovers `core.mettle` and `users.mettle` automatically.
 use namespace users
 
-flow main() {
+flow main {
     response = inspectRequest(1)
     assert(response.status == 200)
     assert(response.json.id == 1)
-    return {
+    {
         profile: env("PROFILE_NAME")
         post: response.json
     }

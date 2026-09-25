@@ -8,19 +8,15 @@ context localApi {
     }
 }
 
-flow main() {
+flow main {
     use context localApi
 
-    posted = http.post("/method") {
-        json: { action: "create" }
-    }
-    put = http.put("/method") {
-        body: "replacement"
-    }
-    patched = http.patch("/method") {
-        headers: { "Content-Type": "application/merge-patch+json" }
-        json: { active: true }
-    }
+    posted = http.post("/method", body: { action: "create" })
+    put = http.put("/method", body: "replacement")
+    patched = http.patch("/method", headers: { "Content-Type": "application/merge-patch+json" }, body: { active: true })
+    jsonString = http.post("/method", body: "Ada", bodyFormat: "json")
+    namedUrl = http.post(body: [1, 2], url: "/method")
+    rawCopy = http.post("/method", body: posted.bodyBytes)
     deleted = http.delete("/method")
     head = http.head("/method")
     options = http.options("/method")
@@ -35,8 +31,12 @@ flow main() {
 
     return {
         posted: posted.json
+        postedResponseBody: posted.body
         put: put.json
         patched: patched.json
+        jsonString: jsonString.json
+        namedUrl: namedUrl.json
+        rawCopy: rawCopy.json
         deleted: deleted.json
         headBody: head.body
         allowed: options.headers["allow"]

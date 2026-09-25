@@ -10,6 +10,33 @@ use super::{
     schema_value_type, with_name_suggestion,
 };
 
+fn expression_block_return(statements: &[Statement]) -> Option<Span> {
+    for statement in statements {
+        match statement {
+            Statement::Return { span, .. } => return Some(*span),
+            Statement::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for branch in branches {
+                    if let Some(span) = expression_block_return(&branch.body) {
+                        return Some(span);
+                    }
+                }
+                if let Some(span) = else_body
+                    .as_ref()
+                    .and_then(|body| expression_block_return(body))
+                {
+                    return Some(span);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Compile without external capabilities. Useful for pure Mettle programs.
 ///
 /// # Errors
@@ -479,11 +506,19 @@ impl<'a> Compiler<'a> {
         }
         let active_context = contexts.first().copied();
 
+        let mut body = flow.body.clone();
+        if flow.kind == DeclarationKind::Flow
+            && let Some(Statement::Expression(expression)) = body.last().cloned()
+        {
+            let span = expression.span;
+            *body.last_mut().expect("last statement exists") =
+                Statement::Return { expression, span };
+        }
         let mut next_slot = locals.len();
         let (instructions, returned) = self.compile_statements(
             flow_id,
             flow,
-            &flow.body,
+            &body,
             &mut locals,
             &mut next_slot,
             active_context,
@@ -534,7 +569,7 @@ impl<'a> Compiler<'a> {
         for statement in statements {
             if returned {
                 self.errors.push(CompileError::new(
-                    "statement is unreachable because the flow already returned",
+                    "statement is unreachable because the flow already returned or failed",
                     statement.span(),
                 ));
                 continue;
@@ -572,11 +607,12 @@ impl<'a> Compiler<'a> {
                         ExpressionKind::Call {
                             callee,
                             arguments,
+                            named_arguments,
                             options,
                         },
                     span,
                 }) if callee.value == "echo" => {
-                    if arguments.len() != 1 || !options.is_empty() {
+                    if arguments.len() != 1 || !named_arguments.is_empty() || !options.is_empty() {
                         self.errors.push(CompileError::new(
                             "`echo` expects exactly one argument and no option block",
                             *span,
@@ -591,11 +627,13 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 Statement::Expression(expression) => {
+                    let fails = matches!(expression.kind, ExpressionKind::Fail(_));
                     if let Some(expression) =
                         self.compile_expression(Some(flow_id), expression, locals, active_context)
                     {
                         instructions.push(Instruction::Evaluate(expression));
                     }
+                    returned |= fails;
                 }
                 Statement::Return { expression, .. } => {
                     if flow.kind == DeclarationKind::Test {
@@ -747,6 +785,19 @@ impl<'a> Compiler<'a> {
             ExpressionKind::String(value) => {
                 return self.compile_string(value, expression.span, locals, context);
             }
+            ExpressionKind::Fail(message) => {
+                let message = self.compile_expression(current_flow, message, locals, context)?;
+                if !matches!(message.value_type, ValueType::String | ValueType::Inferred) {
+                    self.errors.push(CompileError::new(
+                        "`fail` message must be a string",
+                        message.span,
+                    ));
+                }
+                (
+                    PlanExpressionKind::Fail(Box::new(message)),
+                    ValueType::Inferred,
+                )
+            }
             ExpressionKind::Name(name) => {
                 return self.resolve_name(name, expression.span, locals, context);
             }
@@ -762,6 +813,136 @@ impl<'a> Compiler<'a> {
             ExpressionKind::Object(fields) => {
                 let fields = self.compile_fields(current_flow, fields, locals, context, None);
                 (PlanExpressionKind::Object(fields), ValueType::Object)
+            }
+            ExpressionKind::Block(statements) => {
+                let flow_id = current_flow?;
+                if let Some(span) = expression_block_return(statements) {
+                    self.errors.push(CompileError::new(
+                        "`return` cannot exit a flow from inside an execution-policy block; use a final expression",
+                        span,
+                    ));
+                }
+                let mut block = statements.clone();
+                if let Some(Statement::Expression(value)) = block.last().cloned() {
+                    let span = value.span;
+                    *block.last_mut().expect("last statement exists") = Statement::Return {
+                        expression: value,
+                        span,
+                    };
+                }
+                let mut block_locals = locals.clone();
+                let mut next_slot = locals.values().copied().max().map_or(0, |slot| slot + 1);
+                let mut flow = self.program.flows[flow_id].clone();
+                flow.kind = DeclarationKind::Flow;
+                let (instructions, returns_value) = self.compile_statements(
+                    flow_id,
+                    &flow,
+                    &block,
+                    &mut block_locals,
+                    &mut next_slot,
+                    context,
+                    false,
+                );
+                if !returns_value {
+                    self.errors.push(CompileError::new(
+                        "execution block must end with a value",
+                        expression.span,
+                    ));
+                }
+                let value_type = match instructions.last() {
+                    Some(Instruction::Return(value)) => value.value_type,
+                    _ => ValueType::Inferred,
+                };
+                (
+                    PlanExpressionKind::Block {
+                        instructions,
+                        local_count: next_slot,
+                    },
+                    value_type,
+                )
+            }
+            ExpressionKind::For {
+                key,
+                value,
+                iterable,
+                body,
+            } => {
+                let flow_id = current_flow?;
+                if let Some(span) = expression_block_return(body) {
+                    self.errors.push(CompileError::new(
+                        "`return` cannot exit a flow from inside a `for` block; use a final expression",
+                        span,
+                    ));
+                }
+                let iterable = self.compile_expression(current_flow, iterable, locals, context)?;
+                if !matches!(
+                    iterable.value_type,
+                    ValueType::Array | ValueType::Object | ValueType::Inferred
+                ) {
+                    self.errors.push(CompileError::new(
+                        "`for` requires an array or object",
+                        iterable.span,
+                    ));
+                }
+                let mut scope = locals.clone();
+                let mut next_slot = locals.values().copied().max().map_or(0, |slot| slot + 1);
+                let key_slot = key.as_ref().map(|key| {
+                    if scope.contains_key(&key.value) {
+                        self.errors.push(CompileError::new(
+                            format!(
+                                "loop binding `{}` conflicts with an existing name",
+                                key.value
+                            ),
+                            key.span,
+                        ));
+                    }
+                    let slot = next_slot;
+                    next_slot += 1;
+                    scope.insert(key.value.clone(), slot);
+                    slot
+                });
+                if scope.contains_key(&value.value) {
+                    self.errors.push(CompileError::new(
+                        format!(
+                            "loop binding `{}` conflicts with an existing name",
+                            value.value
+                        ),
+                        value.span,
+                    ));
+                }
+                let value_slot = next_slot;
+                next_slot += 1;
+                scope.insert(value.value.clone(), value_slot);
+                let mut body = body.clone();
+                if let Some(Statement::Expression(result)) = body.last().cloned() {
+                    let span = result.span;
+                    *body.last_mut().expect("last statement exists") = Statement::Return {
+                        expression: result,
+                        span,
+                    };
+                }
+                let mut flow = self.program.flows[flow_id].clone();
+                flow.kind = DeclarationKind::Flow;
+                let (instructions, produces_value) = self.compile_statements(
+                    flow_id,
+                    &flow,
+                    &body,
+                    &mut scope,
+                    &mut next_slot,
+                    context,
+                    false,
+                );
+                (
+                    PlanExpressionKind::For {
+                        iterable: Box::new(iterable),
+                        key_slot,
+                        value_slot,
+                        instructions,
+                        local_count: next_slot,
+                        produces_value,
+                    },
+                    ValueType::Inferred,
+                )
             }
             ExpressionKind::Member { value, member } => {
                 let value = self.compile_expression(current_flow, value, locals, context)?;
@@ -801,6 +982,20 @@ impl<'a> Compiler<'a> {
                 }
                 (PlanExpressionKind::Not(Box::new(value)), ValueType::Boolean)
             }
+            ExpressionKind::Negate(value) => {
+                let value = self.compile_expression(current_flow, value, locals, context)?;
+                if !matches!(
+                    value.value_type,
+                    ValueType::Integer | ValueType::Float | ValueType::Inferred
+                ) {
+                    self.errors.push(CompileError::new(
+                        "unary `-` requires an integer or decimal number",
+                        value.span,
+                    ));
+                }
+                let value_type = value.value_type;
+                (PlanExpressionKind::Negate(Box::new(value)), value_type)
+            }
             ExpressionKind::Binary {
                 left,
                 operator,
@@ -833,12 +1028,14 @@ impl<'a> Compiler<'a> {
             ExpressionKind::Call {
                 callee,
                 arguments,
+                named_arguments,
                 options,
             } => {
                 return self.compile_call(
                     current_flow,
                     callee,
                     arguments,
+                    named_arguments,
                     options,
                     expression.span,
                     locals,
@@ -918,15 +1115,44 @@ impl<'a> Compiler<'a> {
                     None => branches.len(),
                 }
                 .min(branches.len());
+                let named = branches[0].name.is_some();
+                let mut branch_labels = std::collections::HashSet::new();
+                for branch in branches {
+                    if branch.name.is_some() != named {
+                        self.errors.push(CompileError::new(
+                            "parallel branches must be either all named or all unnamed",
+                            branch.expression.span,
+                        ));
+                    }
+                    if let Some(name) = &branch.name
+                        && !branch_labels.insert(name.value.as_str())
+                    {
+                        self.errors.push(CompileError::new(
+                            format!(
+                                "parallel branch `{}` is declared more than once",
+                                name.value
+                            ),
+                            name.span,
+                        ));
+                    }
+                }
                 let branches = branches
                     .iter()
                     .filter_map(|branch| {
-                        self.compile_expression(current_flow, branch, locals, context)
+                        self.compile_expression(current_flow, &branch.expression, locals, context)
+                            .map(|expression| super::PlanParallelBranch {
+                                name: branch.name.as_ref().map(|name| name.value.clone()),
+                                expression,
+                            })
                     })
                     .collect();
                 (
                     PlanExpressionKind::Parallel { limit, branches },
-                    ValueType::Array,
+                    if named {
+                        ValueType::Object
+                    } else {
+                        ValueType::Array
+                    },
                 )
             }
             ExpressionKind::Rate {
@@ -1065,6 +1291,7 @@ impl<'a> Compiler<'a> {
         current_flow: Option<usize>,
         callee: &mettle_syntax::Spanned<String>,
         arguments: &[Expression],
+        named_arguments: &[ObjectField],
         options: &[ObjectField],
         span: Span,
         locals: &HashMap<String, usize>,
@@ -1078,7 +1305,7 @@ impl<'a> Compiler<'a> {
             return None;
         }
         if matches!(callee.value.as_str(), "env" | "senv") {
-            if !options.is_empty() || arguments.len() != 1 {
+            if !options.is_empty() || !named_arguments.is_empty() || arguments.len() != 1 {
                 self.errors.push(CompileError::new(
                     format!(
                         "`{}` expects exactly one string argument and no option block",
@@ -1112,7 +1339,7 @@ impl<'a> Compiler<'a> {
         }
 
         if callee.value == "secret" {
-            if !options.is_empty() || arguments.len() != 1 {
+            if !options.is_empty() || !named_arguments.is_empty() || arguments.len() != 1 {
                 self.errors.push(CompileError::new(
                     "`secret` expects exactly one argument and no option block",
                     span,
@@ -1151,30 +1378,65 @@ impl<'a> Compiler<'a> {
                 self.errors.push(CompileError::new(message, callee.span));
                 return None;
             };
-            if arguments.len() != operation.parameters.len() {
+            if arguments.len() > operation.parameters.len() {
                 self.errors.push(CompileError::new(
                     format!(
-                        "operation `{}` expects {} argument(s), but {} were provided",
+                        "operation `{}` accepts at most {} positional argument(s), but {} were provided",
                         callee.value,
                         operation.parameters.len(),
                         arguments.len()
                     ),
                     span,
                 ));
+                return None;
             }
-            let compiled_arguments = arguments
-                .iter()
+            let mut bound = vec![None; operation.parameters.len()];
+            for (index, argument) in arguments.iter().enumerate() {
+                bound[index] = Some(argument);
+            }
+            let mut option_fields = Vec::new();
+            for field in named_arguments {
+                if let Some(index) = operation
+                    .parameter_names
+                    .iter()
+                    .position(|name| *name == field.name.value)
+                {
+                    if bound[index].replace(&field.expression).is_some() {
+                        self.errors.push(CompileError::new(
+                            format!(
+                                "parameter `{}` was supplied more than once",
+                                field.name.value
+                            ),
+                            field.name.span,
+                        ));
+                    }
+                } else {
+                    option_fields.push(field.clone());
+                }
+            }
+            option_fields.extend_from_slice(options);
+            if bound.iter().any(Option::is_none) {
+                self.errors.push(CompileError::new(
+                    format!(
+                        "operation `{}` is missing a required argument",
+                        callee.value
+                    ),
+                    span,
+                ));
+                return None;
+            }
+            let compiled_arguments = bound
+                .into_iter()
                 .enumerate()
                 .filter_map(|(index, argument)| {
+                    let argument = argument?;
                     let value = self.compile_expression(current_flow, argument, locals, context)?;
-                    if let Some(schema) = operation.parameters.get(index) {
-                        self.validate_type(&value, *schema, argument.span);
-                    }
+                    self.validate_type(&value, operation.parameters[index], argument.span);
                     Some(value)
                 })
                 .collect();
             for group in operation.mutually_exclusive {
-                let present = options
+                let present = option_fields
                     .iter()
                     .filter(|option| group.contains(&option.name.value.as_str()))
                     .collect::<Vec<_>>();
@@ -1192,19 +1454,45 @@ impl<'a> Compiler<'a> {
                     ));
                 }
             }
-            let options = self.compile_fields(
+            let compiled_options = self.compile_fields(
                 current_flow,
-                options,
+                &option_fields,
                 locals,
                 context,
                 Some(operation.options),
             );
+            let mut evaluation_order = (0..arguments.len())
+                .map(super::CallEvaluation::Parameter)
+                .collect::<Vec<_>>();
+            for field in named_arguments {
+                if let Some(index) = operation
+                    .parameter_names
+                    .iter()
+                    .position(|name| *name == field.name.value)
+                {
+                    evaluation_order.push(super::CallEvaluation::Parameter(index));
+                } else if let Some(index) = option_fields
+                    .iter()
+                    .position(|option| option.name.value == field.name.value)
+                {
+                    evaluation_order.push(super::CallEvaluation::Option(index));
+                }
+            }
+            for field in options {
+                if let Some(index) = option_fields
+                    .iter()
+                    .position(|option| option.name.value == field.name.value)
+                {
+                    evaluation_order.push(super::CallEvaluation::Option(index));
+                }
+            }
             return Some(PlanExpression {
                 kind: PlanExpressionKind::CapabilityCall {
                     capability: capability_id,
                     operation: operation_id,
                     arguments: compiled_arguments,
-                    options,
+                    options: compiled_options,
+                    evaluation_order,
                 },
                 value_type: schema_value_type(operation.result),
                 span,
@@ -1237,25 +1525,74 @@ impl<'a> Compiler<'a> {
             ));
         }
         let expected = self.program.flows[target].parameters.len();
-        if arguments.len() != expected {
+        if arguments.len() > expected {
             self.errors.push(CompileError::new(
                 format!(
-                    "flow `{}` expects {expected} argument(s), but {} were provided",
+                    "flow `{}` accepts at most {expected} positional argument(s), but {} were provided",
                     callee.value,
                     arguments.len()
                 ),
                 span,
             ));
+            return None;
         }
-        let compiled_arguments = arguments
-            .iter()
-            .filter_map(|argument| self.compile_expression(current_flow, argument, locals, context))
+        let parameter_names = &self.program.flows[target].parameters;
+        let mut bound = vec![None; expected];
+        for (index, argument) in arguments.iter().enumerate() {
+            bound[index] = Some(argument);
+        }
+        for field in named_arguments {
+            if let Some(index) = parameter_names
+                .iter()
+                .position(|name| name.value == field.name.value)
+            {
+                if bound[index].replace(&field.expression).is_some() {
+                    self.errors.push(CompileError::new(
+                        format!(
+                            "parameter `{}` was supplied more than once",
+                            field.name.value
+                        ),
+                        field.name.span,
+                    ));
+                }
+            } else {
+                self.errors.push(CompileError::new(
+                    format!(
+                        "flow `{}` has no parameter `{}`",
+                        callee.value, field.name.value
+                    ),
+                    field.name.span,
+                ));
+            }
+        }
+        if bound.iter().any(Option::is_none) {
+            self.errors.push(CompileError::new(
+                format!("flow `{}` is missing a required argument", callee.value),
+                span,
+            ));
+            return None;
+        }
+        let compiled_arguments = bound
+            .into_iter()
+            .filter_map(|argument| {
+                self.compile_expression(current_flow, argument?, locals, context)
+            })
             .collect();
+        let mut evaluation_order = (0..arguments.len()).collect::<Vec<_>>();
+        for field in named_arguments {
+            if let Some(index) = parameter_names
+                .iter()
+                .position(|name| name.value == field.name.value)
+            {
+                evaluation_order.push(index);
+            }
+        }
         self.call_edges[current_flow_id].push((target, callee.span));
         Some(PlanExpression {
             kind: PlanExpressionKind::MettleCall {
                 flow: target,
                 arguments: compiled_arguments,
+                evaluation_order,
             },
             value_type: ValueType::Inferred,
             span,
@@ -1332,12 +1669,12 @@ impl<'a> Compiler<'a> {
         }
         let valid = match expected {
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
+            SchemaType::Body | SchemaType::Json => value.value_type != ValueType::Duration,
             SchemaType::Bytes => value.value_type == ValueType::Bytes,
             SchemaType::Duration => value.value_type == ValueType::Duration,
             SchemaType::Integer => value.value_type == ValueType::Integer,
             SchemaType::String => value.value_type == ValueType::String,
             SchemaType::Object(_) | SchemaType::StringMap => value.value_type == ValueType::Object,
-            SchemaType::Json => value.value_type != ValueType::Duration,
         };
         if !valid {
             self.errors.push(CompileError::new(

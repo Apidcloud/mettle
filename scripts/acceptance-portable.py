@@ -88,6 +88,16 @@ def main() -> None:
         assert methods["posted"]["method"] == "POST", methods
         assert methods["put"]["method"] == "PUT", methods
         assert methods["patched"]["method"] == "PATCH", methods
+        assert methods["posted"]["json"] == {"action": "create"}, methods
+        assert methods["posted"]["contentType"] == "application/json", methods
+        assert methods["put"]["body"] == "replacement", methods
+        assert methods["put"]["contentType"].startswith("text/plain"), methods
+        assert methods["patched"]["json"] == {"active": True}, methods
+        assert methods["patched"]["contentType"] == "application/merge-patch+json", methods
+        assert methods["jsonString"]["json"] == "Ada", methods
+        assert methods["namedUrl"]["json"] == [1, 2], methods
+        assert methods["rawCopy"]["contentType"] == "application/octet-stream", methods
+        assert methods["rawCopy"]["body"] == methods["postedResponseBody"], methods
         assert methods["deleted"]["method"] == "DELETE", methods
         assert methods["headBody"] == "", methods
         assert "OPTIONS" in methods["allowed"], methods
@@ -111,7 +121,21 @@ def main() -> None:
         fixture.server_close()
         fixture_thread.join(timeout=5)
 
-    print(f"Portable HTTP and load smoke tests passed on {sys.platform}.")
+    # Examples are user-facing documentation: keep every file compilable, then
+    # execute the network-free language demos without relying on public APIs.
+    example_environment = os.environ.copy()
+    for example in sorted((ROOT / "examples").rglob("*.mettle")):
+        relative = example.relative_to(ROOT).as_posix()
+        run("check", relative, environment=example_environment)
+    for name in ("basics", "conditionals", "contexts", "collections-and-numbers", "echo"):
+        relative = f"examples/language/{name}.mettle"
+        run("run", relative, "--raw", environment=example_environment)
+        run("test", relative, "--quiet", environment=example_environment)
+    example_environment["API_TOKEN"] = "safe-demo-token"
+    run("run", "examples/language/secrets.mettle", "--raw", environment=example_environment)
+    run("test", "examples/language/secrets.mettle", "--quiet", environment=example_environment)
+
+    print(f"Portable HTTP, load, and example smoke tests passed on {sys.platform}.")
 
 
 if __name__ == "__main__":

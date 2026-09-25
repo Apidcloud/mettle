@@ -117,7 +117,7 @@
       "patterns": [
         {
           "name": "keyword.control.mettle",
-          "match": "\\b(?:return|assert|if|else|concurrency|parallel|rate|retry|within)\\b"
+          "match": "\\b(?:return|assert|fail|if|else|for|in|concurrency|parallel|rate|retry|within)\\b"
         },
         {
           "name": "keyword.operator.logical.mettle",
@@ -141,7 +141,7 @@
       "patterns": [
         {
           "name": "constant.numeric.duration.mettle",
-          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:ns|us|ms|s|m|h)\\b"
+          "match": "\\b[0-9](?:[0-9_]*[0-9])?(?:\\.[0-9](?:[0-9_]*[0-9])?)?(?:ns|us|ms|s|m|h)\\b"
         }
       ]
     },
@@ -149,7 +149,7 @@
       "patterns": [
         {
           "name": "constant.numeric.mettle",
-          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?\\b"
+          "match": "\\b(?:0[xX][0-9A-Fa-f](?:[0-9A-Fa-f_]*[0-9A-Fa-f])?|0[bB][01](?:[01_]*[01])?|[0-9](?:[0-9_]*[0-9])?(?:\\.[0-9](?:[0-9_]*[0-9])?)?(?:[eE][+-]?[0-9](?:[0-9_]*[0-9])?)?)\\b"
         }
       ]
     },

@@ -1,0 +1,18 @@
+// Run: mettle run examples/language/contexts.mettle
+// Reusable and anonymous file-level contexts apply to every flow and test.
+context punctuation {
+    suffix: "!"
+}
+
+use context {
+    use context punctuation
+    greeting: "Hello"
+}
+
+flow greet(name) = "${greeting}, ${name}${suffix}"
+
+flow main = greet("Mettle")
+
+test "file context applies to tests" {
+    assert(greet("Ada") == "Hello, Ada!")
+}

@@ -240,9 +240,33 @@ impl<'a> DefinitionFinder<'a> {
                     }
                 }
             }
+            ExpressionKind::Block(statements) => {
+                if let Some(flow) = flow {
+                    return self.find_in_statements(statements, &mut locals.clone(), flow);
+                }
+            }
+            ExpressionKind::For {
+                key,
+                value,
+                iterable,
+                body,
+            } => {
+                if let Some(target) = self.find_in_expression(iterable, locals, flow) {
+                    return Some(target);
+                }
+                if let Some(flow) = flow {
+                    let mut scope = locals.clone();
+                    if let Some(key) = key {
+                        scope.insert(key.value.clone(), key.span);
+                    }
+                    scope.insert(value.value.clone(), value.span);
+                    return self.find_in_statements(body, &mut scope, flow);
+                }
+            }
             ExpressionKind::Call {
                 callee,
                 arguments,
+                named_arguments,
                 options,
             } => {
                 if self.at(callee.span)
@@ -263,6 +287,13 @@ impl<'a> DefinitionFinder<'a> {
                         return Some(target);
                     }
                 }
+                for argument in named_arguments {
+                    if let Some(target) =
+                        self.find_in_expression(&argument.expression, locals, flow)
+                    {
+                        return Some(target);
+                    }
+                }
                 for option in options {
                     if let Some(target) = self.find_in_expression(&option.expression, locals, flow)
                     {
@@ -270,7 +301,10 @@ impl<'a> DefinitionFinder<'a> {
                     }
                 }
             }
-            ExpressionKind::Member { value, .. } => {
+            ExpressionKind::Member { value, .. }
+            | ExpressionKind::Fail(value)
+            | ExpressionKind::Not(value)
+            | ExpressionKind::Negate(value) => {
                 return self.find_in_expression(value, locals, flow);
             }
             ExpressionKind::Index { value, index } => {
@@ -278,7 +312,6 @@ impl<'a> DefinitionFinder<'a> {
                     .find_in_expression(value, locals, flow)
                     .or_else(|| self.find_in_expression(index, locals, flow));
             }
-            ExpressionKind::Not(value) => return self.find_in_expression(value, locals, flow),
             ExpressionKind::Binary { left, right, .. } => {
                 return self
                     .find_in_expression(left, locals, flow)
@@ -311,7 +344,8 @@ impl<'a> DefinitionFinder<'a> {
                     return Some(target);
                 }
                 for branch in branches {
-                    if let Some(target) = self.find_in_expression(branch, locals, flow) {
+                    if let Some(target) = self.find_in_expression(&branch.expression, locals, flow)
+                    {
                         return Some(target);
                     }
                 }

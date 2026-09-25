@@ -1,5 +1,9 @@
-// Pure, network-free examples of conditionals, boolean logic, and indexing.
+// Run: mettle run examples/language/conditionals.mettle
+// Conditions, short-circuit booleans, and array/object access need no I/O.
 flow chooseUser(users, position) {
+    if (users == []) {
+        fail("No users available")
+    }
     user = users[position]
     if (user.active and not user.disabled) {
         return user.name
@@ -10,15 +14,15 @@ flow chooseUser(users, position) {
     }
 }
 
-flow main() {
+flow main {
     users = [
         { name: "Ada", active: true, disabled: false },
         { name: "Lin", active: false, disabled: false }
     ]
-    return chooseUser(users, 0)
+    chooseUser(users, 0)
 }
 
-test("selects an active user") {
+test "selects an active user" {
     users = [{ name: "Ada", active: true, disabled: false }]
     assert(chooseUser(users, 0) == "Ada")
     assert(users[0]["name"] == "Ada")

@@ -274,11 +274,11 @@ User acceptance:
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-cargo run -- check examples/hello.mettle
-cargo run -- run examples/hello.mettle
+cargo run -- check examples/language/basics.mettle
+cargo run -- run examples/language/basics.mettle
 ```
 
-The final command must print `Hello from Mettle`. Editing the example to reference an unknown name must produce a nonzero exit status and a source caret.
+The final command must print `Hello, Mettle!`. Editing the example to reference an unknown name must produce a nonzero exit status and a source caret.
 
 ### Editor tooling checkpoint
 
@@ -294,7 +294,7 @@ Before HTTP work, deliver:
 - command-line installation instructions;
 - a language-server direction that reuses the Rust compiler.
 
-User acceptance packages the extension, installs the resulting VSIX, confirms it appears as `flow-lang.mettle-language`, and opens `examples/request-collection.mettle` with the `Mettle` language mode and Run Mettle actions.
+User acceptance packages the extension, installs the resulting VSIX, confirms it appears as `mettle-lang.mettle-language`, and opens `examples/http/requests.mettle` with the `Mettle` language mode and Run Mettle actions.
 
 ### Milestone 2: minimal HTTP vertical slice
 
@@ -339,8 +339,8 @@ Deliver:
 User acceptance:
 
 ```bash
-cargo run -- check examples/request-collection.mettle
-cargo run -- list examples/request-collection.mettle
+cargo run -- check examples/http/requests.mettle
+cargo run -- list examples/http/requests.mettle
 ./scripts/acceptance-http.sh
 ```
 

@@ -2,8 +2,8 @@
 
 use super::{
     BinaryOperator, ContextDecl, ContextMember, DeclarationKind, Expression, ExpressionKind,
-    FileContextUse, IfBranch, MettleDecl, ObjectField, Program, Span, Spanned, Statement,
-    SyntaxError, Token, TokenKind, lex,
+    FileContextUse, IfBranch, MettleDecl, ObjectField, ParallelBranch, Program, Span, Spanned,
+    Statement, SyntaxError, Token, TokenKind, lex,
 };
 
 /// Parse a complete Mettle source file.
@@ -33,6 +33,7 @@ struct Parser<'a> {
     tokens: Vec<Token>,
     cursor: usize,
     source: &'a str,
+    suppress_trailing_options: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -41,6 +42,7 @@ impl<'a> Parser<'a> {
             tokens,
             cursor: 0,
             source,
+            suppress_trailing_options: false,
         }
     }
 
@@ -193,17 +195,18 @@ impl<'a> Parser<'a> {
         }
 
         let name = self.take_identifier("a flow name or `{`")?;
-        self.take(&TokenKind::LeftParen)?;
         let mut parameters = Vec::new();
-        if !self.at(&TokenKind::RightParen) {
-            loop {
-                parameters.push(self.take_identifier("a parameter name")?);
-                if !self.take_if(&TokenKind::Comma) {
-                    break;
+        if self.take_if(&TokenKind::LeftParen) {
+            if !self.at(&TokenKind::RightParen) {
+                loop {
+                    parameters.push(self.take_identifier("a parameter name")?);
+                    if !self.take_if(&TokenKind::Comma) {
+                        break;
+                    }
                 }
             }
+            self.take(&TokenKind::RightParen)?;
         }
-        self.take(&TokenKind::RightParen)?;
         if self.take_if(&TokenKind::Equal) {
             let expression = self.parse_expression()?;
             let span = start.join(expression.span);
@@ -232,7 +235,7 @@ impl<'a> Parser<'a> {
 
     fn parse_test(&mut self) -> Result<MettleDecl, SyntaxError> {
         let start = self.take(&TokenKind::Test)?.span;
-        self.take(&TokenKind::LeftParen)?;
+        let parenthesized = self.take_if(&TokenKind::LeftParen);
         let token = self.advance();
         let TokenKind::String(value) = token.kind else {
             return Err(SyntaxError::new("expected a test name string", token.span));
@@ -240,7 +243,9 @@ impl<'a> Parser<'a> {
         if value.trim().is_empty() {
             return Err(SyntaxError::new("test name cannot be empty", token.span));
         }
-        self.take(&TokenKind::RightParen)?;
+        if parenthesized {
+            self.take(&TokenKind::RightParen)?;
+        }
         let (body, end) = self.parse_statement_block()?;
         Ok(MettleDecl {
             kind: DeclarationKind::Test,
@@ -429,17 +434,28 @@ impl<'a> Parser<'a> {
                 kind: ExpressionKind::Not(Box::new(value)),
             });
         }
+        if self.at(&TokenKind::Minus) {
+            let start = self.advance().span;
+            let value = self.parse_unary()?;
+            return Ok(Expression {
+                span: start.join(value.span),
+                kind: ExpressionKind::Negate(Box::new(value)),
+            });
+        }
         self.parse_primary_expression()
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_primary_expression(&mut self) -> Result<Expression, SyntaxError> {
         let token = self.advance();
         let mut expression = match token.kind {
             TokenKind::Within => self.parse_within(token.span)?,
+            TokenKind::For => self.parse_for(token.span)?,
             TokenKind::Retry => self.parse_retry(token.span)?,
             TokenKind::Parallel => self.parse_parallel(token.span)?,
             TokenKind::Rate => self.parse_rate(token.span)?,
             TokenKind::Concurrency => self.parse_concurrency(token.span)?,
+            TokenKind::Fail => self.parse_fail(token.span)?,
             TokenKind::Null => literal(ExpressionKind::Null, token.span),
             TokenKind::True => literal(ExpressionKind::Boolean(true), token.span),
             TokenKind::False => literal(ExpressionKind::Boolean(false), token.span),
@@ -492,25 +508,42 @@ impl<'a> Parser<'a> {
             };
             self.advance();
             let mut arguments = Vec::new();
+            let mut named_arguments = Vec::new();
             if !self.at(&TokenKind::RightParen) {
                 loop {
-                    arguments.push(self.parse_expression()?);
+                    if matches!(self.current().kind, TokenKind::Identifier(_))
+                        && self.peek_at(1, &TokenKind::Colon)
+                    {
+                        named_arguments.push(self.parse_object_field()?);
+                    } else if named_arguments.is_empty() {
+                        arguments.push(self.parse_expression()?);
+                    } else {
+                        return Err(SyntaxError::new(
+                            "positional arguments must come before named arguments",
+                            self.current().span,
+                        ));
+                    }
                     if !self.take_if(&TokenKind::Comma) {
+                        break;
+                    }
+                    if self.at(&TokenKind::RightParen) {
                         break;
                     }
                 }
             }
             let close = self.take(&TokenKind::RightParen)?.span;
-            let (options, end) = if self.at(&TokenKind::LeftBrace) {
-                self.parse_object_fields()?
-            } else {
-                (Vec::new(), close)
-            };
+            let (options, end) =
+                if self.at(&TokenKind::LeftBrace) && !self.suppress_trailing_options {
+                    self.parse_object_fields()?
+                } else {
+                    (Vec::new(), close)
+                };
             expression = Expression {
                 span: callee.span.join(end),
                 kind: ExpressionKind::Call {
                     callee,
                     arguments,
+                    named_arguments,
                     options,
                 },
             };
@@ -554,13 +587,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_within(&mut self, start: Span) -> Result<Expression, SyntaxError> {
-        self.take(&TokenKind::LeftParen)?;
-        self.take_named_option("timeout")?;
-        let timeout = self.parse_expression()?;
-        self.take(&TokenKind::RightParen)?;
-        self.take(&TokenKind::LeftBrace)?;
-        let body = self.parse_expression()?;
-        let end = self.take(&TokenKind::RightBrace)?.span;
+        let mut options = self.parse_policy_options()?;
+        let timeout = Self::required_policy_option(&mut options, "timeout", start)?;
+        Self::reject_extra_policy_options(&options)?;
+        let (statements, end) = self.parse_statement_block()?;
+        let body = Expression {
+            kind: ExpressionKind::Block(statements),
+            span: start.join(end),
+        };
         Ok(Expression {
             kind: ExpressionKind::Within {
                 timeout: Box::new(timeout),
@@ -570,20 +604,50 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_retry(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+    fn parse_fail(&mut self, start: Span) -> Result<Expression, SyntaxError> {
         self.take(&TokenKind::LeftParen)?;
-        self.take_named_option("attempts")?;
-        let attempts = self.parse_expression()?;
-        let delay = if self.take_if(&TokenKind::Comma) {
-            self.take_named_option("delay")?;
-            Some(Box::new(self.parse_expression()?))
+        let message = self.parse_expression()?;
+        let end = self.take(&TokenKind::RightParen)?.span;
+        Ok(Expression {
+            kind: ExpressionKind::Fail(Box::new(message)),
+            span: start.join(end),
+        })
+    }
+
+    fn parse_for(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        let first = self.take_identifier("a loop binding")?;
+        let (key, value) = if self.take_if(&TokenKind::Comma) {
+            (Some(first), self.take_identifier("a loop value binding")?)
         } else {
-            None
+            (None, first)
         };
-        self.take(&TokenKind::RightParen)?;
-        self.take(&TokenKind::LeftBrace)?;
-        let body = self.parse_expression()?;
-        let end = self.take(&TokenKind::RightBrace)?.span;
+        self.take(&TokenKind::In)?;
+        let previous = self.suppress_trailing_options;
+        self.suppress_trailing_options = true;
+        let iterable = self.parse_expression()?;
+        self.suppress_trailing_options = previous;
+        let (body, end) = self.parse_statement_block()?;
+        Ok(Expression {
+            kind: ExpressionKind::For {
+                key,
+                value,
+                iterable: Box::new(iterable),
+                body,
+            },
+            span: start.join(end),
+        })
+    }
+
+    fn parse_retry(&mut self, start: Span) -> Result<Expression, SyntaxError> {
+        let mut options = self.parse_policy_options()?;
+        let attempts = Self::required_policy_option(&mut options, "attempts", start)?;
+        let delay = Self::optional_policy_option(&mut options, "delay").map(Box::new);
+        Self::reject_extra_policy_options(&options)?;
+        let (statements, end) = self.parse_statement_block()?;
+        let body = Expression {
+            kind: ExpressionKind::Block(statements),
+            span: start.join(end),
+        };
         Ok(Expression {
             kind: ExpressionKind::Retry {
                 attempts: Box::new(attempts),
@@ -595,21 +659,32 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_parallel(&mut self, start: Span) -> Result<Expression, SyntaxError> {
-        self.take(&TokenKind::LeftParen)?;
-        let limit = if self.at(&TokenKind::RightParen) {
-            None
+        let mut options = if self.at(&TokenKind::LeftParen) {
+            self.parse_policy_options()?
         } else {
-            self.take_named_option("limit")?;
-            Some(Box::new(self.parse_expression()?))
+            Vec::new()
         };
-        self.take(&TokenKind::RightParen)?;
+        let limit = Self::optional_policy_option(&mut options, "limit").map(Box::new);
+        Self::reject_extra_policy_options(&options)?;
         self.take(&TokenKind::LeftBrace)?;
         let mut branches = Vec::new();
         while !self.at(&TokenKind::RightBrace) {
             if self.at(&TokenKind::End) {
                 return Err(self.expected("a parallel branch or `}`"));
             }
-            branches.push(self.parse_expression()?);
+            let name = if matches!(self.current().kind, TokenKind::Identifier(_))
+                && self.peek_at(1, &TokenKind::Colon)
+            {
+                let name = self.take_identifier("a parallel branch name")?;
+                self.take(&TokenKind::Colon)?;
+                Some(name)
+            } else {
+                None
+            };
+            branches.push(ParallelBranch {
+                name,
+                expression: self.parse_expression()?,
+            });
             self.require_separator("parallel branches")?;
         }
         let end = self.take(&TokenKind::RightBrace)?.span;
@@ -620,25 +695,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_rate(&mut self, start: Span) -> Result<Expression, SyntaxError> {
-        self.take(&TokenKind::LeftParen)?;
-        self.take_named_option("target")?;
-        let target = self.parse_expression()?;
-        self.take(&TokenKind::Comma)?;
-        self.take_named_option("period")?;
-        let period = self.parse_expression()?;
-        self.take(&TokenKind::Comma)?;
-        self.take_named_option("duration")?;
-        let duration = self.parse_expression()?;
-        let limit = if self.take_if(&TokenKind::Comma) {
-            self.take_named_option("limit")?;
-            Some(Box::new(self.parse_expression()?))
-        } else {
-            None
+        let mut options = self.parse_policy_options()?;
+        let target = Self::required_policy_option(&mut options, "target", start)?;
+        let period = Self::required_policy_option(&mut options, "period", start)?;
+        let duration = Self::required_policy_option(&mut options, "duration", start)?;
+        let limit = Self::optional_policy_option(&mut options, "limit").map(Box::new);
+        Self::reject_extra_policy_options(&options)?;
+        let (statements, end) = self.parse_statement_block()?;
+        let body = Expression {
+            kind: ExpressionKind::Block(statements),
+            span: start.join(end),
         };
-        self.take(&TokenKind::RightParen)?;
-        self.take(&TokenKind::LeftBrace)?;
-        let body = self.parse_expression()?;
-        let end = self.take(&TokenKind::RightBrace)?.span;
         Ok(Expression {
             kind: ExpressionKind::Rate {
                 target: Box::new(target),
@@ -652,16 +719,15 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_concurrency(&mut self, start: Span) -> Result<Expression, SyntaxError> {
-        self.take(&TokenKind::LeftParen)?;
-        self.take_named_option("limit")?;
-        let limit = self.parse_expression()?;
-        self.take(&TokenKind::Comma)?;
-        self.take_named_option("duration")?;
-        let duration = self.parse_expression()?;
-        self.take(&TokenKind::RightParen)?;
-        self.take(&TokenKind::LeftBrace)?;
-        let body = self.parse_expression()?;
-        let end = self.take(&TokenKind::RightBrace)?.span;
+        let mut options = self.parse_policy_options()?;
+        let limit = Self::required_policy_option(&mut options, "limit", start)?;
+        let duration = Self::required_policy_option(&mut options, "duration", start)?;
+        Self::reject_extra_policy_options(&options)?;
+        let (statements, end) = self.parse_statement_block()?;
+        let body = Expression {
+            kind: ExpressionKind::Block(statements),
+            span: start.join(end),
+        };
         Ok(Expression {
             kind: ExpressionKind::Concurrency {
                 limit: Box::new(limit),
@@ -672,15 +738,58 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn take_named_option(&mut self, expected: &'static str) -> Result<(), SyntaxError> {
-        let name = self.take_identifier("a policy option name")?;
-        if name.value != expected {
+    fn parse_policy_options(&mut self) -> Result<Vec<ObjectField>, SyntaxError> {
+        self.take(&TokenKind::LeftParen)?;
+        let mut options = Vec::new();
+        while !self.at(&TokenKind::RightParen) {
+            let name = self.take_identifier("a policy option name")?;
+            self.take(&TokenKind::Colon)?;
+            let expression = self.parse_expression()?;
+            if options
+                .iter()
+                .any(|field: &ObjectField| field.name.value == name.value)
+            {
+                return Err(SyntaxError::new(
+                    format!("policy option `{}` was supplied more than once", name.value),
+                    name.span,
+                ));
+            }
+            options.push(ObjectField {
+                span: name.span.join(expression.span),
+                name,
+                expression,
+            });
+            if !self.take_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.take(&TokenKind::RightParen)?;
+        Ok(options)
+    }
+
+    fn optional_policy_option(options: &mut Vec<ObjectField>, name: &str) -> Option<Expression> {
+        options
+            .iter()
+            .position(|field| field.name.value == name)
+            .map(|index| options.remove(index).expression)
+    }
+
+    fn required_policy_option(
+        options: &mut Vec<ObjectField>,
+        name: &str,
+        span: Span,
+    ) -> Result<Expression, SyntaxError> {
+        Self::optional_policy_option(options, name)
+            .ok_or_else(|| SyntaxError::new(format!("missing `{name}` policy option"), span))
+    }
+
+    fn reject_extra_policy_options(options: &[ObjectField]) -> Result<(), SyntaxError> {
+        if let Some(field) = options.first() {
             return Err(SyntaxError::new(
-                format!("expected `{expected}` policy option"),
-                name.span,
+                format!("unknown policy option `{}`", field.name.value),
+                field.name.span,
             ));
         }
-        self.take(&TokenKind::Colon)?;
         Ok(())
     }
 
@@ -690,6 +799,9 @@ impl<'a> Parser<'a> {
             loop {
                 values.push(self.parse_expression()?);
                 if !self.take_if(&TokenKind::Comma) {
+                    break;
+                }
+                if self.at(&TokenKind::RightBracket) {
                     break;
                 }
             }
@@ -849,10 +961,13 @@ fn same_variant(left: &TokenKind, right: &TokenKind) -> bool {
 const fn token_description(token: &TokenKind) -> &'static str {
     match token {
         TokenKind::If => "`if`",
+        TokenKind::For => "`for`",
+        TokenKind::In => "`in`",
         TokenKind::Else => "`else`",
         TokenKind::And => "`and`",
         TokenKind::Or => "`or`",
         TokenKind::Not => "`not`",
+        TokenKind::Minus => "`-`",
         TokenKind::Mettle => "`flow`",
         TokenKind::Test => "`test`",
         TokenKind::Context => "`context`",
@@ -861,6 +976,7 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::Use => "`use`",
         TokenKind::Return => "`return`",
         TokenKind::Assert => "`assert`",
+        TokenKind::Fail => "`fail`",
         TokenKind::Within => "`within`",
         TokenKind::Retry => "`retry`",
         TokenKind::Parallel => "`parallel`",

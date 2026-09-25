@@ -13,6 +13,7 @@ pub use mettle_syntax::Span;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaType {
     Boolean,
+    Body,
     Bytes,
     Duration,
     Integer,
@@ -27,6 +28,7 @@ impl SchemaType {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
+            Self::Body => "HTTP body value",
             Self::Bytes => "bytes",
             Self::Duration => "duration",
             Self::Integer => "integer",
@@ -48,6 +50,7 @@ pub struct FieldSchema {
 pub struct OperationSchema {
     pub name: &'static str,
     pub parameters: &'static [SchemaType],
+    pub parameter_names: &'static [&'static str],
     pub options: &'static [FieldSchema],
     pub mutually_exclusive: &'static [&'static [&'static str]],
     pub result: SchemaType,

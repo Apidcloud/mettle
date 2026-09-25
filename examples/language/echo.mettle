@@ -1,20 +1,21 @@
+// Run: mettle run examples/language/echo.mettle
 // Messages belong to the flow report; parallel branches get logical labels.
 flow greet(name) {
     echo("Greeting ${name}")
-    return "Hello, ${name}!"
+    "Hello, ${name}!"
 }
 
-flow main() {
+flow main {
     echo("Starting two greetings")
-    greetings = parallel(limit: 2) {
-        greet("Ada")
-        greet("Lin")
+    greetings = parallel {
+        ada: greet("Ada")
+        lin: greet("Lin")
     }
-    echo({ count: 2, first: greetings[0] })
-    return greetings
+    echo({ count: 2, first: greetings.ada })
+    greetings
 }
 
-test("greeting is returned") {
+test "greeting is returned" {
     echo("Checking the greeting flow")
     assert(greet("Ada") == "Hello, Ada!")
 }

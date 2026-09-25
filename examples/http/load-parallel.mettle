@@ -1,0 +1,47 @@
+// From the repository root, choose where the final result goes:
+//   mettle run examples/http/load-parallel.mettle
+//     Live dashboard in the terminal, then a human-readable summary.
+//   mettle run examples/http/load-parallel.mettle --output json
+//     Final JSON report in the terminal.
+//   mettle run examples/http/load-parallel.mettle --output json > load-parallel-result.json
+//     Save the final JSON report to a file instead.
+// JSON mode emits its report when the run ends; it does not show the live dashboard.
+// Two independent rate workloads run at the same time. The public API is
+// only a demo target, so the rates and duration are deliberately small.
+use context {
+    defaults http {
+        baseUrl: "https://jsonplaceholder.typicode.com"
+        timeout: 5s
+    }
+}
+
+flow browseUser {
+    user = http.get("/users/1")
+    assert(user.status == 200)
+
+    posts = http.get("/posts?userId=${user.json.id}")
+    assert(posts.status == 200)
+    posts.json
+}
+
+flow readPost {
+    post = http.get("/posts/1")
+    assert(post.status == 200)
+    post.json
+}
+
+flow main {
+    loads = parallel {
+        browsing: rate(target: 2, period: 1s, duration: 2s, limit: 4) {
+            browseUser()
+        }
+        posts: rate(target: 3, period: 1s, duration: 4s, limit: 6) {
+            readPost()
+        }
+    }
+
+    // Each branch has its own metrics and in-flight limit.
+    assert(loads.browsing.errors == 0.0)
+    assert(loads.posts.errors == 0.0)
+    loads
+}

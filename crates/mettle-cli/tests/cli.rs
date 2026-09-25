@@ -996,6 +996,80 @@ fn all_continues_after_a_failed_flow_and_returns_failure() {
 }
 
 #[test]
+fn terminal_fail_does_not_stop_other_batch_entries() {
+    let path = source_file("flow broken { fail(\"preflight stopped\") }\nflow healthy = \"ok\"\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&path)
+        .args(["--all", "--output", "json"])
+        .output()
+        .expect("batch should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success());
+    let records = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON line"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[1]["type"], "failure");
+    assert_eq!(records[1]["error"]["message"], "preflight stopped");
+    assert_eq!(records[1]["error"]["terminal"], true);
+    assert_eq!(records[2]["type"], "result");
+    assert_eq!(records[2]["flow"], "healthy");
+    assert_eq!(records[3]["failed"], 1);
+}
+
+#[test]
+fn terminal_fail_aborts_load_with_partial_report() {
+    let path = source_file(
+        "flow main = rate(target: 2, period: 1s, duration: 1s, limit: 2) { fail(\"stop load\") }",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&path)
+        .args(["--output", "json"])
+        .output()
+        .expect("load should start");
+    let human_output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&path)
+        .output()
+        .expect("load should start in human output mode");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON report");
+    assert_eq!(result["error"]["terminal"], true);
+    assert_eq!(result["error"]["message"], "stop load");
+    assert_eq!(result["workloads"][0]["phase"], "aborted");
+    assert_eq!(result["workloads"][0]["failed"], 1);
+    assert!(!human_output.status.success());
+    let human_report = String::from_utf8_lossy(&human_output.stderr);
+    assert!(human_report.contains("ABORTED"), "{human_report}");
+    assert!(human_report.contains("1 failed"), "{human_report}");
+    assert!(human_report.contains("stop load"), "{human_report}");
+}
+
+#[test]
+fn terminal_fail_redacts_sensitive_message() {
+    let path = source_file("flow main { fail(senv(\"METTLE_TEST_SECRET\")) }");
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["run"])
+        .arg(&path)
+        .args(["--output", "json"])
+        .env("METTLE_TEST_SECRET", "never-print-this")
+        .output()
+        .expect("flow should start");
+    fs::remove_file(path).expect("test source should be removable");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[REDACTED]"), "{stdout}");
+    assert!(!stdout.contains("never-print-this"), "{stdout}");
+}
+
+#[test]
 fn interpolation_falls_back_to_the_environment() {
     let path = source_file("flow endpoint() = \"${METTLE_TEST_URL}/health\"");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))

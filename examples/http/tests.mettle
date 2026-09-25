@@ -1,3 +1,4 @@
+// Run: mettle test examples/http/tests.mettle
 // Functional checks against the public JSONPlaceholder test API.
 // These require an internet connection but no credentials.
 use context {
@@ -9,13 +10,13 @@ use context {
 
 flow getPost(id) = http.get("/posts/${id}")
 
-test("post 1 is available") {
+test "post 1 is available" {
     response = getPost(1)
     assert(response.status == 200, "GET /posts/1 should return 200")
     assert(response.json.id == 1, "GET /posts/1 should return id 1")
 }
 
-test("unknown post returns 404") {
+test "unknown post returns 404" {
     response = getPost(999999)
     assert(response.status == 404, "an unknown post should return 404")
 }

@@ -53,6 +53,8 @@ pub struct RuntimeError {
     pub scope_path: Box<[ExecutionScope]>,
     pub assertions: Vec<AssertionFailure>,
     pub assertion_only: bool,
+    /// Terminal language failure: bypass retry and abort the current top-level entry.
+    pub terminal: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,6 +89,12 @@ pub enum ExecutionScope {
         branch: usize,
         total: usize,
     },
+    NamedParallel {
+        invocation: u64,
+        branch: usize,
+        total: usize,
+        name: String,
+    },
     Retry {
         invocation: u64,
         attempt: usize,
@@ -115,6 +123,7 @@ pub enum WorkloadPhase {
     Running,
     Draining,
     Completed,
+    Aborted,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +143,8 @@ pub enum WorkloadKind {
 
 #[derive(Clone, Debug)]
 pub struct WorkloadSnapshot {
+    pub id: u64,
+    pub scope_path: Vec<ExecutionScope>,
     pub kind: WorkloadKind,
     pub phase: WorkloadPhase,
     pub elapsed: Duration,
@@ -143,15 +154,31 @@ pub struct WorkloadSnapshot {
     pub success: usize,
     pub failed: usize,
     pub dropped: usize,
+    pub cancelled: usize,
     pub latency_p50: Duration,
     pub latency_p95: Duration,
     pub latency_p99: Duration,
+}
+
+/// A bounded, source-site keyed observation; no request URL, body, or header is retained.
+#[derive(Clone, Debug)]
+pub struct WorkloadOperation {
+    pub workload_id: u64,
+    pub span: Span,
+    pub flow: String,
+    pub capability: String,
+    pub operation: String,
+    pub duration: Duration,
+    pub http_status: Option<u16>,
+    pub failed: bool,
 }
 
 pub trait ExecutionObserver: Send + Sync {
     fn execution_event(&self, _event: ExecutionEvent) {}
 
     fn workload_updated(&self, _snapshot: WorkloadSnapshot) {}
+
+    fn workload_operation(&self, _operation: WorkloadOperation) {}
 }
 
 #[derive(Debug, Default)]
@@ -202,23 +229,29 @@ enum WorkloadPolicy {
 }
 
 struct WorkloadMetrics {
+    id: u64,
+    scope_path: Vec<ExecutionScope>,
     started_at: Instant,
     started: usize,
     success: usize,
     failed: usize,
     dropped: usize,
+    cancelled: usize,
     latency: DurationHistogram,
     scheduling_delay: DurationHistogram,
 }
 
 impl WorkloadMetrics {
-    fn new(started_at: Instant) -> Self {
+    fn new(started_at: Instant, id: u64, scope_path: Vec<ExecutionScope>) -> Self {
         Self {
+            id,
+            scope_path,
             started_at,
             started: 0,
             success: 0,
             failed: 0,
             dropped: 0,
+            cancelled: 0,
             latency: DurationHistogram::default(),
             scheduling_delay: DurationHistogram::default(),
         }
@@ -263,6 +296,8 @@ impl WorkloadMetrics {
             }
         };
         WorkloadSnapshot {
+            id: self.id,
+            scope_path: self.scope_path.clone(),
             kind,
             phase,
             elapsed: now
@@ -274,6 +309,7 @@ impl WorkloadMetrics {
             success: self.success,
             failed: self.failed,
             dropped: self.dropped,
+            cancelled: self.cancelled,
             latency_p50: self.latency.percentile(50),
             latency_p95: self.latency.percentile(95),
             latency_p99: self.latency.percentile(99),
@@ -299,6 +335,7 @@ impl WorkloadMetrics {
             ("failed".to_owned(), count_value(self.failed)),
             ("errors".to_owned(), Value::Float(errors)),
             ("dropped".to_owned(), count_value(self.dropped)),
+            ("cancelled".to_owned(), count_value(self.cancelled)),
             (
                 "saturated".to_owned(),
                 Value::Boolean(self.dropped > 0 || drain_timed_out),
@@ -489,7 +526,13 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
     let left = left.revealed();
     let right = right.revealed();
     if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
-        let equal = left == right;
+        let equal = match (left, right) {
+            (Value::Integer(integer), Value::Float(decimal))
+            | (Value::Float(decimal), Value::Integer(integer)) => {
+                compare_integer_float(*integer, *decimal).is_some_and(std::cmp::Ordering::is_eq)
+            }
+            _ => left == right,
+        };
         return Ok(if operator == BinaryOperator::Equal {
             equal
         } else {
@@ -500,6 +543,12 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
     let ordering = match (left, right) {
         (Value::Integer(left), Value::Integer(right)) => left.partial_cmp(right),
         (Value::Float(left), Value::Float(right)) => left.partial_cmp(right),
+        (Value::Integer(integer), Value::Float(decimal)) => {
+            compare_integer_float(*integer, *decimal)
+        }
+        (Value::Float(decimal), Value::Integer(integer)) => {
+            compare_integer_float(*integer, *decimal).map(std::cmp::Ordering::reverse)
+        }
         (Value::String(left), Value::String(right)) => left.partial_cmp(right),
         (Value::Duration(left), Value::Duration(right)) => left.partial_cmp(right),
         _ => {
@@ -523,6 +572,31 @@ fn evaluate_binary(left: &Value, operator: BinaryOperator, right: &Value) -> Res
     })
 }
 
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn compare_integer_float(integer: i64, decimal: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+
+    if !decimal.is_finite() {
+        return None;
+    }
+    if decimal < i64::MIN as f64 {
+        return Some(Ordering::Greater);
+    }
+    if decimal >= 9_223_372_036_854_775_808.0 {
+        return Some(Ordering::Less);
+    }
+    let whole = decimal.trunc() as i64;
+    Some(integer.cmp(&whole).then_with(|| {
+        if decimal.fract().is_sign_positive() && decimal.fract() != 0.0 {
+            Ordering::Less
+        } else if decimal.fract() < 0.0 {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -541,12 +615,13 @@ mod tests {
 
     use super::{
         Clock, ClockFuture, ExecutionEvent, ExecutionEventKind, ExecutionObserver, OperationEvent,
-        Runtime, Value, WorkloadPhase, WorkloadSnapshot,
+        Runtime, Value, WorkloadOperation, WorkloadPhase, WorkloadSnapshot,
     };
 
     const PROBE_OPERATIONS: &[OperationSchema] = &[OperationSchema {
         name: "wait",
         parameters: &[],
+        parameter_names: &[],
         options: &[],
         mutually_exclusive: &[],
         result: mettle_capability::SchemaType::Json,
@@ -580,6 +655,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingObserver {
         operations: Mutex<Vec<OperationEvent>>,
+        workload_operations: Mutex<Vec<WorkloadOperation>>,
         events: Mutex<Vec<ExecutionEvent>>,
         workloads: Mutex<Vec<WorkloadSnapshot>>,
     }
@@ -597,6 +673,13 @@ mod tests {
 
         fn workload_updated(&self, snapshot: WorkloadSnapshot) {
             self.workloads.lock().expect("observer lock").push(snapshot);
+        }
+
+        fn workload_operation(&self, operation: WorkloadOperation) {
+            self.workload_operations
+                .lock()
+                .expect("observer lock")
+                .push(operation);
         }
     }
 
@@ -728,6 +811,42 @@ mod tests {
         assert_eq!(
             block_on(Runtime::default().execute(&plan)).expect("program should run"),
             Value::String("Hello from Mettle".to_owned())
+        );
+    }
+
+    #[test]
+    fn executes_refined_blocks_loops_parallel_and_numeric_comparisons() {
+        let syntax = parse(
+            r"
+            flow choose(first, second) = second
+            flow main {
+                responses = parallel {
+                    users: choose(second: 0x2A, first: -1)
+                    posts: 0b101010
+                }
+                mapped = for name, value in responses {
+                    assert(value == 42.0)
+                    value
+                }
+                retried = retry(delay: 1.5ms, attempts: 2) {
+                    found = mapped.users
+                    assert(found > -1)
+                    found
+                }
+                assert(retried == 42)
+                assert(9_007_199_254_740_993 != 9_007_199_254_740_992.0)
+                mapped
+            }
+        ",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        assert_eq!(
+            block_on(Runtime::default().execute(&plan)).expect("flow should run"),
+            Value::Object(Object::from([
+                ("posts".to_owned(), Value::Integer(42)),
+                ("users".to_owned(), Value::Integer(42)),
+            ])),
         );
     }
 
@@ -865,7 +984,7 @@ mod tests {
         );
         drop(events);
 
-        let syntax = parse("flow fail() { echo(\"trying\")\n assert(false)\n return true }\nflow main() = retry(attempts: 2) { fail() }")
+        let syntax = parse("flow fails() { echo(\"trying\")\n assert(false)\n return true }\nflow main() = retry(attempts: 2) { fails() }")
             .expect("source should parse");
         let plan = compile(&syntax).expect("source should compile");
         let observer = Arc::new(RecordingObserver::default());
@@ -966,6 +1085,167 @@ mod tests {
         assert!(error.message.contains("METTLE_MISSING"));
         assert_eq!(error.assertions.len(), 1);
         assert_eq!(error.assertions[0].message, "first failure");
+    }
+
+    #[test]
+    fn fail_stops_a_test_and_keeps_prior_assertions() {
+        let syntax = parse(
+            "test \"preflight\" { assert(false, \"first\")\n fail(\"cannot continue\")\n assert(false, \"unreached\") }",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect_err("unreachable statement should be rejected");
+        assert!(
+            plan.iter()
+                .any(|error| error.message.contains("unreachable"))
+        );
+
+        let syntax =
+            parse("test \"preflight\" { assert(false, \"first\")\n fail(\"cannot continue\") }")
+                .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let error = block_on(Runtime::default().execute_selected(&plan, 0, Vec::new()))
+            .expect_err("fail should stop the test");
+        assert!(error.terminal);
+        assert!(!error.assertion_only);
+        assert_eq!(error.message, "cannot continue");
+        assert_eq!(error.assertions.len(), 1);
+        assert_eq!(error.assertions[0].message, "first");
+    }
+
+    #[test]
+    fn fail_bypasses_retry_and_aborts_a_workload() {
+        let syntax =
+            parse("flow main = retry(attempts: 3) { echo(\"once\")\n fail(\"stop now\") }")
+                .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        let error = block_on(
+            Runtime::default()
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect_err("fail should bypass retry");
+        assert!(error.terminal);
+        assert_eq!(error.message, "stop now");
+        assert_eq!(observer.events.lock().expect("observer lock").len(), 1);
+
+        let syntax = parse("flow main = retry(attempts: 3) { fail(env(\"METTLE_MISSING\")) }")
+            .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let error = block_on(
+            Runtime::default()
+                .with_environment(Arc::new(HashMap::new()))
+                .execute(&plan),
+        )
+        .expect_err("message evaluation failure should also be terminal");
+        assert!(error.terminal);
+        assert!(!error.message.contains("retry exhausted"));
+        assert!(matches!(
+            error.scope_path.as_ref(),
+            [super::ExecutionScope::Retry { attempt: 1, .. }]
+        ));
+
+        let syntax = parse(
+            "flow main = rate(target: 2, period: 1s, duration: 1s, limit: 2) { fail(\"stop load\") }",
+        )
+        .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        let error = block_on(
+            Runtime::with_clock(Vec::new(), Arc::new(ImmediateClock::default()))
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect_err("fail should abort the workload");
+        assert!(error.terminal);
+        assert_eq!(error.message, "stop load");
+        let snapshots = observer.workloads.lock().expect("observer lock");
+        assert_eq!(
+            snapshots.last().map(|snapshot| snapshot.phase),
+            Some(WorkloadPhase::Aborted)
+        );
+        assert_eq!(snapshots.last().map(|snapshot| snapshot.failed), Some(1));
+
+        let syntax =
+            parse("flow main = concurrency(limit: 2, duration: 1s) { fail(\"stop concurrency\") }")
+                .expect("source should parse");
+        let plan = compile(&syntax).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        let error = block_on(
+            Runtime::with_clock(Vec::new(), Arc::new(ImmediateClock::default()))
+                .with_observer(observer.clone())
+                .execute(&plan),
+        )
+        .expect_err("fail should abort concurrency");
+        assert!(error.terminal);
+        assert_eq!(error.message, "stop concurrency");
+        let snapshots = observer.workloads.lock().expect("observer lock");
+        assert_eq!(
+            snapshots.last().map(|snapshot| snapshot.phase),
+            Some(WorkloadPhase::Aborted)
+        );
+        assert_eq!(snapshots.last().map(|snapshot| snapshot.cancelled), Some(1));
+    }
+
+    #[test]
+    fn fail_in_parallel_cancels_pending_siblings() {
+        let syntax = parse("flow main = parallel { probe.wait(), fail(\"stop branch\") }")
+            .expect("source should parse");
+        let plan = compile_with_capabilities(&syntax, &[PROBE]).expect("source should compile");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let observer = Arc::new(RecordingObserver::default());
+        let error = block_on(
+            Runtime::new(vec![Arc::new(PendingCapability {
+                dropped: Arc::clone(&dropped),
+            })])
+            .with_observer(observer.clone())
+            .execute(&plan),
+        )
+        .expect_err("terminal branch should stop parallel work");
+        assert!(error.terminal);
+        assert_eq!(error.message, "stop branch");
+        assert!(dropped.load(Ordering::SeqCst));
+        let events = observer.events.lock().expect("observer lock");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, ExecutionEventKind::BranchCancelled))
+        );
+    }
+
+    #[test]
+    fn fail_message_must_be_a_string() {
+        let syntax = parse("flow main = fail(123)").expect("source should parse");
+        let errors = compile(&syntax).expect_err("numeric message should fail compilation");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message == "`fail` message must be a string")
+        );
+    }
+
+    #[test]
+    fn collects_loop_assertions_in_tests_but_not_retry_blocks() {
+        let syntax = parse(
+            "test \"loop checks\" {\n for value in [1, 2, 3] { assert(value == 2, \"wrong value\") }\n assert(false, \"after loop\")\n }",
+        )
+        .expect("test should parse");
+        let plan = compile(&syntax).expect("test should compile");
+        let error = block_on(Runtime::default().execute_selected(&plan, 0, Vec::new()))
+            .expect_err("test should fail");
+        assert!(error.assertion_only);
+        assert_eq!(error.assertions.len(), 3);
+        assert_eq!(error.assertions[2].message, "after loop");
+
+        let syntax = parse(
+            "test \"retry checks\" { retry(attempts: 2) { assert(false, \"retry me\")\n true } }",
+        )
+        .expect("test should parse");
+        let plan = compile(&syntax).expect("test should compile");
+        let error = block_on(Runtime::default().execute_selected(&plan, 0, Vec::new()))
+            .expect_err("retry block should fail");
+        assert!(!error.assertion_only);
+        assert!(error.message.contains("retry"));
     }
 
     #[test]
@@ -1277,5 +1557,40 @@ mod tests {
             Some(WorkloadPhase::Completed)
         );
         assert!(workloads.len() <= 8, "snapshots should remain bounded");
+    }
+
+    #[test]
+    fn workload_operations_are_reported_without_individual_execution_events() {
+        let source = parse(
+            "flow main() = rate(target: 3, period: 1s, duration: 1s, limit: 3) { probe.wait() }",
+        )
+        .expect("source should parse");
+        let plan = compile_with_capabilities(&source, &[PROBE]).expect("source should compile");
+        let observer = Arc::new(RecordingObserver::default());
+        block_on(
+            Runtime::with_clock(
+                vec![Arc::new(ProbeCapability::default())],
+                Arc::new(ImmediateClock::default()),
+            )
+            .with_observer(observer.clone())
+            .execute(&plan),
+        )
+        .expect("workload should complete");
+        assert!(
+            observer
+                .operations
+                .lock()
+                .expect("observer lock")
+                .is_empty()
+        );
+        let calls = observer.workload_operations.lock().expect("observer lock");
+        assert!(!calls.is_empty());
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.capability == "probe" && !call.failed)
+        );
+        let snapshots = observer.workloads.lock().expect("observer lock");
+        assert!(calls.iter().all(|call| call.workload_id == snapshots[0].id));
     }
 }

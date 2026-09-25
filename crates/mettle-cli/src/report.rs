@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{self, IsTerminal as _, Write as _};
 use std::sync::Mutex;
@@ -6,16 +7,136 @@ use std::time::Duration;
 use mettle_capability::{OperationReport, ReportOutcome, ReportSection, Value};
 use mettle_runtime::{
     ExecutionEvent, ExecutionEventKind, ExecutionObserver, ExecutionScope, OperationEvent,
-    WorkloadKind, WorkloadPhase, WorkloadSnapshot,
+    WorkloadKind, WorkloadOperation, WorkloadPhase, WorkloadSnapshot,
 };
 
 const DEFAULT_PREVIEW_CHARS: usize = 8 * 1024;
 const MAX_WORKLOAD_ECHOES: usize = 50;
+const MAX_TRACKED_WORKLOADS: usize = 32;
+const MAX_ACTION_SITES: usize = 32;
+const MAX_VISIBLE_WORKLOADS: usize = 3;
+const MAX_VISIBLE_ACTIONS: usize = 3;
+const MAX_FAILURE_SAMPLES: usize = 3;
+const ACTION_HISTOGRAM_SUB_BUCKETS: usize = 8;
+const ACTION_HISTOGRAM_BUCKETS: usize = 1 + 64 * ACTION_HISTOGRAM_SUB_BUCKETS;
 
 #[derive(Default)]
 pub struct CapturedEvents {
     pub events: Vec<ExecutionEvent>,
     pub omitted_workload_echoes: usize,
+    pub workloads: Vec<WorkloadView>,
+    pub omitted_workloads: u64,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ActionSite {
+    source: usize,
+    start: usize,
+    flow: String,
+    capability: String,
+    operation: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionStats {
+    site: ActionSite,
+    line: Option<usize>,
+    calls: u64,
+    errors: u64,
+    http_4xx: u64,
+    http_5xx: u64,
+    histogram: Vec<u64>,
+    failure_samples: Vec<String>,
+}
+
+impl ActionStats {
+    fn new(site: ActionSite, line: Option<usize>) -> Self {
+        Self {
+            site,
+            line,
+            calls: 0,
+            errors: 0,
+            http_4xx: 0,
+            http_5xx: 0,
+            histogram: vec![0; ACTION_HISTOGRAM_BUCKETS],
+            failure_samples: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, operation: &WorkloadOperation) {
+        self.calls += 1;
+        let nanos = u64::try_from(operation.duration.as_nanos()).unwrap_or(u64::MAX);
+        let bucket = if nanos == 0 {
+            0
+        } else {
+            let exponent = 63 - nanos.leading_zeros() as usize;
+            let base = 1_u64 << exponent;
+            let sub = (u128::from(nanos - base) * ACTION_HISTOGRAM_SUB_BUCKETS as u128
+                / u128::from(base)) as usize;
+            1 + exponent * ACTION_HISTOGRAM_SUB_BUCKETS + sub.min(ACTION_HISTOGRAM_SUB_BUCKETS - 1)
+        };
+        self.histogram[bucket] += 1;
+        let failure = if operation.failed {
+            self.errors += 1;
+            Some("operation failed".to_owned())
+        } else {
+            match operation.http_status {
+                Some(400..=499) => {
+                    self.http_4xx += 1;
+                    Some(format!(
+                        "HTTP {}",
+                        operation.http_status.unwrap_or_default()
+                    ))
+                }
+                Some(500..=599) => {
+                    self.http_5xx += 1;
+                    Some(format!(
+                        "HTTP {}",
+                        operation.http_status.unwrap_or_default()
+                    ))
+                }
+                _ => None,
+            }
+        };
+        if let Some(failure) = failure
+            && self.failure_samples.len() < MAX_FAILURE_SAMPLES
+            && !self.failure_samples.contains(&failure)
+        {
+            self.failure_samples.push(failure);
+        }
+    }
+
+    fn p95(&self) -> Duration {
+        if self.calls == 0 {
+            return Duration::ZERO;
+        }
+        let rank = self.calls.saturating_mul(95).div_ceil(100);
+        let mut seen = 0;
+        for (index, count) in self.histogram.iter().enumerate() {
+            seen += count;
+            if seen >= rank {
+                if index == 0 {
+                    return Duration::ZERO;
+                }
+                let exponent = (index - 1) / ACTION_HISTOGRAM_SUB_BUCKETS;
+                let sub = (index - 1) % ACTION_HISTOGRAM_SUB_BUCKETS;
+                let base = 1_u64 << exponent;
+                let upper = u128::from(base)
+                    + (u128::from(base) * (sub + 1) as u128)
+                        .div_ceil(ACTION_HISTOGRAM_SUB_BUCKETS as u128)
+                    - 1;
+                return Duration::from_nanos(u64::try_from(upper).unwrap_or(u64::MAX));
+            }
+        }
+        Duration::ZERO
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkloadView {
+    snapshot: WorkloadSnapshot,
+    actions: BTreeMap<ActionSite, ActionStats>,
+    overflow_calls: u64,
 }
 
 #[derive(Default)]
@@ -23,12 +144,15 @@ struct ObserverState {
     captured: CapturedEvents,
     workload_echoes: usize,
     rendered_lines: usize,
+    workloads: BTreeMap<u64, WorkloadView>,
+    omitted_workloads: u64,
 }
 
 pub struct CliObserver {
     state: Mutex<ObserverState>,
     progress: bool,
     interactive: bool,
+    sources: Vec<String>,
 }
 
 impl CliObserver {
@@ -37,12 +161,21 @@ impl CliObserver {
             state: Mutex::new(ObserverState::default()),
             progress,
             interactive: io::stderr().is_terminal(),
+            sources: Vec::new(),
         }
+    }
+
+    pub fn with_sources(mut self, sources: Vec<String>) -> Self {
+        self.sources = sources;
+        self
     }
 
     pub fn take_events(&self) -> CapturedEvents {
         let mut state = self.state.lock().expect("CLI observer lock was poisoned");
-        std::mem::take(&mut state.captured)
+        let mut captured = std::mem::take(&mut state.captured);
+        captured.workloads = std::mem::take(&mut state.workloads).into_values().collect();
+        captured.omitted_workloads = state.omitted_workloads;
+        captured
     }
 
     pub fn clear_progress(&self) {
@@ -60,18 +193,51 @@ impl CliObserver {
         state.rendered_lines = 0;
     }
 
-    fn draw_workload(&self, snapshot: &WorkloadSnapshot) {
+    fn draw_workloads(&self, state: &mut ObserverState) {
         if !self.progress || !self.interactive {
             return;
         }
-        let lines = workload_progress_lines(snapshot);
-        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        let mut lines = vec![format!(
+            "Mettle · {} workload{}{}",
+            state.workloads.len(),
+            if state.workloads.len() == 1 { "" } else { "s" },
+            if state.omitted_workloads == 0 {
+                String::new()
+            } else {
+                format!(" · {} omitted", state.omitted_workloads)
+            }
+        )];
+        let mut visible = state.workloads.values().collect::<Vec<_>>();
+        visible.sort_by_key(|view| {
+            (
+                matches!(
+                    view.snapshot.phase,
+                    WorkloadPhase::Completed | WorkloadPhase::Aborted
+                ),
+                view.snapshot.id,
+            )
+        });
+        for view in visible.iter().take(MAX_VISIBLE_WORKLOADS) {
+            lines.extend(workload_progress_lines(view));
+        }
+        if visible.len() > MAX_VISIBLE_WORKLOADS {
+            lines.push(format!(
+                "… {} more workloads in final report",
+                visible.len() - MAX_VISIBLE_WORKLOADS
+            ));
+        }
         let mut stderr = io::stderr().lock();
         if state.rendered_lines > 0 {
             let _ = write!(stderr, "\x1b[{}A", state.rendered_lines);
         }
         for line in &lines {
             let _ = writeln!(stderr, "\r\x1b[2K{line}");
+        }
+        if state.rendered_lines > lines.len() {
+            for _ in lines.len()..state.rendered_lines {
+                let _ = write!(stderr, "\r\x1b[2K\n");
+            }
+            let _ = write!(stderr, "\x1b[{}A", state.rendered_lines - lines.len());
         }
         let _ = stderr.flush();
         state.rendered_lines = lines.len();
@@ -92,7 +258,73 @@ impl ExecutionObserver for CliObserver {
     }
 
     fn workload_updated(&self, snapshot: WorkloadSnapshot) {
-        self.draw_workload(&snapshot);
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        if !state.workloads.contains_key(&snapshot.id) {
+            if snapshot.phase != WorkloadPhase::Starting {
+                return;
+            }
+            if state.workloads.len() == MAX_TRACKED_WORKLOADS {
+                let completed = state.workloads.iter().find_map(|(id, view)| {
+                    matches!(
+                        view.snapshot.phase,
+                        WorkloadPhase::Completed | WorkloadPhase::Aborted
+                    )
+                    .then_some(*id)
+                });
+                if let Some(id) = completed {
+                    state.workloads.remove(&id);
+                } else {
+                    state.omitted_workloads += 1;
+                    return;
+                }
+                state.omitted_workloads += 1;
+            }
+        }
+        state
+            .workloads
+            .entry(snapshot.id)
+            .and_modify(|view| {
+                view.snapshot = snapshot.clone();
+            })
+            .or_insert_with(|| WorkloadView {
+                snapshot,
+                actions: BTreeMap::new(),
+                overflow_calls: 0,
+            });
+        self.draw_workloads(&mut state);
+    }
+
+    fn workload_operation(&self, operation: WorkloadOperation) {
+        let mut state = self.state.lock().expect("CLI observer lock was poisoned");
+        let Some(view) = state.workloads.get_mut(&operation.workload_id) else {
+            return;
+        };
+        let site = ActionSite {
+            source: operation.span.source,
+            start: operation.span.start,
+            flow: operation.flow.clone(),
+            capability: operation.capability.clone(),
+            operation: operation.operation.clone(),
+        };
+        if let Some(action) = view.actions.get_mut(&site) {
+            action.record(&operation);
+            return;
+        }
+        if view.actions.len() == MAX_ACTION_SITES {
+            view.overflow_calls += 1;
+            return;
+        }
+        let line = self.sources.get(operation.span.source).map(|source| {
+            source
+                .bytes()
+                .take(operation.span.start)
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1
+        });
+        let mut action = ActionStats::new(site.clone(), line);
+        action.record(&operation);
+        view.actions.insert(site, action);
     }
 }
 
@@ -102,6 +334,8 @@ pub struct ExecutionReport<'a> {
     pub result: &'a Value,
     pub events: &'a [ExecutionEvent],
     pub omitted_workload_echoes: usize,
+    pub workloads: &'a [WorkloadView],
+    pub omitted_workloads: u64,
 }
 
 impl ExecutionReport<'_> {
@@ -114,6 +348,14 @@ impl ExecutionReport<'_> {
             color,
             verbose,
         );
+        if !self.workloads.is_empty() {
+            output.push_str(&workloads_result(
+                self.workloads,
+                self.omitted_workloads,
+                color,
+            ));
+            output.push_str("\n\n");
+        }
         write!(
             output,
             "{} Passed in {}",
@@ -144,6 +386,28 @@ impl ExecutionReport<'_> {
             color,
             verbose,
         );
+        if !self.workloads.is_empty() {
+            output.push_str(&workloads_result(
+                self.workloads,
+                self.omitted_workloads,
+                color,
+            ));
+            if !is_workload_tree(self.result) {
+                writeln!(output, "\n\n  {}", style("Result", "2", color))
+                    .expect("writing to a string cannot fail");
+                for line in pretty_value(self.result, verbose).lines() {
+                    writeln!(output, "    {line}").expect("writing to a string cannot fail");
+                }
+            }
+            write!(
+                output,
+                "\n\n{} Completed in {}",
+                style("✓", "32", color),
+                display_duration(self.duration)
+            )
+            .expect("writing to a string cannot fail");
+            return output;
+        }
         if let Some(summary) = workload_result(self.result, color) {
             output.push_str(&summary);
             return output;
@@ -215,8 +479,27 @@ impl ExecutionReport<'_> {
             "durationNanos": duration_nanos(self.duration),
             "result": value_json(self.result),
             "events": events_json(self.events, self.omitted_workload_echoes),
+            "workloads": workloads_json(self.workloads),
+            "omittedWorkloads": self.omitted_workloads,
         })
         .to_string()
+    }
+}
+
+fn is_workload_tree(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => {
+            if fields.contains_key("count")
+                && fields.contains_key("started")
+                && fields.contains_key("latency")
+            {
+                true
+            } else {
+                !fields.is_empty() && fields.values().all(is_workload_tree)
+            }
+        }
+        Value::Array(items) => !items.is_empty() && items.iter().all(is_workload_tree),
+        _ => false,
     }
 }
 
@@ -279,6 +562,11 @@ pub fn scope_label(path: &[ExecutionScope]) -> String {
                 branch,
                 total,
             } => format!("p{invocation}:b{branch}/{total}"),
+            ExecutionScope::NamedParallel {
+                invocation, name, ..
+            } => {
+                format!("p{invocation}:{name}")
+            }
             ExecutionScope::Retry {
                 invocation,
                 attempt,
@@ -313,6 +601,7 @@ pub fn events_json(events: &[ExecutionEvent], omitted: usize) -> serde_json::Val
 pub fn scope_json(path: &[ExecutionScope]) -> serde_json::Value {
     serde_json::json!(path.iter().map(|scope| match scope {
         ExecutionScope::Parallel { invocation, branch, total } => serde_json::json!({"kind":"parallel","invocation":invocation,"branch":branch,"total":total}),
+        ExecutionScope::NamedParallel { invocation, branch, total, name } => serde_json::json!({"kind":"parallel","invocation":invocation,"branch":branch,"total":total,"name":name}),
         ExecutionScope::Retry { invocation, attempt, total } => serde_json::json!({"kind":"retry","invocation":invocation,"attempt":attempt,"total":total}),
     }).collect::<Vec<_>>())
 }
@@ -378,14 +667,78 @@ fn render_operation(
     }
 }
 
-fn workload_progress_lines(snapshot: &WorkloadSnapshot) -> Vec<String> {
-    let phase = match snapshot.phase {
+fn workload_title(snapshot: &WorkloadSnapshot) -> String {
+    let branch = snapshot
+        .scope_path
+        .iter()
+        .rev()
+        .find_map(|scope| match scope {
+            ExecutionScope::NamedParallel { name, .. } => Some(name.clone()),
+            ExecutionScope::Parallel { branch, .. } => Some(format!("branch {branch}")),
+            ExecutionScope::Retry { .. } => None,
+        });
+    branch.unwrap_or_else(|| format!("workload #{}", snapshot.id))
+}
+
+const fn workload_phase_label(phase: WorkloadPhase) -> &'static str {
+    match phase {
         WorkloadPhase::Starting => "STARTING",
         WorkloadPhase::Running => "RUNNING",
         WorkloadPhase::Draining => "DRAINING",
         WorkloadPhase::Completed => "COMPLETED",
+        WorkloadPhase::Aborted => "ABORTED",
+    }
+}
+
+fn action_label(action: &ActionStats, index: usize) -> String {
+    let operation = if action.site.capability == "http" {
+        action.site.operation.to_ascii_uppercase()
+    } else {
+        format!("{}.{}", action.site.capability, action.site.operation)
     };
-    let (description, duration, limit, target_rate) = match snapshot.kind {
+    let location = action
+        .line
+        .map_or_else(|| format!("#{index}"), |line| format!("L{line}"));
+    if action.site.flow.is_empty() {
+        format!("{operation} {location}")
+    } else {
+        format!("{} · {operation} {location}", action.site.flow)
+    }
+}
+
+fn action_summary(action: &ActionStats, index: usize) -> String {
+    let mut summary = format!(
+        "{} · {} {} · p95 {}",
+        action_label(action, index),
+        action.calls,
+        if action.calls == 1 { "call" } else { "calls" },
+        display_duration(action.p95())
+    );
+    if action.errors > 0 {
+        write!(summary, " · {} errors", action.errors).expect("writing to a string cannot fail");
+    }
+    if action.http_4xx > 0 || action.http_5xx > 0 {
+        write!(
+            summary,
+            " · 4xx {} / 5xx {}",
+            action.http_4xx, action.http_5xx
+        )
+        .expect("writing to a string cannot fail");
+    }
+    summary
+}
+
+fn short_label(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    format!("{}…", value.chars().take(max_chars - 1).collect::<String>())
+}
+
+fn workload_progress_lines(view: &WorkloadView) -> Vec<String> {
+    let snapshot = &view.snapshot;
+    let phase = workload_phase_label(snapshot.phase);
+    let (description, duration, limit) = match snapshot.kind {
         WorkloadKind::Rate {
             target,
             period,
@@ -396,45 +749,206 @@ fn workload_progress_lines(snapshot: &WorkloadSnapshot) -> Vec<String> {
             format!("rate {target}/{}", display_duration(period)),
             duration,
             limit,
-            Some(count_f64(target) / period.as_secs_f64()),
         ),
         WorkloadKind::Concurrency { limit, duration } => {
-            (format!("concurrency {limit}"), duration, limit, None)
+            (format!("concurrency {limit}"), duration, limit)
         }
     };
-    let rate_window = snapshot.elapsed.min(duration);
+    let rate_window = if snapshot.phase == WorkloadPhase::Completed {
+        duration
+    } else {
+        snapshot.elapsed.min(duration)
+    };
     let achieved = if rate_window.is_zero() {
         0.0
     } else {
         count_f64(snapshot.started) / rate_window.as_secs_f64()
     };
-    let rate = target_rate.map_or_else(
-        || format!("throughput {achieved:.1}/s"),
-        |_| format!("achieved {achieved:.1}/s"),
-    );
-    vec![
-        format!("Mettle · {description} for {}", display_duration(duration)),
+    let rate = format!("{achieved:.1}/s");
+    let mut lines = vec![
         format!(
-            "{phase:<9} {} / {}   active {} / {limit}   {rate}",
-            display_duration(snapshot.elapsed.min(duration)),
-            display_duration(duration),
-            snapshot.active
+            "{} · {description} for {} · {phase}",
+            short_label(&workload_title(snapshot), 24),
+            display_duration(duration)
         ),
         format!(
-            "started {}   completed {}   ok {}   failed {}   dropped {}",
-            snapshot.started,
-            snapshot.completed,
+            "  {}/{} · active {}/{} · {rate} · ok {} · fail {} · drop {}",
+            if snapshot.elapsed < Duration::from_millis(1) {
+                "0ms".to_owned()
+            } else {
+                display_duration(snapshot.elapsed.min(duration))
+            },
+            display_duration(duration),
+            snapshot.active,
+            limit,
             snapshot.success,
             snapshot.failed,
             snapshot.dropped
         ),
         format!(
-            "latency p50 {}   p95 {}   p99 {}",
+            "  iterations {}/{} · p50 {} · p95 {} · p99 {}",
+            snapshot.started,
+            snapshot.completed,
             display_duration(snapshot.latency_p50),
             display_duration(snapshot.latency_p95),
             display_duration(snapshot.latency_p99)
         ),
-    ]
+    ];
+    if snapshot.cancelled > 0 {
+        lines.push(format!(
+            "  {} in-flight iterations cancelled",
+            snapshot.cancelled
+        ));
+    }
+    for (index, action) in view.actions.values().take(MAX_VISIBLE_ACTIONS).enumerate() {
+        let label = short_label(&action_label(action, index + 1), 34);
+        lines.push(format!(
+            "    {label} · {} {} · p95 {}{}",
+            action.calls,
+            if action.calls == 1 { "call" } else { "calls" },
+            display_duration(action.p95()),
+            if action.errors + action.http_5xx > 0 {
+                format!(" · {} err/5xx", action.errors + action.http_5xx)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    let hidden = view.actions.len().saturating_sub(MAX_VISIBLE_ACTIONS);
+    if hidden > 0 || view.overflow_calls > 0 {
+        lines.push(format!(
+            "    … {hidden} more action sites · {} calls beyond site limit",
+            view.overflow_calls
+        ));
+    }
+    lines
+}
+
+pub fn workloads_result(workloads: &[WorkloadView], omitted: u64, color: bool) -> String {
+    let mut output = String::new();
+    for (index, view) in workloads.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        let has_action_issues = view
+            .actions
+            .values()
+            .any(|action| action.errors > 0 || action.http_5xx > 0);
+        let phase = workload_phase_label(view.snapshot.phase);
+        let status = if view.snapshot.failed > 0 || view.snapshot.dropped > 0 || has_action_issues {
+            style(&format!("{phase} · ISSUES"), "33;1", color)
+        } else {
+            style(phase, "36;1", color)
+        };
+        let (kind, achieved) = match view.snapshot.kind {
+            WorkloadKind::Rate {
+                target,
+                period,
+                duration,
+                ..
+            } => (
+                format!(
+                    "rate {target}/{} for {}",
+                    display_duration(period),
+                    display_duration(duration)
+                ),
+                format!(
+                    "{:.1}/s",
+                    count_f64(view.snapshot.started)
+                        / if view.snapshot.phase == WorkloadPhase::Completed {
+                            duration.as_secs_f64()
+                        } else {
+                            view.snapshot.elapsed.as_secs_f64().max(f64::EPSILON)
+                        }
+                ),
+            ),
+            WorkloadKind::Concurrency { limit, duration } => (
+                format!("concurrency {limit} for {}", display_duration(duration)),
+                format!(
+                    "{:.1}/s",
+                    count_f64(view.snapshot.completed)
+                        / view.snapshot.elapsed.as_secs_f64().max(f64::EPSILON)
+                ),
+            ),
+        };
+        writeln!(
+            output,
+            "{} · {kind} · {status}",
+            workload_title(&view.snapshot)
+        )
+        .expect("writing to a string cannot fail");
+        writeln!(
+            output,
+            "  {} started · {} successful · {} failed · {} dropped · achieved {achieved} · p95 {}",
+            view.snapshot.started,
+            view.snapshot.success,
+            view.snapshot.failed,
+            view.snapshot.dropped,
+            display_duration(view.snapshot.latency_p95)
+        )
+        .expect("writing to a string cannot fail");
+        if view.snapshot.cancelled > 0 {
+            writeln!(
+                output,
+                "  {} in-flight iterations cancelled",
+                view.snapshot.cancelled
+            )
+            .expect("writing to a string cannot fail");
+        }
+        for (action_index, action) in view.actions.values().enumerate() {
+            writeln!(output, "  {}", action_summary(action, action_index + 1))
+                .expect("writing to a string cannot fail");
+            if !action.failure_samples.is_empty() {
+                writeln!(output, "    samples: {}", action.failure_samples.join(", "))
+                    .expect("writing to a string cannot fail");
+            }
+        }
+        if view.overflow_calls > 0 {
+            writeln!(
+                output,
+                "  … {} calls beyond the 32-site detail limit",
+                view.overflow_calls
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    if omitted > 0 {
+        writeln!(
+            output,
+            "\n… {omitted} earlier or excess workloads omitted from this view"
+        )
+        .expect("writing to a string cannot fail");
+    }
+    output.trim_end().to_owned()
+}
+
+pub fn workloads_json(workloads: &[WorkloadView]) -> serde_json::Value {
+    serde_json::Value::Array(workloads.iter().map(|view| {
+        serde_json::json!({
+            "id": view.snapshot.id,
+            "name": workload_title(&view.snapshot),
+            "phase": format!("{:?}", view.snapshot.phase).to_ascii_lowercase(),
+            "started": view.snapshot.started,
+            "completed": view.snapshot.completed,
+            "success": view.snapshot.success,
+            "failed": view.snapshot.failed,
+            "dropped": view.snapshot.dropped,
+            "cancelled": view.snapshot.cancelled,
+            "actions": view.actions.values().enumerate().map(|(index, action)| serde_json::json!({
+                "name": action_label(action, index + 1),
+                "source": action.site.source,
+                "offset": action.site.start,
+                "line": action.line,
+                "calls": action.calls,
+                "errors": action.errors,
+                "http4xx": action.http_4xx,
+                "http5xx": action.http_5xx,
+                "p95Nanos": u64::try_from(action.p95().as_nanos()).unwrap_or(u64::MAX),
+                "failureSamples": action.failure_samples,
+            })).collect::<Vec<_>>(),
+            "overflowCalls": view.overflow_calls,
+        })
+    }).collect())
 }
 
 fn workload_result(value: &Value, color: bool) -> Option<String> {
@@ -730,7 +1244,10 @@ mod tests {
     use super::{CliObserver, ExecutionReport, display_duration, events_json, truncate};
     use mettle_capability::{Capability, Span, Value};
     use mettle_http::HttpCapability;
-    use mettle_runtime::{ExecutionEvent, ExecutionEventKind, ExecutionObserver, OperationEvent};
+    use mettle_runtime::{
+        ExecutionEvent, ExecutionEventKind, ExecutionObserver, ExecutionScope, OperationEvent,
+        WorkloadKind, WorkloadOperation, WorkloadPhase, WorkloadSnapshot,
+    };
 
     fn operation_event(operation: OperationEvent) -> ExecutionEvent {
         ExecutionEvent {
@@ -753,6 +1270,8 @@ mod tests {
             result: &value,
             events: &[],
             omitted_workload_echoes: 0,
+            workloads: &[],
+            omitted_workloads: 0,
         }
         .human(false, false);
         assert!(output.contains("health"));
@@ -801,6 +1320,8 @@ mod tests {
             result: &result,
             events: &[operation_event(operation)],
             omitted_workload_echoes: 0,
+            workloads: &[],
+            omitted_workloads: 0,
         }
         .human(false, false);
         assert!(output.contains("Result"), "{output}");
@@ -863,6 +1384,8 @@ mod tests {
             result: &value,
             events: &[operation_event(operation)],
             omitted_workload_echoes: 0,
+            workloads: &[],
+            omitted_workloads: 0,
         };
 
         let normal = report.human(false, false);
@@ -897,5 +1420,120 @@ mod tests {
         let json = events_json(&captured.events, captured.omitted_workload_echoes);
         assert_eq!(json[50]["type"], "echo_omitted");
         assert_eq!(json[50]["count"], 5);
+    }
+
+    fn workload_snapshot(id: u64, name: &str, phase: WorkloadPhase) -> WorkloadSnapshot {
+        WorkloadSnapshot {
+            id,
+            scope_path: vec![ExecutionScope::NamedParallel {
+                invocation: 1,
+                branch: usize::try_from(id).expect("test id fits usize"),
+                total: 2,
+                name: name.to_owned(),
+            }],
+            kind: WorkloadKind::Rate {
+                target: 2,
+                period: std::time::Duration::from_secs(1),
+                duration: std::time::Duration::from_secs(2),
+                limit: 4,
+                planned: 4,
+            },
+            phase,
+            elapsed: std::time::Duration::from_secs(2),
+            active: 0,
+            started: 4,
+            completed: 4,
+            success: 4,
+            failed: 0,
+            dropped: 0,
+            cancelled: 0,
+            latency_p50: std::time::Duration::from_millis(10),
+            latency_p95: std::time::Duration::from_millis(20),
+            latency_p99: std::time::Duration::from_millis(30),
+        }
+    }
+
+    #[test]
+    fn parallel_workloads_keep_separate_bounded_redacted_action_summaries() {
+        let observer = CliObserver::new(false)
+            .with_sources(vec!["flow main {\n  http.get(\"/secret\")\n}".to_owned()]);
+        observer.workload_updated(workload_snapshot(1, "browsing", WorkloadPhase::Starting));
+        observer.workload_updated(workload_snapshot(2, "posts", WorkloadPhase::Starting));
+        for workload_id in [1, 2] {
+            observer.workload_operation(WorkloadOperation {
+                workload_id,
+                span: Span::new(14, 22),
+                flow: "main".to_owned(),
+                capability: "http".to_owned(),
+                operation: "get".to_owned(),
+                duration: std::time::Duration::from_millis(12),
+                http_status: Some(if workload_id == 1 { 200 } else { 503 }),
+                failed: false,
+            });
+            observer.workload_updated(workload_snapshot(
+                workload_id,
+                if workload_id == 1 {
+                    "browsing"
+                } else {
+                    "posts"
+                },
+                WorkloadPhase::Completed,
+            ));
+        }
+        let captured = observer.take_events();
+        assert_eq!(captured.workloads.len(), 2);
+        assert_eq!(captured.workloads[0].actions.len(), 1);
+        assert_eq!(captured.workloads[1].actions.len(), 1);
+        let report = ExecutionReport {
+            flow: "main",
+            duration: std::time::Duration::from_secs(2),
+            result: &Value::Null,
+            events: &captured.events,
+            omitted_workload_echoes: 0,
+            workloads: &captured.workloads,
+            omitted_workloads: 0,
+        };
+        let human = report.human(false, false);
+        assert!(human.contains("browsing · rate"), "{human}");
+        assert!(human.contains("posts · rate"), "{human}");
+        assert!(human.contains("main · GET L2"), "{human}");
+        assert!(human.contains("samples: HTTP 503"), "{human}");
+        assert!(!human.contains("/secret"), "{human}");
+        let json: serde_json::Value = serde_json::from_str(&report.json()).expect("valid JSON");
+        assert_eq!(json["workloads"][0]["name"], "browsing");
+        assert_eq!(json["workloads"][1]["actions"][0]["http5xx"], 1);
+        assert!(!report.json().contains("/secret"));
+    }
+
+    #[test]
+    fn workload_action_sites_and_history_are_bounded() {
+        let observer = CliObserver::new(false);
+        observer.workload_updated(workload_snapshot(1, "first", WorkloadPhase::Starting));
+        for offset in 0..33 {
+            observer.workload_operation(WorkloadOperation {
+                workload_id: 1,
+                span: Span::new(offset, offset + 1),
+                flow: "main".to_owned(),
+                capability: "http".to_owned(),
+                operation: "get".to_owned(),
+                duration: std::time::Duration::from_millis(1),
+                http_status: Some(200),
+                failed: false,
+            });
+        }
+        {
+            let state = observer.state.lock().expect("observer lock");
+            assert_eq!(state.workloads[&1].actions.len(), 32);
+            assert_eq!(state.workloads[&1].overflow_calls, 1);
+        }
+        observer.workload_updated(workload_snapshot(1, "first", WorkloadPhase::Completed));
+        for id in 2..=33 {
+            observer.workload_updated(workload_snapshot(id, "later", WorkloadPhase::Starting));
+            observer.workload_updated(workload_snapshot(id, "later", WorkloadPhase::Completed));
+        }
+        let captured = observer.take_events();
+        assert_eq!(captured.workloads.len(), 32);
+        assert_eq!(captured.omitted_workloads, 1);
+        assert!(!captured.workloads.iter().any(|view| view.snapshot.id == 1));
     }
 }

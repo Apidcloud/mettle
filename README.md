@@ -12,19 +12,17 @@ Protocols are capabilities rather than syntax baked into the language. HTTP is t
 This HTTP flow is executable today:
 
 ```mettle
-flow createUser() {
+flow createUser {
     seed = http.get("https://jsonplaceholder.typicode.com/users/1")
 
-    created = http.post("https://jsonplaceholder.typicode.com/posts") {
-        json: {
+    created = http.post("https://jsonplaceholder.typicode.com/posts", body: {
             name: seed.json.name
             active: true
             roles: ["tester"]
-        }
-    }
+        })
 
     assert(created.status == 201)
-    return created.json
+    created.json
 }
 ```
 
@@ -69,7 +67,7 @@ the repository checkout:
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.16.0.vsix --force
+code --install-extension dist/mettle-language-1.0.0-alpha.1.vsix --force
 ```
 
 If the `code` launcher is unavailable, in VS Code open the Extensions view,
@@ -78,7 +76,9 @@ requires the `mettle` CLI on `PATH`; configure **Mettle: Executable Path** when
 the binary is elsewhere. See [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md)
 for editor features and development details.
 
-The included request collection uses the public JSONPlaceholder test API. It needs an internet connection but no account, credentials, environment variables, or local server.
+Start with the [example index](examples/README.md): `language/` contains network-free
+walkthroughs plus one multi-file project; `http/` contains public-API workflows.
+The HTTP examples need an internet connection but no account or credentials.
 
 ### Platform support
 
@@ -89,9 +89,9 @@ The repository does not publish prebuilt executables yet, so the current install
 Most contributor acceptance scripts use Bash because Linux remains the primary development environment. `python scripts/acceptance-portable.py` provides the operating-system-neutral runtime smoke test used by CI.
 
 ```bash
-mettle check examples/request-collection.mettle
-mettle list examples/request-collection.mettle
-mettle run examples/request-collection.mettle inspectRequest \
+mettle check examples/http/requests.mettle
+mettle list examples/http/requests.mettle
+mettle run examples/http/requests.mettle inspectRequest \
   --arg baseUrl=https://jsonplaceholder.typicode.com \
   --arg requestId=1
 ```
@@ -107,27 +107,23 @@ http.get("https://jsonplaceholder.typicode.com/posts/1")
 Give the work a name only when it needs inputs or more than one step.
 
 ```mettle
-flow getPost(baseUrl, postId) = http.get("${baseUrl}/posts/${postId}")
-
-flow inspectRequest(baseUrl, requestId) {
-    response = http.get("${baseUrl}/posts/${requestId}")
-    assert(response.status == 200)
-    return response.json.args
-}
+flow inspectRequest(baseUrl, requestId) =
+    http.get("${baseUrl}/posts/${requestId}")
 ```
 
 Run a named flow directly:
 
 ```bash
-mettle run requests.mettle getPost \
+mettle run examples/http/requests.mettle inspectRequest \
   --arg baseUrl=https://jsonplaceholder.typicode.com \
-  --arg postId=1
+  --arg requestId=1
 ```
 
 `main` is the conventional default flow, but it is optional. If a file has exactly one runnable flow, Mettle runs it without a name. If there are several, select one by name or by a source line from `mettle list`.
 
 ```bash
-mettle run examples/request-collection.mettle --line 3
+mettle list examples/http/requests.mettle
+mettle run examples/http/requests.mettle --line 4
 ```
 
 Run every zero-argument flow in source order with `--all`. Parameterized flows
@@ -144,7 +140,8 @@ mettle run checks.mettle --all
 
 ## Write executable tests
 
-Declare checks with `test("name") { ... }`. Tests have no parameters or return
+Declare checks with `test "name" { ... }`. The older `test("name")` spelling
+also works. Tests have no parameters or return
 value. Use `assert(condition, "message")` to explain a failure; the message is
 optional and may interpolate values. A test collects false assertions and reports
 each one with its source location, then continues to the next test. A runtime
@@ -156,18 +153,27 @@ runs tests declared in that file in source order;
 exits nonzero when any test fails or the file has no tests, and supports `--verbose`, `--quiet`, and
 `--output json` (JSON Lines) for CI.
 
+Use `fail("reason")` when an entry cannot continue. Unlike a collected test
+assertion, it stops the current flow or test immediately and keeps earlier
+diagnostics. Its message must be a string; sensitive values are redacted.
+`fail` is a never-returning expression: it can be the whole body of a flow or
+a branch of `parallel`. `retry` does not repeat it, and an enclosing `parallel`,
+`rate`, or `concurrency` scope cancels its in-flight work. The CLI reports a
+nonzero status, but other entries in `mettle test <file>` or `mettle run --all`
+still run. There is no language-level `exit(code)` that kills the whole process.
+
 ```mettle
 flow getPost(id) = http.get("https://jsonplaceholder.typicode.com/posts/${id}")
 
-test("post 1 is available") {
+test "post 1 is available" {
     response = getPost(1)
     assert(response.status == 200, "post 1 should return 200")
     assert(response.json.id == 1, "post 1 should have ID 1")
 }
 ```
 
-Run the full example with `mettle test examples/http-tests.mettle`, or run one
-test by name with `mettle test examples/http-tests.mettle "post 1 is available"`.
+Run the full example with `mettle test examples/http/tests.mettle`, or run one
+test by name with `mettle test examples/http/tests.mettle "post 1 is available"`.
 
 ## Build a workflow from operation results
 
@@ -184,29 +190,27 @@ context publicApi {
     }
 }
 
-flow createUserFromSeed() {
+flow createUserFromSeed {
     use context publicApi
 
     seed = http.get("/users/1")
 
-    created = http.post("/posts") {
-        json: {
+    created = http.post("/posts", body: {
             sourceId: seed.json.id
             name: seed.json.name
             active: true
             roles: ["tester"]
-        }
-    }
+        })
 
     assert(created.status == 201)
-    return created.json
+    created.json
 }
 ```
 
-This is the complete shape used by [`examples/http.mettle`](examples/http.mettle):
+This is the complete shape used by the [HTTP workflow example](examples/http/workflow.mettle):
 
 ```bash
-mettle run examples/http.mettle
+mettle run examples/http/workflow.mettle
 ```
 
 An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, `url`, and `duration`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious. Header names containing punctuation use string-key access, such as `response.headers["content-type"]`.
@@ -228,9 +232,30 @@ flow label(users, position) {
 }
 ```
 
-`array[0]` is zero-based; `object["key"]` and `object[keyExpression]` select string keys. Array indexes must be non-negative integers. Invalid key types, missing keys, and out-of-range positions report runtime errors. Dot access remains convenient for identifier-style object keys.
+`array[0]` is zero-based; `object["key"]` and `object[keyExpression]` select string keys. Array indexes must be non-negative integers. Invalid key types, missing keys, and out-of-range positions report runtime errors. Dot access remains convenient for identifier-style object keys. For an intentional early failure, use `fail("reason")`; `return` is the early-success path in a flow.
 
-Separate statements with newlines. Object and context fields, and `parallel` branches, may use either newlines or commas; same-line entries need commas. Arrays and call arguments always use commas. Execution-policy bodies still contain exactly one expression: put multi-step work in a helper flow and call it from the policy. Try the complete network-free [language example](examples/language-refinements.mettle) with `mettle run examples/language-refinements.mettle` and `mettle test examples/language-refinements.mettle`.
+Separate statements with newlines. Object and context fields, and `parallel` branches, may use either newlines or commas; same-line entries need commas. Arrays and call arguments always use commas; multiline arrays and calls may end with a trailing comma. A block-bodied flow or execution policy yields its final expression, so multi-step policies no longer need a helper flow. `return` remains useful for an early flow exit. A zero-argument declaration can omit parentheses (`flow main { ... }`), but calling it still requires `main()`—a bare name never starts I/O. Try the network-free [collections and numbers example](examples/language/collections-and-numbers.mettle) with `mettle run examples/language/collections-and-numbers.mettle` and `mettle test examples/language/collections-and-numbers.mettle`.
+
+### Iterate results
+
+`for` iterates finite arrays and objects sequentially. One binding receives each value; two receive `index, value` for an array or `key, value` for an object. Objects iterate in sorted key order, including objects returned by named `parallel`. A loop with a final expression maps values into a new collection of the same shape. A loop used only as a statement need not build a result. Inside a test, the loop continues collecting failed assertions across iterations; in an ordinary flow or retry block, an assertion still fails immediately.
+
+```mettle
+responses = parallel {
+    users: http.get("/users")
+    posts: http.get("/posts")
+}
+statuses = for name, response in responses {
+    assert(response.status == 200, "${name} failed")
+    response.status
+}
+```
+
+Named `parallel` branches produce an object and attach labels such as `[p1:users]` to diagnostic events. Unnamed branches still produce an array in source order. A single `parallel` expression cannot mix named and unnamed branches; each branch contains one expression. Inside a policy or loop block, use the final expression for its value; an explicit `return` there is rejected because it cannot exit the enclosing flow.
+
+### Numbers and durations
+
+Integers accept decimal (`1_000`), hexadecimal (`0xFF`), and binary (`0b1010`) forms; `-` works with integer and decimal values. Decimals also accept exponents such as `1.25e2`. Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact fractional forms such as `1.5s` and `0.25ms`. Fractions smaller than one nanosecond, negative durations, non-finite decimals, malformed separators, and out-of-range integers are rejected. Integers remain signed 64-bit values for now; incoming HTTP JSON integers outside that range fail explicitly instead of rounding. Integer and decimal comparisons are numeric without rounding a large integer first. There are no percent, rate, or byte-size suffixes yet; `0xFF` is an integer, not raw bytes.
 
 ## Put shared setup in contexts
 
@@ -277,7 +302,7 @@ them with `[REDACTED]`. Syntax and compile diagnostics can print source lines,
 so never put literal credentials in `.mettle` files; load them with `senv()`.
 HTTP also redacts credential-bearing headers such as
 `Authorization`, `Cookie`, and `Set-Cookie`. See
-[`examples/secrets.mettle`](examples/secrets.mettle) for both forms; set
+[secrets example](examples/language/secrets.mettle) for both forms; set
 `API_TOKEN` before running it.
 
 ### Environment files and profiles
@@ -292,42 +317,40 @@ server needs an env file. `env()` and `${NAME}` see the same resolved values;
 use `senv()` for values that must be redacted.
 
 ```bash
-mettle run examples/profile-standalone/main.mettle
-mettle run examples/profile-standalone/main.mettle --profile qa
-mettle run examples/project/main.mettle --profile qa
+mettle run examples/language/profiles/main.mettle
+mettle run examples/language/profiles/main.mettle --profile qa
+mettle run examples/language/project/main.mettle --profile qa
 ```
 
-The [standalone profile example](examples/profile-standalone/main.mettle) and
-[project example](examples/project/main.mettle) include safe demo `.env`,
+The [standalone profile example](examples/language/profiles/main.mettle) and
+[project example](examples/language/project/main.mettle) include safe demo `.env`,
 `.env.qa`, and `.env.prod` files. Dotenv files support `NAME=value`, optional
 `export`, comments, and quoted values; they do not execute shell code or expand
 variables. Outside these allowlisted examples, `.env` files are Git-ignored.
 
 ## Control how work executes
 
-Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. Mettle currently implements `within`, `retry`, bounded `parallel`, `rate`, and fixed `concurrency`:
+Execution policies are independent of the protocol being exercised. They can be nested, assigned, returned, and combined with capability calls. Mettle currently implements `within`, `retry`, `parallel`, `rate`, and fixed `concurrency`:
 
 ```mettle
-flow fetchStatus(path) {
+flow probe(path) = retry(delay: 100ms, attempts: 3) {
     response = http.get("https://jsonplaceholder.typicode.com${path}")
     assert(response.status == 200)
-    return response.status
+    response.status
 }
-
-flow probe(path) = retry(attempts: 3, delay: 100ms) { fetchStatus(path) }
 
 flow readiness() {
     return within(timeout: 5s) {
         parallel(limit: 2) {
-            probe("/posts/1")
-            probe("/users/1")
-            probe("/todos/1")
+            posts: probe("/posts/1")
+            users: probe("/users/1")
+            todos: probe("/todos/1")
         }
     }
 }
 ```
 
-`parallel` returns results in source order and never starts more branches than `limit`. If a branch fails, active siblings are cancelled and joined. `retry` counts the first execution as an attempt and returns the first successful result. `within` covers all nested work, including retry delays. Ctrl+C cancels the root execution and exits with status 130.
+`parallel` with unnamed branches returns an array in source order; named branches return an object keyed by their labels. Without `limit`, all branches may start; with it, no more than `limit` start at once. If a branch fails, active siblings are cancelled and joined. `retry` counts the first execution as an attempt and reruns its entire block—including assertions—until it succeeds or exhausts its attempts; terminal `fail(...)` bypasses retry. `within` covers all nested work, including retry delays. Ctrl+C cancels the root execution and exits with status 130.
 
 This gives every operation an owner, a lifetime, and a cleanup path. A flow that works as a functional check can run inside a load test without duplicating its operations.
 
@@ -345,13 +368,19 @@ assert(load.dropped == 0)
 
 `concurrency(limit: 100, duration: 30s) { ... }` keeps a fixed number of iterations active during its scheduling window. Both policies stop admitting work when the window closes, drain owned iterations for up to 30 seconds, and expose whether that drain timed out.
 
-Workload results include `count`, `started`, `success`, `failed`, `errors`, `dropped`, `saturated`, total `duration`, and bounded-memory distributions for `latency` and `schedulingDelay`. Distributions expose `min`, `mean`, `max`, `p50`, `p90`, `p95`, and `p99`. Rate results also report `scheduled`, `rate.target`, `rate.period`, `rate.actual`, and `rate.limit`.
+Workload results include `count`, `started`, `success`, `failed`, `errors`, `dropped`, `cancelled`, `saturated`, total `duration`, and bounded-memory distributions for `latency` and `schedulingDelay`. Distributions expose `min`, `mean`, `max`, `p50`, `p90`, `p95`, and `p99`. Rate results also report `scheduled`, `rate.target`, `rate.period`, `rate.actual`, and `rate.limit`. A terminal `fail(...)` inside a workload stops scheduling, cancels in-flight iterations, and reports partial metrics with phase `aborted`.
 
 Run the included public example with:
 
 ```bash
-mettle run examples/load-test.mettle
+mettle run examples/http/load.mettle
 ```
+
+For two independent rate workloads running at the same time, see the
+[parallel load example](examples/http/load-parallel.mettle). Its named
+`parallel` branches return separate workload metrics. The live dashboard keeps
+both branches visible, including per-call-site counts, HTTP status classes,
+and latency; the final report retains the same workload grouping.
 
 ## Organize a project without import boilerplate
 
@@ -378,7 +407,7 @@ flow getUser(id) {
 ```
 
 ```bash
-mettle run examples/project/main.mettle
+mettle run examples/language/project/main.mettle
 ```
 
 ## Protocol capabilities
@@ -421,16 +450,12 @@ The SIP capability and this exact schema are planned work. HTTP is the only prot
 Mettle currently supports HTTP/1.1 `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, and `OPTIONS` over HTTP or HTTPS. Absolute URLs work anywhere. Relative URLs use `baseUrl` from the active HTTP defaults or the operation itself.
 
 ```mettle
-response = http.post("/users") {
-    timeout: 2s
-    headers: {
-        "X-Request-Source": "smoke-test"
-    }
-    json: {
-        name: "Ada"
-        active: true
-    }
-}
+response = http.post(
+    "/users",
+    timeout: 2s,
+    headers: { "X-Request-Source": "smoke-test" },
+    body: { name: "Ada", active: true },
+)
 ```
 
 Mettle validates options during `mettle check`, before it opens a connection.
@@ -442,10 +467,13 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `headers` | Object of strings | Request headers |
 | `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
 | `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
-| `json` | JSON value | Body for `post`, `put`, `patch`, or `delete`; sets `Content-Type` when absent |
-| `body` | String | Text body for `post`, `put`, `patch`, or `delete`; defaults to UTF-8 `text/plain` |
+| `body` | Object, array, string, bytes, or explicitly formatted scalar | Request payload for `post`, `put`, `patch`, or `delete` |
+| `bodyFormat` | `"json"`, `"text"`, or `"bytes"` | Overrides body-format inference when needed |
+| `json` | JSON value | Legacy payload option; prefer `body` in new files |
 
-`json` and `body` are mutually exclusive and Mettle rejects the combination during compilation. An explicit `Content-Type` used with `json` must be `application/json` or a media type ending in `+json`. A response that declares one of those media types but contains malformed JSON fails with a clear protocol error. The response size limit is enforced from `Content-Length` when available and while streaming the body.
+The URL is HTTP's only positional parameter and may instead be written as `url: "/users"`. Named arguments can follow positional ones, in any order; after the first named argument, no positional argument is allowed. User-defined flows follow the same positional-then-named rule. Duplicate or unknown names fail during `mettle check`, and argument expressions run once in their written order.
+
+Objects and arrays in `body` default to JSON; strings default to UTF-8 text; bytes values default to raw bytes. The default `Content-Type` follows that format (`application/json`, UTF-8 `text/plain`, or `application/octet-stream`). To send a JSON string rather than plain text, write `body: "Ada", bodyFormat: "json"`. Scalars such as numbers require an explicit `bodyFormat`. An explicitly supplied `Content-Type` describes the payload but does not change its serialization; JSON bodies require a JSON-compatible media type. An HTTP call can still use its legacy option-block form, including `json:`, while files migrate. `json` and `body` are mutually exclusive, as are `json` and `bodyFormat`. A response that declares a JSON media type but contains malformed JSON fails with a clear protocol error. The response size limit is enforced from `Content-Length` when available and while streaming the body.
 
 External data does not have to use Mettle identifier names. Use a quoted or computed string key after brackets for HTTP headers or JSON properties containing punctuation:
 
@@ -479,11 +507,11 @@ flow greet(name) {
     return "Hello, ${name}!"
 }
 
-flow main() = parallel(limit: 2) { greet("Ada"), greet("Lin") }
+flow main = parallel(limit: 2) { greet("Ada"), greet("Lin") }
 ```
 
-Messages from parallel branches carry logical labels such as `[p1:b2/2]`:
-parallel invocation 1, branch 2 of 2. Nested branches retain their full path;
+Messages from parallel branches carry logical labels such as `[p1:b2/2]` for
+unnamed branches and `[p1:users]` for named ones. Nested branches retain their full path;
 retry attempts similarly use labels such as `[r2:a1/3]`. These are execution
 identifiers, not OS thread IDs. Branch numbers follow source order, while event
 order reflects what actually completed or emitted first. Messages from a
@@ -497,7 +525,7 @@ the CLI retains at most 50 messages per run and reports how many were omitted,
 keeping load-test output bounded. Messages are collected until the top-level
 flow finishes; `--all` therefore keeps each flow's output together. There is no
 separate `debug()` or debug mode yet. Try the network-free
-[echo example](examples/echo.mettle) with `mettle run examples/echo.mettle`.
+[echo example](examples/language/echo.mettle) with `mettle run examples/language/echo.mettle`.
 
 Mettle presents a flow as one execution rather than dumping its internal value. A normal HTTP workflow shows each operation, its status and timing, the useful response payload, and the total duration:
 
@@ -526,17 +554,23 @@ dumping duplicate raw body bytes. `--quiet` prints only the final flow status,
 execution envelope for automation. `--no-color` disables ANSI colors.
 
 ```bash
-mettle run examples/request-collection.mettle --line 10 --verbose
-mettle run examples/request-collection.mettle --line 10 --output json
+mettle run examples/http/requests.mettle inspectRequest --arg baseUrl=https://jsonplaceholder.typicode.com --arg requestId=1 --verbose
+mettle run examples/http/requests.mettle inspectRequest --arg baseUrl=https://jsonplaceholder.typicode.com --arg requestId=1 --output json
 ```
 
-Rate and concurrency workloads use an in-place dashboard when stderr is attached to a terminal. It updates the execution phase, active iterations, achieved rate, outcomes, dropped starts, and latency percentiles while the workload is running. Redirected output and machine-readable modes remain deterministic. Use `--no-progress` to disable the dashboard explicitly.
+Rate and concurrency workloads use an in-place dashboard when stderr is attached to a terminal. It prioritizes up to three active workloads and counts any others hidden from the live view. Each shows its execution phase, active iterations, achieved rate, outcomes, dropped starts, and latency percentiles. HTTP calls are aggregated by source call site, with counts, status classes, and p95 latency. The final human and JSON reports retain up to 32 workloads and 32 action sites per workload, explicitly counting any excess. Only a few failure categories are retained, without URLs, bodies, or headers. Redirected output and machine-readable modes remain deterministic. Use `--no-progress` to disable the live dashboard explicitly.
 
 ```text
-Mettle · rate 1,000/1s for 30s
-RUNNING   12.4s / 30s   active 87 / 200   achieved 998.2/s
-started 12,400   completed 12,313   ok 12,302   failed 11   dropped 0
-latency p50 38.2ms   p95 71.6ms   p99 104.8ms
+Mettle · 2 workloads
+browsing · rate 2/1s for 2s · RUNNING
+  1.00s/2s · active 1/4 · 3.0/s · ok 2 · fail 0 · drop 0
+  iterations 3/2 · p50 47ms · p95 155ms · p99 155ms
+    browseUser · GET L12 · 2 calls · p95 135ms
+    browseUser · GET L15 · 2 calls · p95 26ms
+posts · rate 3/1s for 4s · RUNNING
+  1.00s/4s · active 1/6 · 4.0/s · ok 3 · fail 0 · drop 0
+  iterations 4/3 · p50 24ms · p95 116ms · p99 116ms
+    readPost · GET L21 · 3 calls · p95 118ms
 ```
 
 Syntax, validation, and runtime failures return a nonzero status with source context. Runtime failures include the Mettle flow stack.
@@ -556,7 +590,7 @@ The included extension provides `.mettle` recognition, syntax highlighting, snip
 ```bash
 cd util/plugin/vscode
 npm run package
-code --install-extension dist/mettle-language-0.16.0.vsix --force
+code --install-extension dist/mettle-language-1.0.0-alpha.1.vsix --force
 ```
 
 The extension looks for `mettle` on `PATH`. Set **Mettle: Executable Path** if the binary lives elsewhere. With a `.mettle` file open, click **Mettle profile: Default** (or the current profile) in the bottom status bar, use the gear icon in the editor title bar, or run **Mettle: Select Profile** from the Command Palette. The picker discovers `.env` and `.env.<name>` files for the active file; **Default** uses `.env` and no `--profile` flag. The selection is remembered per project or standalone-file directory and is passed to Run Flow, Run All, and Run Tests actions. Read [`util/plugin/vscode/README.md`](util/plugin/vscode/README.md) for installation details.
@@ -603,7 +637,7 @@ crates/mettle-compiler     Resolution, validation, and execution-plan lowering
 crates/mettle-runtime      Async execution-plan interpreter and context scopes
 crates/mettle-http         HTTP schema, pooled client, JSON, timeouts, and TLS
 crates/mettle-cli          Native command-line interface and diagnostics
-examples/                  Runnable Mettle programs
+examples/                  Curated language and HTTP examples; start with examples/README.md
 tests/fixtures/            Deterministic HTTP programs and local TLS material
 tests/projects/            Multi-file project fixtures
 util/plugin/vscode/        Installable VS Code extension
@@ -620,8 +654,8 @@ focused source modules.
 ## Current limits
 
 - no redirects or proxy discovery
-- request bodies currently support JSON values and UTF-8 text; multipart forms and streaming bodies are not implemented
-- no workload ramping, distributed workers, or per-operation metric breakdowns yet
+- request bodies support JSON, UTF-8 text, and runtime bytes values; multipart forms and streaming bodies are not implemented
+- no workload ramping or distributed workers yet; operation metrics are local and source-site aggregated, not distributed traces
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS
 - no prebuilt Windows, macOS, or Linux release archives yet

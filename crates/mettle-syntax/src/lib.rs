@@ -164,6 +164,7 @@ fn set_field_source(field: &mut ObjectField, source: usize) {
     set_expression_source(&mut field.expression, source);
 }
 
+#[allow(clippy::too_many_lines)]
 fn set_expression_source(expression: &mut Expression, source: usize) {
     expression.span = expression.span.with_source(source);
     match &mut expression.kind {
@@ -177,14 +178,39 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
                 set_field_source(field, source);
             }
         }
+        ExpressionKind::Block(statements) => {
+            for statement in statements {
+                set_statement_source(statement, source);
+            }
+        }
+        ExpressionKind::Fail(message) => set_expression_source(message, source),
+        ExpressionKind::For {
+            key,
+            value,
+            iterable,
+            body,
+        } => {
+            if let Some(key) = key {
+                key.span = key.span.with_source(source);
+            }
+            value.span = value.span.with_source(source);
+            set_expression_source(iterable, source);
+            for statement in body {
+                set_statement_source(statement, source);
+            }
+        }
         ExpressionKind::Call {
             callee,
             arguments,
+            named_arguments,
             options,
         } => {
             callee.span = callee.span.with_source(source);
             for argument in arguments {
                 set_expression_source(argument, source);
+            }
+            for field in named_arguments {
+                set_field_source(field, source);
             }
             for field in options {
                 set_field_source(field, source);
@@ -203,7 +229,9 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
             set_expression_source(value, source);
             set_expression_source(index, source);
         }
-        ExpressionKind::Not(value) => set_expression_source(value, source),
+        ExpressionKind::Not(value) | ExpressionKind::Negate(value) => {
+            set_expression_source(value, source);
+        }
         ExpressionKind::Within { timeout, body } => {
             set_expression_source(timeout, source);
             set_expression_source(body, source);
@@ -224,7 +252,10 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
                 set_expression_source(limit, source);
             }
             for branch in branches {
-                set_expression_source(branch, source);
+                if let Some(name) = &mut branch.name {
+                    name.span = name.span.with_source(source);
+                }
+                set_expression_source(&mut branch.expression, source);
             }
         }
         ExpressionKind::Rate {
@@ -380,6 +411,12 @@ pub struct Expression {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ParallelBranch {
+    pub name: Option<Spanned<String>>,
+    pub expression: Expression,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExpressionKind {
     Null,
     Boolean(bool),
@@ -390,9 +427,18 @@ pub enum ExpressionKind {
     Name(String),
     Array(Vec<Expression>),
     Object(Vec<ObjectField>),
+    Block(Vec<Statement>),
+    Fail(Box<Expression>),
+    For {
+        key: Option<Spanned<String>>,
+        value: Spanned<String>,
+        iterable: Box<Expression>,
+        body: Vec<Statement>,
+    },
     Call {
         callee: Spanned<String>,
         arguments: Vec<Expression>,
+        named_arguments: Vec<ObjectField>,
         options: Vec<ObjectField>,
     },
     Member {
@@ -404,6 +450,7 @@ pub enum ExpressionKind {
         index: Box<Expression>,
     },
     Not(Box<Expression>),
+    Negate(Box<Expression>),
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
@@ -420,7 +467,7 @@ pub enum ExpressionKind {
     },
     Parallel {
         limit: Option<Box<Expression>>,
-        branches: Vec<Expression>,
+        branches: Vec<ParallelBranch>,
     },
     Rate {
         target: Box<Expression>,
@@ -480,6 +527,8 @@ struct Token {
 #[derive(Clone, Debug, PartialEq)]
 enum TokenKind {
     If,
+    For,
+    In,
     Else,
     And,
     Or,
@@ -492,6 +541,7 @@ enum TokenKind {
     Use,
     Return,
     Assert,
+    Fail,
     Within,
     Retry,
     Parallel,
@@ -521,6 +571,7 @@ enum TokenKind {
     Greater,
     GreaterEqual,
     Dot,
+    Minus,
     End,
 }
 
@@ -565,8 +616,12 @@ fn lex(source: &str) -> Result<Vec<Token>, SyntaxError> {
             }
             b'>' => push_symbol(&mut tokens, &mut cursor, TokenKind::Greater),
             b'.' => push_symbol(&mut tokens, &mut cursor, TokenKind::Dot),
+            b'-' if bytes.get(cursor + 1).is_some_and(u8::is_ascii_digit) => {
+                tokens.push(lex_number(source, &mut cursor, true)?);
+            }
+            b'-' => push_symbol(&mut tokens, &mut cursor, TokenKind::Minus),
             b'"' => tokens.push(lex_string(source, &mut cursor)?),
-            byte if byte.is_ascii_digit() => tokens.push(lex_number(source, &mut cursor)?),
+            byte if byte.is_ascii_digit() => tokens.push(lex_number(source, &mut cursor, false)?),
             byte if is_identifier_start(byte) => {
                 tokens.push(lex_identifier(source, &mut cursor));
             }
@@ -615,6 +670,8 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
     let text = &source[start..*cursor];
     let kind = match text {
         "if" => TokenKind::If,
+        "for" => TokenKind::For,
+        "in" => TokenKind::In,
         "else" => TokenKind::Else,
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
@@ -627,6 +684,7 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
         "use" => TokenKind::Use,
         "return" => TokenKind::Return,
         "assert" => TokenKind::Assert,
+        "fail" => TokenKind::Fail,
         "within" => TokenKind::Within,
         "retry" => TokenKind::Retry,
         "parallel" => TokenKind::Parallel,
@@ -643,19 +701,77 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
     }
 }
 
-fn lex_number(source: &str, cursor: &mut usize) -> Result<Token, SyntaxError> {
+#[allow(clippy::too_many_lines)]
+fn lex_number(source: &str, cursor: &mut usize, negative: bool) -> Result<Token, SyntaxError> {
     let bytes = source.as_bytes();
     let start = *cursor;
+    if negative {
+        *cursor += 1;
+    }
+    let number_start = *cursor;
+    if bytes[number_start] == b'0'
+        && let Some(base) = bytes.get(number_start + 1).and_then(|prefix| match prefix {
+            b'x' | b'X' => Some(16),
+            b'b' | b'B' => Some(2),
+            _ => None,
+        })
+    {
+        *cursor += 2;
+        let digits_start = *cursor;
+        while *cursor < bytes.len() && is_identifier_continue(bytes[*cursor]) {
+            *cursor += 1;
+        }
+        let span = Span::new(start, *cursor);
+        let digits = &source[digits_start..*cursor];
+        if digits.is_empty() || !valid_digits(digits, base) {
+            return Err(SyntaxError::new(
+                "invalid hexadecimal or binary literal",
+                span,
+            ));
+        }
+        let magnitude = u128::from_str_radix(&digits.replace('_', ""), base).map_err(|_| {
+            SyntaxError::new(
+                "integer literal is outside the supported 64-bit range",
+                span,
+            )
+        })?;
+        let value = signed_integer(magnitude, negative, span)?;
+        return Ok(Token {
+            kind: TokenKind::Integer(value),
+            span,
+        });
+    }
+
     while *cursor < bytes.len() && (bytes[*cursor].is_ascii_digit() || bytes[*cursor] == b'_') {
         *cursor += 1;
     }
+    let integer_end = *cursor;
 
-    let mut is_float = false;
+    let mut has_fraction = false;
     if bytes.get(*cursor) == Some(&b'.') && bytes.get(*cursor + 1).is_some_and(u8::is_ascii_digit) {
-        is_float = true;
+        has_fraction = true;
         *cursor += 1;
         while *cursor < bytes.len() && (bytes[*cursor].is_ascii_digit() || bytes[*cursor] == b'_') {
             *cursor += 1;
+        }
+    }
+    let fraction_end = *cursor;
+    let mut has_exponent = false;
+    if matches!(bytes.get(*cursor), Some(b'e' | b'E')) {
+        has_exponent = true;
+        *cursor += 1;
+        if matches!(bytes.get(*cursor), Some(b'+' | b'-')) {
+            *cursor += 1;
+        }
+        let exponent_start = *cursor;
+        while *cursor < bytes.len() && (bytes[*cursor].is_ascii_digit() || bytes[*cursor] == b'_') {
+            *cursor += 1;
+        }
+        if exponent_start == *cursor {
+            return Err(SyntaxError::new(
+                "exponent requires digits",
+                Span::new(start, *cursor),
+            ));
         }
     }
 
@@ -664,20 +780,32 @@ fn lex_number(source: &str, cursor: &mut usize) -> Result<Token, SyntaxError> {
         *cursor += 1;
     }
     let suffix = &source[number_end..*cursor];
-    let cleaned = source[start..number_end].replace('_', "");
+    let cleaned = source[number_start..number_end].replace('_', "");
     let span = Span::new(start, *cursor);
+    if !valid_digits(&source[number_start..integer_end], 10)
+        || (has_fraction && !valid_digits(&source[integer_end + 1..fraction_end], 10))
+        || (has_exponent
+            && !valid_digits(
+                source[fraction_end..number_end]
+                    .trim_start_matches(['e', 'E'])
+                    .trim_start_matches(['+', '-']),
+                10,
+            ))
+    {
+        return Err(SyntaxError::new("invalid numeric separator", span));
+    }
 
     if !suffix.is_empty() {
-        if is_float {
+        if negative {
+            return Err(SyntaxError::new("durations cannot be negative", span));
+        }
+        if has_exponent {
             return Err(SyntaxError::new(
-                "fractional duration literals are not available yet",
+                "duration exponents are not supported",
                 span,
             ));
         }
-        let amount = cleaned.parse::<u64>().map_err(|_| {
-            SyntaxError::new("duration literal is outside the supported range", span)
-        })?;
-        let multiplier = match suffix {
+        let multiplier: u128 = match suffix {
             "ns" => 1,
             "us" => 1_000,
             "ms" => 1_000_000,
@@ -686,30 +814,100 @@ fn lex_number(source: &str, cursor: &mut usize) -> Result<Token, SyntaxError> {
             "h" => 60 * 60 * 1_000_000_000,
             _ => return Err(SyntaxError::new("unknown numeric suffix", span)),
         };
-        let nanos = amount.checked_mul(multiplier).ok_or_else(|| {
+        let (integer, fraction) = cleaned.split_once('.').unwrap_or((&cleaned, ""));
+        let integer = integer.parse::<u128>().map_err(|_| {
             SyntaxError::new("duration literal is outside the supported range", span)
         })?;
+        let whole = integer.checked_mul(multiplier).ok_or_else(|| {
+            SyntaxError::new("duration literal is outside the supported range", span)
+        })?;
+        let fractional = if fraction.is_empty() {
+            0
+        } else {
+            let scale = 10_u128
+                .checked_pow(u32::try_from(fraction.len()).unwrap_or(u32::MAX))
+                .ok_or_else(|| SyntaxError::new("duration literal is too precise", span))?;
+            let digits = fraction
+                .parse::<u128>()
+                .map_err(|_| SyntaxError::new("duration literal is too precise", span))?;
+            let scaled = digits
+                .checked_mul(multiplier)
+                .ok_or_else(|| SyntaxError::new("duration literal is too precise", span))?;
+            if scaled % scale != 0 {
+                return Err(SyntaxError::new(
+                    "duration is finer than one nanosecond",
+                    span,
+                ));
+            }
+            scaled / scale
+        };
+        let nanos = whole
+            .checked_add(fractional)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| {
+                SyntaxError::new("duration literal is outside the supported range", span)
+            })?;
         return Ok(Token {
             kind: TokenKind::DurationNanos(nanos),
             span,
         });
     }
 
-    let kind = if is_float {
-        TokenKind::Float(
-            cleaned
-                .parse::<f64>()
-                .map_err(|_| SyntaxError::new("invalid floating-point literal", span))?,
-        )
+    let kind = if has_fraction || has_exponent {
+        let value = cleaned
+            .parse::<f64>()
+            .map_err(|_| SyntaxError::new("invalid floating-point literal", span))?;
+        if !value.is_finite() {
+            return Err(SyntaxError::new(
+                "floating-point literal must be finite",
+                span,
+            ));
+        }
+        TokenKind::Float(if negative { -value } else { value })
     } else {
-        TokenKind::Integer(cleaned.parse::<i64>().map_err(|_| {
+        let magnitude = cleaned.parse::<u128>().map_err(|_| {
             SyntaxError::new(
                 "integer literal is outside the supported 64-bit range",
                 span,
             )
-        })?)
+        })?;
+        TokenKind::Integer(signed_integer(magnitude, negative, span)?)
     };
     Ok(Token { kind, span })
+}
+
+fn signed_integer(magnitude: u128, negative: bool, span: Span) -> Result<i64, SyntaxError> {
+    let signed = i128::try_from(magnitude)
+        .ok()
+        .and_then(|value| {
+            if negative {
+                value.checked_neg()
+            } else {
+                Some(value)
+            }
+        })
+        .and_then(|value| i64::try_from(value).ok());
+    signed.ok_or_else(|| {
+        SyntaxError::new(
+            "integer literal is outside the supported 64-bit range",
+            span,
+        )
+    })
+}
+
+fn valid_digits(text: &str, base: u32) -> bool {
+    let bytes = text.as_bytes();
+    !bytes.is_empty()
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if *byte == b'_' {
+                index > 0
+                    && index + 1 < bytes.len()
+                    && (bytes[index - 1] as char).is_digit(base)
+                    && (bytes[index + 1] as char).is_digit(base)
+            } else {
+                (*byte as char).is_digit(base)
+            }
+        })
 }
 
 fn lex_string(source: &str, cursor: &mut usize) -> Result<Token, SyntaxError> {
@@ -894,6 +1092,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_fail_as_a_terminal_expression() {
+        let program = parse("flow main { if (true) { fail(\"stop\") } else { return 1 } }")
+            .expect("terminal failure should parse");
+        let Statement::If { branches, .. } = &program.flows[0].body[0] else {
+            panic!("expected conditional");
+        };
+        assert!(matches!(
+            &branches[0].body[0],
+            Statement::Expression(expression) if matches!(expression.kind, ExpressionKind::Fail(_))
+        ));
+        parse("flow main = parallel { fail(\"stop\"), 1 }")
+            .expect("fail should also be valid in an expression branch");
+        assert!(parse("flow main { fail() }").is_err());
+        assert!(parse("flow main { fail(\"a\", \"b\") }").is_err());
+    }
+
+    #[test]
     fn parses_structured_execution_policies() {
         let program = parse(
             r"
@@ -913,10 +1128,22 @@ mod tests {
         let ExpressionKind::Within { body, .. } = &expression.kind else {
             panic!("expected within");
         };
+        let ExpressionKind::Block(statements) = &body.kind else {
+            panic!("expected value-producing block");
+        };
+        let Some(Statement::Expression(body)) = statements.last() else {
+            panic!("expected final block expression");
+        };
         let ExpressionKind::Retry { body, delay, .. } = &body.kind else {
             panic!("expected retry");
         };
         assert!(delay.is_some());
+        let ExpressionKind::Block(statements) = &body.kind else {
+            panic!("expected value-producing block");
+        };
+        let Some(Statement::Expression(body)) = statements.last() else {
+            panic!("expected final block expression");
+        };
         let ExpressionKind::Parallel { limit, branches } = &body.kind else {
             panic!("expected parallel");
         };
@@ -1006,6 +1233,80 @@ mod tests {
             panic!("expected return");
         };
         assert_eq!(expression.kind, ExpressionKind::DurationNanos(200_000_000));
+    }
+
+    #[test]
+    fn parses_signed_radix_exponent_and_fractional_duration_literals() {
+        assert_eq!(
+            parse_value("-42").unwrap().kind,
+            ExpressionKind::Integer(-42)
+        );
+        assert_eq!(
+            parse_value("-0x2A").unwrap().kind,
+            ExpressionKind::Integer(-42)
+        );
+        assert_eq!(
+            parse_value("0b1010_0011").unwrap().kind,
+            ExpressionKind::Integer(163)
+        );
+        assert_eq!(
+            parse_value("1.25e2").unwrap().kind,
+            ExpressionKind::Float(125.0)
+        );
+        assert_eq!(
+            parse_value("1.5s").unwrap().kind,
+            ExpressionKind::DurationNanos(1_500_000_000)
+        );
+        assert_eq!(
+            parse_value("0.25ms").unwrap().kind,
+            ExpressionKind::DurationNanos(250_000)
+        );
+        assert_eq!(
+            parse_value("-9223372036854775808").unwrap().kind,
+            ExpressionKind::Integer(i64::MIN),
+        );
+        for source in [
+            "1__0",
+            "1_",
+            "0x_FF",
+            "0b102",
+            "0.1ns",
+            "1e999",
+            "-1s",
+            "0x8000000000000000",
+        ] {
+            assert!(parse_value(source).is_err(), "{source} should fail");
+        }
+    }
+
+    #[test]
+    fn parses_refined_declarations_calls_and_named_parallel_branches() {
+        let program = parse(
+            r#"
+            flow add(first, second) = second
+            flow main {
+                response = parallel {
+                    users: add(second: 2, first: 1)
+                    posts: [1, 2, 3,]
+                }
+                response
+            }
+            test "names work without parentheses" { assert(true) }
+        "#,
+        )
+        .expect("refined syntax should parse");
+        assert_eq!(program.flows[1].parameters.len(), 0);
+        assert_eq!(
+            program.flows[2].name.as_ref().unwrap().value,
+            "names work without parentheses"
+        );
+        let Statement::Bind { expression, .. } = &program.flows[1].body[0] else {
+            panic!("expected binding")
+        };
+        let ExpressionKind::Parallel { branches, .. } = &expression.kind else {
+            panic!("expected parallel")
+        };
+        assert_eq!(branches[0].name.as_ref().unwrap().value, "users");
     }
 
     #[test]

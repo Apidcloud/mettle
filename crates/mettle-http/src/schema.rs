@@ -59,11 +59,15 @@ const BODY_OPTIONS: &[FieldSchema] = &[
     },
     FieldSchema {
         name: "body",
+        value_type: SchemaType::Body,
+    },
+    FieldSchema {
+        name: "bodyFormat",
         value_type: SchemaType::String,
     },
 ];
 
-const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
+const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"], &["json", "bodyFormat"]];
 const NO_CONFLICTS: &[&[&str]] = &[];
 
 const RESPONSE_FIELDS: &[FieldSchema] = &[
@@ -105,6 +109,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "get",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -112,6 +117,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "post",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -119,6 +125,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "put",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -126,6 +133,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "patch",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -133,6 +141,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "delete",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: BODY_OPTIONS,
         mutually_exclusive: BODY_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -140,6 +149,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "head",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),
@@ -147,6 +157,7 @@ const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "options",
         parameters: &[SchemaType::String],
+        parameter_names: &["url"],
         options: NO_BODY_OPTIONS,
         mutually_exclusive: NO_CONFLICTS,
         result: SchemaType::Object(RESPONSE_FIELDS),

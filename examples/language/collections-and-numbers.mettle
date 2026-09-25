@@ -1,0 +1,35 @@
+// Run: mettle run examples/language/collections-and-numbers.mettle
+// Named parallel results can be read by key and iterated with `for`.
+
+flow positiveFlags(values) = for item in values {
+    item > 0
+}
+
+flow main {
+    responses = parallel {
+        first: 0x2A
+        second: 0b101010
+    }
+    assert(responses.first == 42)
+    assert(responses.second == 42.0)
+
+    values = for name, value in responses {
+        assert(value > -1)
+        value
+    }
+
+    answer = retry(delay: 1.5ms, attempts: 2) {
+        answer = values.first
+        assert(answer == 42)
+        answer
+    }
+    assert(answer == 42)
+    assert(1.25e2 == 125)
+    values
+}
+
+test "numeric and collection syntax" {
+    assert(main().first == 42)
+    assert(positiveFlags([-1, 0, 3])[0] == false)
+    assert(positiveFlags([-1, 0, 3])[2] == true)
+}

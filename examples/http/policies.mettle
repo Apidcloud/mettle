@@ -1,0 +1,19 @@
+// Run: mettle run examples/http/policies.mettle
+// A policy block can contain several steps and yields its final expression.
+flow probe(path) = retry(attempts: 3, delay: 100ms) {
+    response = http.get("https://jsonplaceholder.typicode.com${path}")
+    assert(response.status == 200)
+    response.status
+}
+
+flow main {
+    responses = within(timeout: 5s) {
+        parallel(limit: 2) {
+            posts: probe("/posts/1")
+            users: probe("/users/1")
+            todos: probe("/todos/1")
+        }
+    }
+
+    responses
+}

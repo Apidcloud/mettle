@@ -7,8 +7,8 @@ use super::{
     MettlePlan, NoopObserver, Object, OperationEvent, Pin, PlanExpression, PlanExpressionKind,
     PlanField, Poll, RateSettings, RuntimeError, Span, StringPart, TokioClock, Value,
     WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL, WorkloadEvent, WorkloadMetrics,
-    WorkloadPhase, WorkloadPolicy, cooperative_yield, evaluate_binary, format_duration,
-    process_environment,
+    WorkloadOperation, WorkloadPhase, WorkloadPolicy, cooperative_yield, evaluate_binary,
+    format_duration, process_environment,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -75,6 +75,7 @@ impl Runtime {
                 scope_path: Vec::new().into_boxed_slice(),
                 assertions: Vec::new(),
                 assertion_only: false,
+                terminal: false,
             });
         };
         self.execute_selected(plan, flow, Vec::new()).await
@@ -99,10 +100,13 @@ impl Runtime {
             observer: self.observer.as_ref(),
             environment: &self.environment,
             inside_workload: false,
+            workload_id: None,
             flow_stack: Vec::new(),
             scope_path: Vec::new(),
             next_scope_id: Arc::new(AtomicU64::new(1)),
             secrets: Vec::new(),
+            test_assertions: None,
+            collect_test_expressions: false,
         }
         .execute_flow(flow, arguments, ActiveContext::default())
         .await
@@ -117,6 +121,7 @@ impl Runtime {
                 scope_path: Vec::new().into_boxed_slice(),
                 assertions: Vec::new(),
                 assertion_only: false,
+                terminal: false,
             });
         }
         for (expected, actual) in plan.capability_names.iter().zip(&self.capabilities) {
@@ -131,6 +136,7 @@ impl Runtime {
                     scope_path: Vec::new().into_boxed_slice(),
                     assertions: Vec::new(),
                     assertion_only: false,
+                    terminal: false,
                 });
             }
         }
@@ -152,10 +158,13 @@ struct Executor<'a> {
     observer: &'a dyn ExecutionObserver,
     environment: &'a HashMap<String, String>,
     inside_workload: bool,
+    workload_id: Option<u64>,
     flow_stack: Vec<String>,
     scope_path: Vec<ExecutionScope>,
     next_scope_id: Arc<AtomicU64>,
     secrets: Vec<String>,
+    test_assertions: Option<Arc<std::sync::Mutex<Vec<AssertionFailure>>>>,
+    collect_test_expressions: bool,
 }
 
 impl Executor<'_> {
@@ -186,6 +195,14 @@ impl Executor<'_> {
                 ));
             }
 
+            let previous_assertions = self.test_assertions.clone();
+            let previous_collection = self.collect_test_expressions;
+            if flow.kind == DeclarationKind::Test {
+                self.test_assertions = Some(Arc::new(std::sync::Mutex::new(Vec::new())));
+                self.collect_test_expressions = true;
+            } else {
+                self.collect_test_expressions = false;
+            }
             self.flow_stack.push(flow.display_name.clone());
             let result = async {
                 let context = self.activate_context(flow, inherited_context).await?;
@@ -193,6 +210,8 @@ impl Executor<'_> {
             }
             .await;
             self.flow_stack.pop();
+            self.test_assertions = previous_assertions;
+            self.collect_test_expressions = previous_collection;
             result
         })
     }
@@ -270,12 +289,35 @@ impl Executor<'_> {
                 &mut assertions,
                 flow.kind == DeclarationKind::Test,
             )
-            .await?;
+            .await;
+        let returned = match returned {
+            Ok(value) => value,
+            Err(error) if flow.kind == DeclarationKind::Test => {
+                let collected = self
+                    .test_assertions
+                    .as_ref()
+                    .expect("test assertion collector")
+                    .lock()
+                    .expect("test assertion lock")
+                    .clone();
+                return Err(error.with_assertions(&collected));
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(value) = returned {
             return Ok(value);
         }
 
         if flow.kind == DeclarationKind::Test {
+            assertions.extend(
+                self.test_assertions
+                    .as_ref()
+                    .expect("test assertion collector")
+                    .lock()
+                    .expect("test assertion lock")
+                    .iter()
+                    .cloned(),
+            );
             if let Some(first) = assertions.first() {
                 let message = if assertions.len() == 1 {
                     first.message.clone()
@@ -397,7 +439,15 @@ impl Executor<'_> {
                             .await
                             .map_err(|error| error.with_assertions(assertions))?
                         {
-                            assertions.push(failure);
+                            if collect_assertions {
+                                if let Some(collected) = &self.test_assertions {
+                                    collected.lock().expect("test assertion lock").push(failure);
+                                } else {
+                                    assertions.push(failure);
+                                }
+                            } else {
+                                assertions.push(failure);
+                            }
                         }
                     }
                     Instruction::Return(expression) => {
@@ -518,6 +568,134 @@ impl Executor<'_> {
                     .evaluate_fields(fields, locals, context)
                     .await
                     .map(Value::Object),
+                PlanExpressionKind::Block {
+                    instructions,
+                    local_count,
+                } => {
+                    let mut block_locals = locals.to_vec();
+                    block_locals.resize(*local_count, None);
+                    let mut assertions = Vec::new();
+                    let previous_collection = self.collect_test_expressions;
+                    self.collect_test_expressions = false;
+                    let result = self
+                        .run_instructions(
+                            instructions,
+                            &mut block_locals,
+                            context,
+                            &mut assertions,
+                            false,
+                        )
+                        .await;
+                    self.collect_test_expressions = previous_collection;
+                    result?.ok_or_else(|| {
+                        self.error("execution block produced no value", expression.span)
+                    })
+                }
+                PlanExpressionKind::For {
+                    iterable,
+                    key_slot,
+                    value_slot,
+                    instructions,
+                    local_count,
+                    produces_value,
+                } => {
+                    let source = self.evaluate(iterable, locals, context).await?;
+                    let sensitive = source.is_sensitive();
+                    match source.revealed() {
+                        Value::Array(items) => {
+                            let mut results = Vec::new();
+                            for (index, item) in items.iter().enumerate() {
+                                let mut iteration_locals = locals.to_vec();
+                                iteration_locals.resize(*local_count, None);
+                                if let Some(slot) = key_slot {
+                                    let index = i64::try_from(index).map_err(|_| {
+                                        self.error(
+                                            "array index exceeds the supported integer range",
+                                            expression.span,
+                                        )
+                                    })?;
+                                    iteration_locals[*slot] = Some(Value::Integer(index));
+                                }
+                                iteration_locals[*value_slot] = Some(if sensitive {
+                                    item.clone().sensitive()
+                                } else {
+                                    item.clone()
+                                });
+                                let mut assertions = Vec::new();
+                                let collect_assertions = self.collect_test_expressions;
+                                let result = self
+                                    .run_instructions(
+                                        instructions,
+                                        &mut iteration_locals,
+                                        context,
+                                        &mut assertions,
+                                        collect_assertions,
+                                    )
+                                    .await?;
+                                if *produces_value {
+                                    results.push(result.ok_or_else(|| {
+                                        self.error(
+                                            "loop iteration produced no value",
+                                            expression.span,
+                                        )
+                                    })?);
+                                }
+                            }
+                            if *produces_value {
+                                Ok(Value::Array(results))
+                            } else {
+                                Ok(Value::Null)
+                            }
+                        }
+                        Value::Object(items) => {
+                            let mut results = Object::new();
+                            for (name, item) in items {
+                                let mut iteration_locals = locals.to_vec();
+                                iteration_locals.resize(*local_count, None);
+                                if let Some(slot) = key_slot {
+                                    iteration_locals[*slot] = Some(if sensitive {
+                                        Value::String(name.clone()).sensitive()
+                                    } else {
+                                        Value::String(name.clone())
+                                    });
+                                }
+                                iteration_locals[*value_slot] = Some(if sensitive {
+                                    item.clone().sensitive()
+                                } else {
+                                    item.clone()
+                                });
+                                let mut assertions = Vec::new();
+                                let collect_assertions = self.collect_test_expressions;
+                                let result = self
+                                    .run_instructions(
+                                        instructions,
+                                        &mut iteration_locals,
+                                        context,
+                                        &mut assertions,
+                                        collect_assertions,
+                                    )
+                                    .await?;
+                                if *produces_value {
+                                    results.insert(
+                                        name.clone(),
+                                        result.ok_or_else(|| {
+                                            self.error(
+                                                "loop iteration produced no value",
+                                                expression.span,
+                                            )
+                                        })?,
+                                    );
+                                }
+                            }
+                            if *produces_value {
+                                Ok(Value::Object(results))
+                            } else {
+                                Ok(Value::Null)
+                            }
+                        }
+                        _ => Err(self.error("`for` requires an array or object", expression.span)),
+                    }
+                }
                 PlanExpressionKind::Member { value, member } => {
                     let value = self.evaluate(value, locals, context).await?;
                     let inherited_sensitivity = value.is_sensitive();
@@ -610,6 +788,18 @@ impl Executor<'_> {
                         )),
                     }
                 }
+                PlanExpressionKind::Negate(value) => {
+                    let value = self.evaluate(value, locals, context).await?;
+                    match value.revealed() {
+                        Value::Integer(number) => {
+                            number.checked_neg().map(Value::Integer).ok_or_else(|| {
+                                self.error("integer negation overflowed", expression.span)
+                            })
+                        }
+                        Value::Float(number) => Ok(Value::Float(-number)),
+                        _ => Err(self.error("unary `-` requires a number", expression.span)),
+                    }
+                }
                 PlanExpressionKind::Binary {
                     left,
                     operator,
@@ -671,29 +861,83 @@ impl Executor<'_> {
                         result
                     })
                 }
-                PlanExpressionKind::MettleCall { flow, arguments } => {
-                    let mut values = Vec::with_capacity(arguments.len());
-                    for argument in arguments {
-                        values.push(self.evaluate(argument, locals, context).await?);
+                PlanExpressionKind::Fail(message) => {
+                    let value = match self.evaluate(message, locals, context).await {
+                        Ok(value) => value,
+                        Err(mut error) => {
+                            error.terminal = true;
+                            return Err(error);
+                        }
+                    };
+                    let reason = match value.revealed() {
+                        Value::String(_) if value.is_sensitive() => "[REDACTED]".to_owned(),
+                        Value::String(text) => text.clone(),
+                        _ => {
+                            let mut error = self.error(
+                                "`fail` message produced a non-string value",
+                                expression.span,
+                            );
+                            error.terminal = true;
+                            return Err(error);
+                        }
+                    };
+                    let mut error = self.error(reason, expression.span);
+                    error.terminal = true;
+                    Err(error)
+                }
+                PlanExpressionKind::MettleCall {
+                    flow,
+                    arguments,
+                    evaluation_order,
+                } => {
+                    let mut values = vec![None; arguments.len()];
+                    for index in evaluation_order {
+                        values[*index] =
+                            Some(self.evaluate(&arguments[*index], locals, context).await?);
                     }
-                    self.execute_flow(*flow, values, context.clone()).await
+                    self.execute_flow(
+                        *flow,
+                        values
+                            .into_iter()
+                            .map(|value| value.expect("bound flow argument"))
+                            .collect(),
+                        context.clone(),
+                    )
+                    .await
                 }
                 PlanExpressionKind::CapabilityCall {
                     capability,
                     operation,
                     arguments,
                     options,
+                    evaluation_order,
                 } => {
-                    let mut values = Vec::with_capacity(arguments.len());
-                    for argument in arguments {
-                        values.push(self.evaluate(argument, locals, context).await?);
+                    let mut values = vec![None; arguments.len()];
+                    let mut local = Object::new();
+                    for item in evaluation_order {
+                        match item {
+                            mettle_compiler::CallEvaluation::Parameter(index) => {
+                                values[*index] =
+                                    Some(self.evaluate(&arguments[*index], locals, context).await?);
+                            }
+                            mettle_compiler::CallEvaluation::Option(index) => {
+                                let field = &options[*index];
+                                local.insert(
+                                    field.name.clone(),
+                                    self.evaluate(&field.expression, locals, context).await?,
+                                );
+                            }
+                        }
                     }
+                    let values = values
+                        .into_iter()
+                        .map(|value| value.expect("bound capability argument"))
+                        .collect::<Vec<_>>();
                     let mut effective = context
                         .defaults
                         .get(*capability)
                         .cloned()
                         .unwrap_or_default();
-                    let local = self.evaluate_fields(options, locals, context).await?;
                     let Some(capability) = self.capabilities.get(*capability) else {
                         return Err(self.error(
                             "execution plan references an unknown capability",
@@ -722,7 +966,34 @@ impl Executor<'_> {
                         .unwrap_or_default();
                     match result {
                         Ok(value) => {
-                            let report = capability.report(*operation, &value);
+                            let report = if self.inside_workload {
+                                None
+                            } else {
+                                capability.report(*operation, &value)
+                            };
+                            if let Some(workload_id) = self.workload_id {
+                                let http_status = if capability_name == "http" {
+                                    value
+                                        .as_object()
+                                        .and_then(|fields| fields.get("status"))
+                                        .and_then(|status| match status.revealed() {
+                                            Value::Integer(code) => u16::try_from(*code).ok(),
+                                            _ => None,
+                                        })
+                                } else {
+                                    None
+                                };
+                                self.observer.workload_operation(WorkloadOperation {
+                                    workload_id,
+                                    span: expression.span,
+                                    flow: self.flow_stack.last().cloned().unwrap_or_default(),
+                                    capability: capability_name.to_owned(),
+                                    operation: operation_name.to_owned(),
+                                    duration,
+                                    http_status,
+                                    failed: false,
+                                });
+                            }
                             if !self.inside_workload {
                                 self.observer.execution_event(ExecutionEvent {
                                     kind: ExecutionEventKind::Operation(OperationEvent {
@@ -742,6 +1013,18 @@ impl Executor<'_> {
                         }
                         Err(error) => {
                             let error = self.error(error.message, error.span);
+                            if let Some(workload_id) = self.workload_id {
+                                self.observer.workload_operation(WorkloadOperation {
+                                    workload_id,
+                                    span: expression.span,
+                                    flow: self.flow_stack.last().cloned().unwrap_or_default(),
+                                    capability: capability_name.to_owned(),
+                                    operation: operation_name.to_owned(),
+                                    duration,
+                                    http_status: None,
+                                    failed: true,
+                                });
+                            }
                             if !self.inside_workload {
                                 self.observer.execution_event(ExecutionEvent {
                                     kind: ExecutionEventKind::Operation(OperationEvent {
@@ -797,6 +1080,7 @@ impl Executor<'_> {
                         self.secrets = scoped.secrets;
                         match result {
                             Ok(value) => return Ok(value),
+                            Err(error) if error.terminal => return Err(error),
                             Err(error) => last_error = Some(error),
                         }
                         if attempt + 1 < *attempts && !delay.is_zero() {
@@ -848,7 +1132,7 @@ impl Executor<'_> {
 
     async fn evaluate_parallel(
         &mut self,
-        branches: &[PlanExpression],
+        branches: &[mettle_compiler::PlanParallelBranch],
         limit: usize,
         locals: &[Option<Value>],
         context: &ActiveContext,
@@ -862,15 +1146,27 @@ impl Executor<'_> {
                 let index = next;
                 let branch = &branches[index];
                 let mut executor = self.clone();
-                executor.scope_path.push(ExecutionScope::Parallel {
-                    invocation,
-                    branch: index + 1,
-                    total: branches.len(),
+                executor.scope_path.push(match &branch.name {
+                    Some(name) => ExecutionScope::NamedParallel {
+                        invocation,
+                        branch: index + 1,
+                        total: branches.len(),
+                        name: name.clone(),
+                    },
+                    None => ExecutionScope::Parallel {
+                        invocation,
+                        branch: index + 1,
+                        total: branches.len(),
+                    },
                 });
                 let locals = locals.to_vec();
                 let context = context.clone();
                 let future: Pin<Box<dyn Future<Output = Result<Value, RuntimeError>> + Send + '_>> =
-                    Box::pin(async move { executor.evaluate(branch, &locals, &context).await });
+                    Box::pin(async move {
+                        executor
+                            .evaluate(&branch.expression, &locals, &context)
+                            .await
+                    });
                 futures.push((index, future));
                 next += 1;
             }
@@ -890,15 +1186,23 @@ impl Executor<'_> {
                     if !self.inside_workload {
                         for (cancelled, _) in &futures {
                             let mut scope_path = self.scope_path.clone();
-                            scope_path.push(ExecutionScope::Parallel {
-                                invocation,
-                                branch: cancelled + 1,
-                                total: branches.len(),
+                            scope_path.push(match &branches[*cancelled].name {
+                                Some(name) => ExecutionScope::NamedParallel {
+                                    invocation,
+                                    branch: cancelled + 1,
+                                    total: branches.len(),
+                                    name: name.clone(),
+                                },
+                                None => ExecutionScope::Parallel {
+                                    invocation,
+                                    branch: cancelled + 1,
+                                    total: branches.len(),
+                                },
                             });
                             self.observer.execution_event(ExecutionEvent {
                                 kind: ExecutionEventKind::BranchCancelled,
                                 scope_path,
-                                span: branches[*cancelled].span,
+                                span: branches[*cancelled].expression.span,
                                 inside_workload: false,
                             });
                         }
@@ -907,12 +1211,27 @@ impl Executor<'_> {
                 }
             }
         }
-        Ok(Value::Array(
-            results
-                .into_iter()
-                .map(|value| value.expect("every parallel branch completed"))
-                .collect(),
-        ))
+        if branches[0].name.is_some() {
+            Ok(Value::Object(
+                branches
+                    .iter()
+                    .zip(results)
+                    .map(|(branch, value)| {
+                        (
+                            branch.name.clone().expect("named branch"),
+                            value.expect("every parallel branch completed"),
+                        )
+                    })
+                    .collect(),
+            ))
+        } else {
+            Ok(Value::Array(
+                results
+                    .into_iter()
+                    .map(|value| value.expect("every parallel branch completed"))
+                    .collect(),
+            ))
+        }
     }
 
     async fn evaluate_rate(
@@ -927,7 +1246,11 @@ impl Executor<'_> {
         )
         .expect("compiler bounds rate iteration count");
         let window_start = self.clock.now();
-        let mut metrics = WorkloadMetrics::new(window_start);
+        let mut metrics = WorkloadMetrics::new(
+            window_start,
+            self.next_scope_id.fetch_add(1, Ordering::Relaxed),
+            self.scope_path.clone(),
+        );
         let mut active = Vec::with_capacity(settings.limit.min(planned));
         let policy = WorkloadPolicy::Rate {
             target: settings.target,
@@ -959,8 +1282,15 @@ impl Executor<'_> {
                 &policy,
                 &mut next_progress,
             )
-            .await;
-            self.collect_ready(&mut active, &mut metrics).await;
+            .await
+            .inspect_err(|_| {
+                self.abort_workload(&mut active, &mut metrics, &policy, &mut next_progress);
+            })?;
+            self.collect_ready(&mut active, &mut metrics)
+                .await
+                .inspect_err(|_| {
+                    self.abort_workload(&mut active, &mut metrics, &policy, &mut next_progress);
+                })?;
             self.report_workload(
                 &metrics,
                 &policy,
@@ -983,7 +1313,7 @@ impl Executor<'_> {
                     .checked_duration_since(intended)
                     .unwrap_or_default(),
             );
-            active.push(self.start_workload_iteration(body, locals, context));
+            active.push(self.start_workload_iteration(body, locals, context, metrics.id));
             metrics.started += 1;
         }
 
@@ -997,7 +1327,10 @@ impl Executor<'_> {
         );
         let drain_timed_out = self
             .drain_workload(&mut active, &mut metrics, &policy, &mut next_progress)
-            .await;
+            .await
+            .inspect_err(|_| {
+                self.abort_workload(&mut active, &mut metrics, &policy, &mut next_progress);
+            })?;
         self.report_workload(
             &metrics,
             &policy,
@@ -1019,7 +1352,11 @@ impl Executor<'_> {
     ) -> Result<Value, RuntimeError> {
         let window_start = self.clock.now();
         let deadline = window_start + duration;
-        let mut metrics = WorkloadMetrics::new(window_start);
+        let mut metrics = WorkloadMetrics::new(
+            window_start,
+            self.next_scope_id.fetch_add(1, Ordering::Relaxed),
+            self.scope_path.clone(),
+        );
         let mut active = Vec::with_capacity(limit);
         let policy = WorkloadPolicy::Concurrency { limit, duration };
         let mut next_progress = window_start;
@@ -1032,7 +1369,7 @@ impl Executor<'_> {
             true,
         );
         for _ in 0..limit {
-            active.push(self.start_workload_iteration(body, locals, context));
+            active.push(self.start_workload_iteration(body, locals, context, metrics.id));
             metrics.started += 1;
         }
 
@@ -1043,7 +1380,10 @@ impl Executor<'_> {
             let wake_at = deadline.min(next_progress);
             let completed = self
                 .wait_until_or_complete(wake_at, &mut active, &mut metrics)
-                .await;
+                .await
+                .inspect_err(|_| {
+                    self.abort_workload(&mut active, &mut metrics, &policy, &mut next_progress);
+                })?;
             self.report_workload(
                 &metrics,
                 &policy,
@@ -1061,7 +1401,7 @@ impl Executor<'_> {
                 }
                 continue;
             }
-            active.push(self.start_workload_iteration(body, locals, context));
+            active.push(self.start_workload_iteration(body, locals, context, metrics.id));
             metrics.started += 1;
             self.report_workload(
                 &metrics,
@@ -1086,7 +1426,10 @@ impl Executor<'_> {
         );
         let drain_timed_out = self
             .drain_workload(&mut active, &mut metrics, &policy, &mut next_progress)
-            .await;
+            .await
+            .inspect_err(|_| {
+                self.abort_workload(&mut active, &mut metrics, &policy, &mut next_progress);
+            })?;
         self.report_workload(
             &metrics,
             &policy,
@@ -1103,9 +1446,11 @@ impl Executor<'_> {
         body: &'b PlanExpression,
         locals: &'b [Option<Value>],
         context: &'b ActiveContext,
+        workload_id: u64,
     ) -> ActiveIteration<'b> {
         let mut executor = self.clone();
         executor.inside_workload = true;
+        executor.workload_id = Some(workload_id);
         let locals = locals.to_vec();
         let context = context.clone();
         let started = self.clock.now();
@@ -1133,15 +1478,34 @@ impl Executor<'_> {
             .workload_updated(metrics.snapshot(policy, phase, active, now));
     }
 
+    fn abort_workload(
+        &self,
+        active: &mut Vec<ActiveIteration<'_>>,
+        metrics: &mut WorkloadMetrics,
+        policy: &WorkloadPolicy,
+        next_progress: &mut Instant,
+    ) {
+        metrics.cancelled += active.len();
+        active.clear();
+        self.report_workload(
+            metrics,
+            policy,
+            0,
+            WorkloadPhase::Aborted,
+            next_progress,
+            true,
+        );
+    }
+
     async fn wait_until_or_complete(
         &self,
         deadline: Instant,
         active: &mut Vec<ActiveIteration<'_>>,
         metrics: &mut WorkloadMetrics,
-    ) -> bool {
+    ) -> Result<bool, RuntimeError> {
         let now = self.clock.now();
         if now >= deadline {
-            return false;
+            return Ok(false);
         }
         let mut timer = self.clock.sleep(deadline.duration_since(now));
         let event = std::future::poll_fn(|task| {
@@ -1160,9 +1524,14 @@ impl Executor<'_> {
             WorkloadEvent::Completed(position, result) => {
                 let iteration = active.swap_remove(position);
                 metrics.record_completion(iteration.started, self.clock.now(), result.is_ok());
-                true
+                if let Err(error) = result
+                    && error.terminal
+                {
+                    return Err(error);
+                }
+                Ok(true)
             }
-            WorkloadEvent::Deadline => false,
+            WorkloadEvent::Deadline => Ok(false),
         }
     }
 
@@ -1173,10 +1542,12 @@ impl Executor<'_> {
         metrics: &mut WorkloadMetrics,
         policy: &WorkloadPolicy,
         next_progress: &mut Instant,
-    ) {
+    ) -> Result<(), RuntimeError> {
         while self.clock.now() < deadline {
             let wake_at = deadline.min(*next_progress);
-            let completed = self.wait_until_or_complete(wake_at, active, metrics).await;
+            let completed = self
+                .wait_until_or_complete(wake_at, active, metrics)
+                .await?;
             self.report_workload(
                 metrics,
                 policy,
@@ -1189,13 +1560,14 @@ impl Executor<'_> {
                 break;
             }
         }
+        Ok(())
     }
 
     async fn collect_ready(
         &self,
         active: &mut Vec<ActiveIteration<'_>>,
         metrics: &mut WorkloadMetrics,
-    ) {
+    ) -> Result<(), RuntimeError> {
         loop {
             let ready = std::future::poll_fn(|task| {
                 for (position, iteration) in active.iter_mut().enumerate() {
@@ -1211,7 +1583,13 @@ impl Executor<'_> {
             };
             let iteration = active.swap_remove(position);
             metrics.record_completion(iteration.started, self.clock.now(), result.is_ok());
+            if let Err(error) = result
+                && error.terminal
+            {
+                return Err(error);
+            }
         }
+        Ok(())
     }
 
     async fn drain_workload(
@@ -1220,11 +1598,13 @@ impl Executor<'_> {
         metrics: &mut WorkloadMetrics,
         policy: &WorkloadPolicy,
         next_progress: &mut Instant,
-    ) -> bool {
+    ) -> Result<bool, RuntimeError> {
         let deadline = self.clock.now() + WORKLOAD_DRAIN_TIMEOUT;
         while !active.is_empty() {
             let wake_at = deadline.min(*next_progress);
-            let completed = self.wait_until_or_complete(wake_at, active, metrics).await;
+            let completed = self
+                .wait_until_or_complete(wake_at, active, metrics)
+                .await?;
             self.report_workload(
                 metrics,
                 policy,
@@ -1238,10 +1618,10 @@ impl Executor<'_> {
                 for iteration in active.drain(..) {
                     metrics.record_completion(iteration.started, now, false);
                 }
-                return true;
+                return Ok(true);
             }
         }
-        false
+        Ok(false)
     }
 
     async fn evaluate_fields(
@@ -1270,6 +1650,7 @@ impl Executor<'_> {
             scope_path: self.scope_path.clone().into_boxed_slice(),
             assertions: Vec::new(),
             assertion_only: false,
+            terminal: false,
         }
     }
 }

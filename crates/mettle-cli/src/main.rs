@@ -622,9 +622,18 @@ fn run_flow(
     environment: &Arc<HashMap<String, String>>,
 ) -> Result<(), CliError> {
     let arguments = resolve_arguments(&plan.flows[flow_id], supplied_arguments)?;
-    let observer = Arc::new(CliObserver::new(
-        options.progress && matches!(options.output, OutputMode::Human | OutputMode::Verbose),
-    ));
+    let observer = Arc::new(
+        CliObserver::new(
+            options.progress && matches!(options.output, OutputMode::Human | OutputMode::Verbose),
+        )
+        .with_sources(
+            project
+                .sources
+                .iter()
+                .map(|source| source.text.clone())
+                .collect(),
+        ),
+    );
     let mettle_runtime = Runtime::new(vec![Arc::new(HttpCapability::new())])
         .with_observer(observer.clone())
         .with_environment(environment.clone());
@@ -654,6 +663,8 @@ fn run_flow(
                     "flow": plan.flows[flow_id].display_name,
                     "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
                     "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
+                    "workloads": report::workloads_json(&captured.workloads),
+                    "omittedWorkloads": captured.omitted_workloads,
                 })
             );
         } else if matches!(options.output, OutputMode::Human | OutputMode::Verbose) {
@@ -668,6 +679,16 @@ fn run_flow(
                     color
                 )
             );
+            if !captured.workloads.is_empty() {
+                eprintln!(
+                    "{}",
+                    report::workloads_result(
+                        &captured.workloads,
+                        captured.omitted_workloads,
+                        color
+                    )
+                );
+            }
         } else {
             eprintln!("execution cancelled");
         }
@@ -698,6 +719,8 @@ fn print_success(
         result: value,
         events: &captured.events,
         omitted_workload_echoes: captured.omitted_workload_echoes,
+        workloads: &captured.workloads,
+        omitted_workloads: captured.omitted_workloads,
     };
     let color = options.color && io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none();
     let is_test = plan.flows[flow_id].kind == DeclarationKind::Test;
@@ -716,6 +739,8 @@ fn print_success(
             "status": "passed",
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
+            "workloads": report::workloads_json(&captured.workloads),
+            "omittedWorkloads": captured.omitted_workloads,
         })
         .to_string(),
         OutputMode::Json if options.all => serde_json::json!({
@@ -724,6 +749,8 @@ fn print_success(
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             "result": report::value_json(value),
             "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
+            "workloads": report::workloads_json(&captured.workloads),
+            "omittedWorkloads": captured.omitted_workloads,
         })
         .to_string(),
         OutputMode::Json => report.json(),
@@ -752,8 +779,11 @@ fn print_failure(
             "flow": plan.flows[flow_id].display_name,
             "durationNanos": u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
             "events": report::events_json(&captured.events, captured.omitted_workload_echoes),
+            "workloads": report::workloads_json(&captured.workloads),
+            "omittedWorkloads": captured.omitted_workloads,
             "error": {
                 "message": error.message,
+                "terminal": error.terminal,
                 "path": source.path,
                 "line": line,
                 "column": column,
@@ -821,6 +851,14 @@ fn print_failure(
             plan.flows[flow_id].kind == DeclarationKind::Test
         )
     );
+    if !matches!(options.output, OutputMode::Quiet | OutputMode::Raw)
+        && !captured.workloads.is_empty()
+    {
+        eprintln!(
+            "{}\n",
+            report::workloads_result(&captured.workloads, captured.omitted_workloads, color)
+        );
+    }
     if !error.assertion_only {
         eprintln!("{}", render_diagnostic(project, &error.message, error.span));
     }
@@ -1067,6 +1105,7 @@ fn parse_argument_value(name: &str, source: &str) -> Result<Value, CliError> {
 fn looks_like_explicit_literal(source: &str) -> bool {
     source.starts_with(['"', '[', '{'])
         || source.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        || (source.starts_with('-') && source.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
         || matches!(source, "true" | "false" | "null")
 }
 
@@ -1082,6 +1121,14 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
         ExpressionKind::DurationNanos(value) => {
             Ok(Value::Duration(std::time::Duration::from_nanos(*value)))
         }
+        ExpressionKind::Negate(value) => match value_from_expression(value)? {
+            Value::Integer(number) => number
+                .checked_neg()
+                .map(Value::Integer)
+                .ok_or("integer negation overflowed"),
+            Value::Float(number) => Ok(Value::Float(-number)),
+            _ => Err("unary `-` requires a number"),
+        },
         ExpressionKind::Array(values) => values
             .iter()
             .map(value_from_expression)
@@ -1098,6 +1145,9 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
             .collect::<Result<Object, _>>()
             .map(Value::Object),
         ExpressionKind::Call { .. }
+        | ExpressionKind::Fail(_)
+        | ExpressionKind::Block(_)
+        | ExpressionKind::For { .. }
         | ExpressionKind::Member { .. }
         | ExpressionKind::Index { .. }
         | ExpressionKind::Not(_)

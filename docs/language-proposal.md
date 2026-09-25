@@ -8,7 +8,7 @@ We want to explore a small programming language for concurrent I/O workflows: ma
 
 The central idea is that the language and runtime understand I/O, time, concurrency, cancellation, and measurement directly. A protocol operation such as `GET` is observable; a `flow` gives one or more operations a reusable name; a `rate` block is a scheduling policy; and a `within` block establishes a deadline. These constructs should compose without requiring users to assemble futures, executors, timers, and metric collectors themselves.
 
-This is an evolving design, not a finished language specification. **Current direction** below means a design choice carried forward from the discussion. **Proposed semantics** identifies rules that make the examples precise but still require team agreement. **Future exploration** identifies features outside the initial implementation. Reusable and anonymous flows, direct CLI flow selection and arguments, contexts, environment interpolation, HTTP defaults, common HTTP/1.1 methods, JSON and text payloads, response member and quoted key access, durations, HTTPS, deadlines, retries, and bounded parallel execution are implemented; the root README is the authority for the exact executable subset. Other examples remain proposed syntax.
+This is an evolving design document, not a finished language specification. Some examples below preserve older spellings or explore features that are not implemented. The [root README](../README.md) and [runnable language examples](../examples/README.md) are the authority for current syntax, including named HTTP payloads, value-producing blocks, finite loops, named parallel branches, and numeric literals.
 
 ## Goals and design principles
 
@@ -474,7 +474,7 @@ flow orderFirstAvailableProduct(userId) {
         fail("could not load the product catalog")
     }
 
-    if catalog.json.items.length == 0 {
+    if catalog.json.items == [] {
         fail("no products are currently available")
     }
 
@@ -492,7 +492,7 @@ flow orderFirstAvailableProduct(userId) {
 }
 ```
 
-The `GET` result drives both control flow and the payload of the following `POST`. `fail(...)`, indexing, and collection properties such as `length` are proposed core-value semantics; the important design point is that operation results are ordinary typed values rather than data trapped inside a protocol client.
+The `GET` result drives both control flow and the payload of the following `POST`. `fail(...)` is now a terminal, never-returning expression: it aborts the current top-level entry, bypasses `retry`, and cancels work owned by an enclosing parallel or workload scope. It does not exit the CLI process or cancel other top-level tests/flows. Indexing lets operation results remain ordinary typed values rather than data trapped inside a protocol client.
 
 ### Tests
 

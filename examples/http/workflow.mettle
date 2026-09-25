@@ -1,3 +1,5 @@
+// Run: mettle run examples/http/workflow.mettle
+// A shared HTTP context keeps connection settings apart from request data.
 context publicApi {
     defaults http {
         baseUrl: "https://jsonplaceholder.typicode.com"
@@ -10,23 +12,25 @@ context publicApi {
     }
 }
 
-flow createUserFromSeed() {
+flow createUserFromSeed {
     use context publicApi
 
     seed = http.get("/users/1")
 
-    created = http.post("/posts") {
-        json: {
+    created = http.post(
+        "/posts",
+        body: {
             sourceId: seed.json.id
             name: seed.json.name
             active: true
             roles: ["tester"]
-        }
-    }
+        },
+    )
 
-    return created.json
+    assert(created.status == 201)
+    created.json
 }
 
-flow main() {
-    return createUserFromSeed()
+flow main {
+    createUserFromSeed()
 }

@@ -80,6 +80,18 @@ pub struct ConditionalBranch {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct PlanParallelBranch {
+    pub name: Option<String>,
+    pub expression: PlanExpression,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallEvaluation {
+    Parameter(usize),
+    Option(usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlanExpression {
     pub kind: PlanExpressionKind,
     pub value_type: ValueType,
@@ -95,6 +107,18 @@ pub enum PlanExpressionKind {
     Sensitive(Box<PlanExpression>),
     Array(Vec<PlanExpression>),
     Object(Vec<PlanField>),
+    Block {
+        instructions: Vec<Instruction>,
+        local_count: usize,
+    },
+    For {
+        iterable: Box<PlanExpression>,
+        key_slot: Option<usize>,
+        value_slot: usize,
+        instructions: Vec<Instruction>,
+        local_count: usize,
+        produces_value: bool,
+    },
     Member {
         value: Box<PlanExpression>,
         member: String,
@@ -104,21 +128,25 @@ pub enum PlanExpressionKind {
         index: Box<PlanExpression>,
     },
     Not(Box<PlanExpression>),
+    Negate(Box<PlanExpression>),
     Binary {
         left: Box<PlanExpression>,
         operator: BinaryOperator,
         right: Box<PlanExpression>,
     },
     InterpolatedString(Vec<StringPart>),
+    Fail(Box<PlanExpression>),
     MettleCall {
         flow: usize,
         arguments: Vec<PlanExpression>,
+        evaluation_order: Vec<usize>,
     },
     CapabilityCall {
         capability: usize,
         operation: usize,
         arguments: Vec<PlanExpression>,
         options: Vec<PlanField>,
+        evaluation_order: Vec<CallEvaluation>,
     },
     Within {
         timeout: Duration,
@@ -131,7 +159,7 @@ pub enum PlanExpressionKind {
     },
     Parallel {
         limit: usize,
-        branches: Vec<PlanExpression>,
+        branches: Vec<PlanParallelBranch>,
     },
     Rate {
         target: usize,
@@ -197,10 +225,10 @@ impl ValueType {
 const fn schema_value_type(schema: SchemaType) -> ValueType {
     match schema {
         SchemaType::Boolean => ValueType::Boolean,
+        SchemaType::Body | SchemaType::Json => ValueType::Inferred,
         SchemaType::Bytes => ValueType::Bytes,
         SchemaType::Duration => ValueType::Duration,
         SchemaType::Integer => ValueType::Integer,
-        SchemaType::Json => ValueType::Inferred,
         SchemaType::Object(_) | SchemaType::StringMap => ValueType::Object,
         SchemaType::String => ValueType::String,
     }
@@ -379,7 +407,8 @@ mod tests {
     use mettle_syntax::{ExpressionKind, Statement, parse};
 
     use super::{
-        Instruction, PlanExpressionKind, compile, compile_with_capabilities, find_definition,
+        Constant, Instruction, PlanExpressionKind, compile, compile_with_capabilities,
+        find_definition,
     };
 
     const TLS_OPTIONS: &[FieldSchema] = &[FieldSchema {
@@ -418,6 +447,7 @@ mod tests {
         OperationSchema {
             name: "get",
             parameters: &[SchemaType::String],
+            parameter_names: &["url"],
             options: HTTP_OPTIONS,
             mutually_exclusive: &[],
             result: SchemaType::Json,
@@ -425,6 +455,7 @@ mod tests {
         OperationSchema {
             name: "post",
             parameters: &[SchemaType::String],
+            parameter_names: &["url"],
             options: BODY_OPTIONS,
             mutually_exclusive: &[&["json", "body"]],
             result: SchemaType::Json,
@@ -752,6 +783,12 @@ mod tests {
             panic!("expected deadline plan");
         };
         assert_eq!(*timeout, Duration::from_secs(2));
+        let PlanExpressionKind::Block { instructions, .. } = &body.kind else {
+            panic!("expected value-producing block");
+        };
+        let Some(Instruction::Return(body)) = instructions.last() else {
+            panic!("expected final block value");
+        };
         let PlanExpressionKind::Retry {
             attempts,
             delay,
@@ -762,6 +799,12 @@ mod tests {
         };
         assert_eq!(*attempts, 3);
         assert_eq!(*delay, Duration::from_millis(10));
+        let PlanExpressionKind::Block { instructions, .. } = &body.kind else {
+            panic!("expected value-producing block");
+        };
+        let Some(Instruction::Return(body)) = instructions.last() else {
+            panic!("expected final block value");
+        };
         let PlanExpressionKind::Parallel { limit, branches } = &body.kind else {
             panic!("expected parallel plan");
         };
@@ -776,6 +819,67 @@ mod tests {
             messages
                 .iter()
                 .any(|message| message.contains("greater than zero"))
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_return_inside_value_blocks() {
+        let messages = errors("flow main = retry(attempts: 2) { return 1 }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("cannot exit a flow"))
+        );
+
+        let messages =
+            errors("flow main = for item in [1] { if (true) { return item } else { item } }");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("cannot exit a flow"))
+        );
+    }
+
+    #[test]
+    fn named_flow_arguments_bind_by_name_but_evaluate_in_source_order() {
+        let source =
+            parse("flow choose(first, second) = second\nflow main = choose(second: 2, first: 1)")
+                .expect("source should parse");
+        let plan = compile(&source).expect("source should compile");
+        let Instruction::Return(expression) = &plan.flows[1].instructions[0] else {
+            panic!("expected return");
+        };
+        let PlanExpressionKind::MettleCall {
+            arguments,
+            evaluation_order,
+            ..
+        } = &expression.kind
+        else {
+            panic!("expected flow call");
+        };
+        assert_eq!(evaluation_order, &vec![1, 0]);
+        assert!(matches!(
+            arguments[0].kind,
+            PlanExpressionKind::Constant(Constant::Integer(1))
+        ));
+        assert!(matches!(
+            arguments[1].kind,
+            PlanExpressionKind::Constant(Constant::Integer(2))
+        ));
+
+        let messages = errors(
+            "flow choose(first, second) = second\nflow main = choose(1, first: 2, second: 3)",
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("supplied more than once"))
+        );
+        let messages = errors("flow choose(first, second) = second\nflow main = choose(third: 3)");
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no parameter `third`"))
         );
     }
 

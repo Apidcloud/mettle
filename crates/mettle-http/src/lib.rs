@@ -27,6 +27,13 @@ pub use schema::DESCRIPTOR;
 
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BodyFormat {
+    Json,
+    Text,
+    Bytes,
+}
+
 #[derive(Clone)]
 pub struct HttpCapability {
     secure_client: HttpClient,
@@ -138,14 +145,62 @@ impl HttpCapability {
                 span,
             ));
         }
-        let body = if let Some(json) = options.get("json") {
-            Bytes::from(serde_json::to_vec(&to_json(json, span)?).map_err(|error| {
-                CapabilityError::new(format!("could not encode JSON request: {error}"), span)
-            })?)
-        } else if let Some(body) = options.get("body") {
-            Bytes::copy_from_slice(expect_string(Some(body), "body", span)?.as_bytes())
+        if options.contains_key("json") && options.contains_key("bodyFormat") {
+            return Err(CapabilityError::new(
+                "legacy `json` cannot be combined with `bodyFormat`",
+                span,
+            ));
+        }
+        let explicit_format = options
+            .get("bodyFormat")
+            .map(|value| expect_string(Some(value), "bodyFormat", span))
+            .transpose()?;
+        if explicit_format.is_some() && !options.contains_key("body") {
+            return Err(CapabilityError::new("`bodyFormat` requires `body`", span));
+        }
+        let payload = options.get("body").or_else(|| options.get("json"));
+        let body_format = if options.contains_key("json") {
+            Some(BodyFormat::Json)
+        } else if let Some(payload) = payload {
+            Some(match explicit_format {
+                Some("json") => BodyFormat::Json,
+                Some("text") => BodyFormat::Text,
+                Some("bytes") => BodyFormat::Bytes,
+                Some(other) => {
+                    return Err(CapabilityError::new(
+                        format!("unknown body format `{other}`; use `json`, `text`, or `bytes`"),
+                        span,
+                    ));
+                }
+                None => match payload.revealed() {
+                    Value::Object(_) | Value::Array(_) => BodyFormat::Json,
+                    Value::String(_) => BodyFormat::Text,
+                    Value::Bytes(_) => BodyFormat::Bytes,
+                    _ => {
+                        return Err(CapabilityError::new(
+                            "this body value requires an explicit `bodyFormat`",
+                            span,
+                        ));
+                    }
+                },
+            })
         } else {
-            Bytes::new()
+            None
+        };
+        let body = match (body_format, payload) {
+            (Some(BodyFormat::Json), Some(value)) => {
+                Bytes::from(serde_json::to_vec(&to_json(value, span)?).map_err(|error| {
+                    CapabilityError::new(format!("could not encode JSON request: {error}"), span)
+                })?)
+            }
+            (Some(BodyFormat::Text), Some(value)) => {
+                Bytes::copy_from_slice(expect_string(Some(value), "body", span)?.as_bytes())
+            }
+            (Some(BodyFormat::Bytes), Some(value)) => match value.revealed() {
+                Value::Bytes(bytes) => Bytes::copy_from_slice(bytes),
+                other => return Err(type_error("body", "bytes", other, span)),
+            },
+            _ => Bytes::new(),
         };
 
         let mut request = Request::builder().method(method.clone()).uri(uri);
@@ -167,16 +222,15 @@ impl HttpCapability {
                 request = request.header(name, value);
             }
         }
-        if options.contains_key("json") {
-            let content_type =
-                options
-                    .get("headers")
-                    .and_then(Value::as_object)
-                    .and_then(|headers| {
-                        headers.iter().find_map(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-type").then_some(value)
-                        })
-                    });
+        let content_type = options
+            .get("headers")
+            .and_then(Value::as_object)
+            .and_then(|headers| {
+                headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-type").then_some(value)
+                })
+            });
+        if body_format == Some(BodyFormat::Json) {
             if let Some(content_type) = content_type {
                 let content_type = expect_string(Some(content_type), "Content-Type header", span)?;
                 if !is_json_content_type(content_type) {
@@ -190,17 +244,11 @@ impl HttpCapability {
             } else {
                 request = request.header(CONTENT_TYPE, "application/json");
             }
-        } else if options.contains_key("body") {
-            let has_content_type = options
-                .get("headers")
-                .and_then(Value::as_object)
-                .is_some_and(|headers| {
-                    headers
-                        .keys()
-                        .any(|name| name.eq_ignore_ascii_case("content-type"))
-                });
-            if !has_content_type {
+        } else if content_type.is_none() {
+            if body_format == Some(BodyFormat::Text) {
                 request = request.header(CONTENT_TYPE, "text/plain; charset=utf-8");
+            } else if body_format == Some(BodyFormat::Bytes) {
+                request = request.header(CONTENT_TYPE, "application/octet-stream");
             }
         }
         let request = request.body(Full::new(body)).map_err(|error| {
@@ -255,7 +303,11 @@ impl HttpCapability {
             let bytes = read_bounded_body(response.into_body(), max_response_bytes, span).await?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let json = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(value) => from_json(value),
+                Ok(value) => match from_json(value, span) {
+                    Ok(value) => value,
+                    Err(_) if !declares_json => Value::Null,
+                    Err(error) => return Err(error),
+                },
                 Err(_) if bytes.is_empty() || !declares_json => Value::Null,
                 Err(error) => {
                     return Err(CapabilityError::new(
@@ -546,25 +598,46 @@ fn sensitive_header(name: &str) -> bool {
     ) || name.to_ascii_lowercase().contains("token")
 }
 
-fn from_json(value: serde_json::Value) -> Value {
-    match value {
+fn from_json(value: serde_json::Value, span: Span) -> Result<Value, CapabilityError> {
+    Ok(match value {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(value) => Value::Boolean(value),
-        serde_json::Value::Number(value) => value.as_i64().map_or_else(
-            || Value::Float(value.as_f64().expect("JSON number is representable as f64")),
-            Value::Integer,
-        ),
-        serde_json::Value::String(value) => Value::String(value),
-        serde_json::Value::Array(values) => {
-            Value::Array(values.into_iter().map(from_json).collect())
+        serde_json::Value::Number(value) => {
+            let spelling = value.to_string();
+            if spelling.contains(['.', 'e', 'E']) {
+                let decimal = value
+                    .as_f64()
+                    .filter(|number| number.is_finite())
+                    .ok_or_else(|| {
+                        CapabilityError::new(
+                            "JSON decimal is outside Mettle's finite number range",
+                            span,
+                        )
+                    })?;
+                Value::Float(decimal)
+            } else {
+                Value::Integer(value.as_i64().ok_or_else(|| {
+                    CapabilityError::new(
+                        "JSON integer is outside Mettle's supported 64-bit range",
+                        span,
+                    )
+                })?)
+            }
         }
+        serde_json::Value::String(value) => Value::String(value),
+        serde_json::Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| from_json(value, span))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         serde_json::Value::Object(fields) => Value::Object(
             fields
                 .into_iter()
-                .map(|(name, value)| (name, from_json(value)))
-                .collect(),
+                .map(|(name, value)| Ok((name, from_json(value, span)?)))
+                .collect::<Result<BTreeMap<_, _>, CapabilityError>>()?,
         ),
-    }
+    })
 }
 
 #[derive(Debug)]
@@ -634,7 +707,18 @@ mod tests {
             ("count".to_owned(), Value::Integer(2)),
         ]));
         let encoded = to_json(&value, Span::default()).expect("value should encode");
-        assert_eq!(from_json(encoded), value);
+        assert_eq!(
+            from_json(encoded, Span::default()).expect("value should decode"),
+            value
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_json_integers_without_rounding() {
+        let value =
+            serde_json::from_str("18446744073709551615").expect("JSON integer should parse");
+        let error = from_json(value, Span::default()).expect_err("integer should exceed range");
+        assert!(error.message.contains("64-bit range"));
     }
 
     #[test]

@@ -1,0 +1,12 @@
+// Run: mettle run examples/language/basics.mettle
+// A flow is reusable. A final expression supplies its result.
+flow greeting(name) = "Hello, ${name}!"
+
+// `main` is the default when no flow is selected.
+flow main {
+    greeting("Mettle")
+}
+
+test "greeting returns a value" {
+    assert(greeting("Ada") == "Hello, Ada!")
+}

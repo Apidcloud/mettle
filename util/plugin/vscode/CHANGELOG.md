@@ -1,5 +1,11 @@
 # Change Log
 
+## 1.0.0-alpha.1
+
+- Align the extension's pre-release version with the Mettle workspace.
+- Add file contexts, profiles, tests, conditionals, terminal `fail()`, load
+  workloads, structured HTTP output, and richer execution diagnostics.
+
 ## 0.16.0
 
 - Add an `echo()` snippet for flow-scoped diagnostic messages.

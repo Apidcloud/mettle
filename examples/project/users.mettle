@@ -1,7 +1,0 @@
-namespace users
-use namespace core
-use context api
-
-flow inspectRequest(requestId) {
-    return http.get("/posts/${requestId}")
-}

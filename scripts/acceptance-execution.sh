@@ -67,6 +67,10 @@ status=$?
 set -e
 flow_pid=""
 [[ "$status" -eq 130 ]] || { echo "cancelled flow exited with $status" >&2; exit 1; }
-rg -q 'execution cancelled' "$state_dir/cancel.err"
+rg -qi 'execution cancelled' "$state_dir/cancel.err" || {
+  echo "cancellation diagnostic was missing:" >&2
+  cat "$state_dir/cancel.err" >&2
+  exit 1
+}
 
 echo "Structured execution acceptance checks passed."

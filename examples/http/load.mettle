@@ -1,0 +1,30 @@
+// From the repository root, choose where the final result goes:
+//   mettle run examples/http/load.mettle
+//     Live dashboard in the terminal, then a human-readable summary.
+//   mettle run examples/http/load.mettle --output json
+//     Final JSON report in the terminal.
+//   mettle run examples/http/load.mettle --output json > load-result.json
+//     Save the final JSON report to a file instead.
+// JSON mode emits its report when the run ends; it does not show the live dashboard.
+// This is a deliberately small public-API demo, not a benchmark target.
+use context {
+    defaults http {
+        baseUrl: "https://jsonplaceholder.typicode.com"
+        timeout: 5s
+    }
+}
+
+flow getPost {
+    http.get("/posts/1")
+}
+
+flow main {
+    load = rate(target: 5, period: 1s, duration: 2s, limit: 10) {
+        getPost()
+    }
+
+    assert(load.errors == 0.0)
+    assert(load.dropped == 0)
+    assert(load.latency.p95 < 2s)
+    load
+}

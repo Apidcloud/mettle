@@ -5,13 +5,13 @@ Basic language support for `.mettle` source files.
 ## Available editor features
 
 - `.mettle` file recognition;
-- TextMate syntax highlighting for supported Mettle constructs, including conditionals and boolean operators;
+- TextMate syntax highlighting for supported Mettle constructs, including loops, conditional and boolean operators, numeric bases, exponents, and fractional durations;
 - `//` comment toggling;
 - matching and automatic closing of braces, brackets, parentheses, and strings;
 - indentation and region folding;
-- snippets for named flows, anonymous flows, tests, namespaces, assertions,
-  reusable and anonymous file contexts, `senv()`, `echo()`, conditionals, assertion messages, structured and load execution
-  policies, and HTTP requests;
+- snippets for named flows, anonymous flows, tests, namespaces, assertions, terminal `fail()`,
+  reusable and anonymous file contexts, `senv()`, `echo()`, conditionals, assertion messages, loops, named parallel branches, structured and load execution
+  policies, and HTTP requests using named `body`;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - **Run Test** play buttons above each test declaration; each runs only that test;
 - parser and compiler diagnostics in the editor, including unsaved project files;
@@ -87,7 +87,7 @@ Packaging uses the pinned official Microsoft `@vscode/vsce` 4.0.0 tool. It is do
 The resulting package is:
 
 ```text
-dist/mettle-language-0.16.0.vsix
+dist/mettle-language-1.0.0-alpha.1.vsix
 ```
 
 ## Install
@@ -95,7 +95,7 @@ dist/mettle-language-0.16.0.vsix
 Install or update from the command line:
 
 ```bash
-code --install-extension dist/mettle-language-0.16.0.vsix --force
+code --install-extension dist/mettle-language-1.0.0-alpha.1.vsix --force
 ```
 
 Alternatively, open the Extensions view, choose **Install from VSIX…**, and select the package from `dist/`.
@@ -107,3 +107,7 @@ Open any `.mettle` file after installation. VS Code should show `Mettle` as the 
 Open this extension directory in VS Code and press `F5` to launch an Extension Development Host. The extension is plain JavaScript and needs no compilation step.
 
 Inspect highlighting scopes with **Developer: Inspect Editor Tokens and Scopes** from the Command Palette.
+
+The current snippets prefer `flow main { ... }`, `test "name" { ... }`, and
+`http.post("/path", body: { ... })`. Existing parenthesized declarations and
+legacy HTTP option blocks remain accepted by the CLI.

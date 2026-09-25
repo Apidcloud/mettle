@@ -1,0 +1,22 @@
+// Run: mettle list examples/http/requests.mettle
+// The smallest form is a runnable top-level call. This uses the public
+// JSONPlaceholder demo API and needs an internet connection.
+http.get("https://jsonplaceholder.typicode.com/posts/1")
+
+// Add a name and parameters when a request needs inputs.
+flow inspectRequest(baseUrl, requestId) =
+    http.get("${baseUrl}/posts/${requestId}")
+
+// An anonymous flow can also contain a multi-operation workflow.
+flow {
+    seed = http.get("https://jsonplaceholder.typicode.com/users/1")
+
+    http.post(
+        "https://jsonplaceholder.typicode.com/posts",
+        body: {
+            sourceId: seed.json.id
+            name: seed.json.name
+            active: true
+        },
+    )
+}
