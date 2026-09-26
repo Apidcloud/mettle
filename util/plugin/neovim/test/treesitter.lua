@@ -1,9 +1,39 @@
--- Run from the grammar directory with METTLE_TS_PARSER pointing to a compiled
--- parser: nvim --headless -u NONE -i NONE -l scripts/check-neovim.lua
+-- Run with a compiled parser and a local nvim-treesitter master checkout.
+-- This check does not load or change user config, and works from any directory.
+local source = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
+local plugin_root = vim.fs.dirname(vim.fs.dirname(source))
+local grammar_root = vim.fs.normalize(vim.fs.joinpath(plugin_root, "..", "tree-sitter"))
+local dependency = assert(vim.env.METTLE_TREESITTER_PATH, "Set METTLE_TREESITTER_PATH to nvim-treesitter master")
 local parser_path = assert(vim.env.METTLE_TS_PARSER, "Set METTLE_TS_PARSER to the compiled parser")
+
+-- Isolate query discovery from personal config and run setup before loading
+-- the parser, as on the first installation. Repeated setup must be harmless.
+vim.opt.runtimepath:remove(vim.fn.stdpath("config"))
+vim.opt.runtimepath:remove(vim.fn.stdpath("config") .. "/after")
+vim.opt.runtimepath:prepend(dependency)
+vim.opt.runtimepath:prepend(plugin_root)
+local integration = require("mettle_treesitter")
+local original_cwd = vim.fn.getcwd()
+vim.cmd.cd(vim.fn.fnamemodify(vim.fn.tempname(), ":h"))
+integration.setup()
+integration.setup()
+vim.cmd.cd(original_cwd)
+local registration = require("nvim-treesitter.parsers").get_parser_configs().mettle
+assert(registration.install_info.url == grammar_root, "Parser path must be relative to the plugin")
+assert(vim.deep_equal(registration.install_info.files, { "src/parser.c", "src/scanner.c" }))
+assert(vim.filetype.match({ filename = "example.mettle" }) == "mettle")
+local count = 0
+for _, path in ipairs(vim.opt.runtimepath:get()) do
+  if path == grammar_root then count = count + 1 end
+end
+assert(count == 1, "Setup must not duplicate the grammar runtime path")
+
 vim.treesitter.language.add("mettle", { path = parser_path })
 for _, name in ipairs({ "highlights", "folds", "indents" }) do
-  vim.treesitter.query.set("mettle", name, table.concat(vim.fn.readfile("queries/" .. name .. ".scm"), "\n"))
+  local files = vim.treesitter.query.get_files("mettle", name)
+  assert(#files == 1 and files[1] == grammar_root .. "/queries/mettle/" .. name .. ".scm",
+    "Queries must load directly from the shared grammar: " .. name)
+  assert(vim.treesitter.query.get("mettle", name), "Missing query " .. name)
 end
 
 local buf = vim.api.nvim_create_buf(false, true)
@@ -63,4 +93,4 @@ vim.api.nvim_buf_set_text(buf, 3, 25, 4, 4, { "" })
 check_edit(3, 0, 0, { "" })
 assert(check_edit(4, 0, 1, { "" }):has_error())
 assert(not check_edit(4, 0, 0, { "}" }):has_error())
-print("Neovim: parser, highlight captures, query loading, and incremental edits passed.")
+print("Neovim: setup, parser registration, shared queries, highlights, and incremental edits passed.")

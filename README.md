@@ -89,9 +89,10 @@ supports nearest execution, all tests or eligible flows in a file, and vim-test'
 last-run and return-to-source commands.
 
 For syntax highlighting, the repository also includes a
-[Tree-sitter grammar and Neovim setup instructions](util/plugin/tree-sitter-mettle/README.md).
+[Tree-sitter grammar](util/plugin/tree-sitter/README.md).
 It provides highlighting, folding, and indentation queries and works alongside
-the language server. The setup instructions cover Neovim 0.11 with the
+the language server. The [Neovim plugin setup](util/plugin/neovim/README.md#tree-sitter)
+registers the grammar and shared queries for Neovim 0.11 with the
 `nvim-treesitter` plugin's `master` branch.
 
 ### VS Code extension
@@ -677,7 +678,8 @@ examples/                         Curated language and HTTP examples; start with
 tests/fixtures/                   Deterministic HTTP programs and local TLS material
 tests/projects/                   Multi-file project fixtures
 util/plugin/vscode/               Installable VS Code extension
-util/plugin/tree-sitter-mettle/   Tree-sitter editor parser, queries, and grammar tests
+util/plugin/neovim/               Neovim Tree-sitter setup and vim-test adapter
+util/plugin/tree-sitter/          Tree-sitter editor parser, queries, and grammar tests
 util/test-server/                 Local HTTP and HTTPS acceptance fixture
 docs/                             Language, runtime, and dependency documentation
 ```

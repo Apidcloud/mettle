@@ -8,8 +8,8 @@ parallel branches, values, member/index access, and interpolation. It supports
 optional declaration parentheses, trailing commas in arrays/calls/policy options,
 signed and base-prefixed numbers, exponents, and fractional durations.
 The compiler remains responsible for name resolution, valid call targets,
-numeric limits, required/duplicate policy options, and semantic validation. VS Code continues using its TextMate
-grammar and the Mettle language server.
+numeric limits, required/duplicate policy options, and semantic validation.
+VS Code continues using its TextMate grammar and the Mettle language server.
 
 ## Develop and test
 
@@ -40,60 +40,20 @@ source text, so comments remain available for highlighting. Expressions can span
 lines; statements require newlines, while object/context fields and parallel
 branches accept commas or newlines. Arrays and call arguments require commas.
 
-Optional Neovim integration check (macOS/Linux, from this directory):
+## Editor integration
 
-```sh
-cc -shared -fPIC -Isrc src/parser.c src/scanner.c -o /tmp/mettle-test.so
-METTLE_TS_PARSER=/tmp/mettle-test.so \
-  nvim --headless -u NONE -i NONE -l scripts/check-neovim.lua
-```
+The grammar package stays independent of any editor. Shared query files live in
+`queries/mettle/`; `tree-sitter.json` points the CLI at the highlighting query.
+This layout also lets Neovim discover the queries directly on its runtime path.
 
-This checks highlighting captures and compares incremental parses with fresh
-parses after valid and incomplete edits. It does not load or change user config.
-
-## Neovim 0.11 with nvim-treesitter master
-
-These instructions target the `master` branch of `nvim-treesitter`, whose API
-differs from `main`. Add the parser registration inside the plugin's `config`
-function, before its existing `require("nvim-treesitter.configs").setup(...)`:
-
-```lua
-local parsers = require("nvim-treesitter.parsers").get_parser_configs()
-parsers.mettle = {
-  install_info = {
-    url = vim.fn.expand("~/path/to/mettle/util/plugin/tree-sitter-mettle"),
-    files = { "src/parser.c", "src/scanner.c" },
-    generate_requires_npm = false,
-    requires_generate_from_grammar = false,
-  },
-  filetype = "mettle",
-}
-```
-
-Enable `highlight = { enable = true }` in that setup, and register the filetype
-once if it is not already registered by your Mettle LSP setup:
-
-```lua
-vim.filetype.add({ extension = { mettle = "mettle" } })
-```
-
-The parser installer does not install queries. Link the query directory into
-your config, replacing the checkout path below. If you already have custom
-Mettle queries, merge them deliberately rather than replacing them:
-
-```sh
-mkdir -p ~/.config/nvim/queries
-ln -s /absolute/path/to/mettle/util/plugin/tree-sitter-mettle/queries \
-  ~/.config/nvim/queries/mettle
-```
-
-Restart Neovim, then run `:TSInstall mettle` and open a `.mettle` file.
-`:Inspect` shows the highlight captures under the cursor; `:InspectTree` shows
-the syntax tree. LSP diagnostics and navigation work alongside Tree-sitter.
+For Neovim, use the sibling [Neovim plugin's Tree-sitter setup](../neovim/README.md#tree-sitter).
+It registers the local parser and its queries without copying files or requiring
+personal symlinks. Its integration test covers setup, query discovery,
+highlighting, and incremental edits.
 
 After changing the grammar or scanner, run `npm run generate`, then
 `:TSInstall! mettle` and restart Neovim to load the rebuilt parser. Query-only
-changes need no compilation; reopening Neovim reloads them from the symlink.
+changes need no compilation; restarting Neovim reloads them from the checkout.
 No tmux, project, or Mettle CLI restart is required.
 
 ## Licence

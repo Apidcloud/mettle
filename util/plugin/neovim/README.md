@@ -1,4 +1,59 @@
-# Mettle for vim-test in Neovim
+# Mettle for Neovim
+
+Optional Tree-sitter and vim-test integrations for Neovim 0.11+. Enable either
+integration independently. The [root README](../../../README.md#neovim) covers
+the built-in LSP client for diagnostics and navigation.
+
+## Tree-sitter
+
+Requires `nvim-treesitter` on its `master` branch. Add these two lines inside that
+plugin's `config` callback, before its existing `configs.setup(...)` call:
+
+```lua
+vim.opt.runtimepath:append("/path/to/mettle/util/plugin/neovim")
+require("mettle_treesitter").setup()
+```
+
+For example, with lazy.nvim:
+
+```lua
+{
+  "nvim-treesitter/nvim-treesitter",
+  branch = "master",
+  lazy = false,
+  build = ":TSUpdate",
+  config = function()
+    vim.opt.runtimepath:append("/path/to/mettle/util/plugin/neovim")
+    require("mettle_treesitter").setup()
+    require("nvim-treesitter.configs").setup({
+      highlight = { enable = true },
+      indent = { enable = true },
+    })
+  end,
+}
+```
+
+Replace the checkout path, preserving your existing nvim-treesitter settings.
+Calling setup inside the plugin's callback ensures nvim-treesitter is available
+and the runtime paths are added after lazy.nvim's startup reset.
+
+The module locates the sibling `../tree-sitter` package automatically, registers
+`.mettle` files and the parser sources, and adds the grammar package to Neovim's
+runtime path so it can discover the shared queries. It does not install parsers or change global highlighting,
+indentation, or folding settings. Existing user query overrides still take
+precedence. No query symlink is needed; remove an old Mettle query symlink when
+migrating to this setup, retaining any custom queries you want to keep.
+
+Restart Neovim, run `:TSInstall mettle`, and open a `.mettle` file. A C compiler
+is required for installation; the generated parser is included in the checkout.
+`:Inspect` shows highlight captures and `:InspectTree` shows the syntax tree.
+The parser uses ABI 15, supported by Neovim 0.11 and newer. This setup targets
+nvim-treesitter's `master` API, not its incompatible `main` rewrite.
+
+After grammar updates, run `:TSInstall! mettle`, wait for installation, and
+restart Neovim. No tmux, project, or Mettle CLI restart is required.
+
+## vim-test
 
 This adapter connects `.mettle` files to an existing
 [vim-test](https://github.com/vim-test/vim-test) installation. Requires Neovim
@@ -81,3 +136,21 @@ METTLE_VIM_TEST_PATH=/path/to/vim-test nvim --headless -u NONE -i NONE \
 ```
 
 The checks use temporary local fixtures and make no network requests.
+
+## Verify Tree-sitter setup
+
+From the repository root, with a C compiler, Neovim 0.11+, and a local
+nvim-treesitter `master` checkout (macOS/Linux):
+
+```sh
+cc -shared -fPIC -Iutil/plugin/tree-sitter/src \
+  util/plugin/tree-sitter/src/parser.c util/plugin/tree-sitter/src/scanner.c \
+  -o /tmp/mettle-test.so
+METTLE_TREESITTER_PATH=/path/to/nvim-treesitter \
+METTLE_TS_PARSER=/tmp/mettle-test.so \
+  nvim --headless -u NONE -i NONE -l util/plugin/neovim/test/treesitter.lua
+```
+
+The test checks registration before parser loading, repeated setup, operation
+outside the checkout's working directory, shared query discovery, highlight
+captures, and incremental edits. It does not load or change user config.

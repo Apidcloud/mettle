@@ -52,10 +52,10 @@ jobs:
       - name: Install pinned Tree-sitter CLI
         run: cargo install tree-sitter-cli --version 0.25.8 --locked
       - name: Check generated Tree-sitter parser
-        working-directory: util/plugin/tree-sitter-mettle
+        working-directory: util/plugin/tree-sitter
         run: |
           npm run generate
           git diff --exit-code -- src
       - name: Test Tree-sitter grammar and queries
-        working-directory: util/plugin/tree-sitter-mettle
+        working-directory: util/plugin/tree-sitter
         run: npm test

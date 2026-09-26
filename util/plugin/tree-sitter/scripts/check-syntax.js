@@ -60,7 +60,7 @@ try {
   // Validate all query files against the generated node types.
   const example = resolve(grammar, "../../../examples/language/conditionals.mettle");
   for (const name of ["highlights", "folds", "indents"]) {
-    const result = spawnSync("tree-sitter", ["query", "--quiet", `queries/${name}.scm`, example], {
+    const result = spawnSync("tree-sitter", ["query", "--quiet", `queries/mettle/${name}.scm`, example], {
       cwd: grammar, encoding: "utf8",
     });
     assert.equal(result.status, 0, result.stdout + result.stderr);

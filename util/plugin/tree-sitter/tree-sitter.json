@@ -5,7 +5,7 @@
     "scope": "source.mettle",
     "path": ".",
     "file-types": ["mettle"],
-    "highlights": "queries/highlights.scm"
+    "highlights": "queries/mettle/highlights.scm"
   }],
   "metadata": {
     "version": "0.1.0",
