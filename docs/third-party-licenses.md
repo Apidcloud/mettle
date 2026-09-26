@@ -8,6 +8,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `bytes` | `1.12.1` | `MIT` |
 | `cc` | `1.4.6` | `MIT OR Apache-2.0` |
 | `cfg-if` | `1.0.5` | `MIT OR Apache-2.0` |
+| `equivalent` | `1.0.2` | `Apache-2.0 OR MIT` |
 | `errno` | `0.3.14` | `MIT OR Apache-2.0` |
 | `find-msvc-tools` | `0.1.12` | `MIT OR Apache-2.0` |
 | `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` |
@@ -15,6 +16,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `futures-task` | `0.3.34` | `MIT OR Apache-2.0` |
 | `futures-util` | `0.3.34` | `MIT OR Apache-2.0` |
 | `getrandom` | `0.2.17` | `MIT OR Apache-2.0` |
+| `hashbrown` | `0.17.1` | `MIT OR Apache-2.0` |
 | `http` | `1.5.0` | `MIT OR Apache-2.0` |
 | `http-body` | `1.1.0` | `MIT` |
 | `http-body-util` | `0.1.5` | `MIT` |
@@ -22,6 +24,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `hyper` | `1.11.1` | `MIT` |
 | `hyper-rustls` | `0.27.9` | `Apache-2.0 OR ISC OR MIT` |
 | `hyper-util` | `0.1.20` | `MIT` |
+| `indexmap` | `2.14.2` | `Apache-2.0 OR MIT` |
 | `itoa` | `1.0.18` | `MIT OR Apache-2.0` |
 | `libc` | `0.2.189` | `MIT OR Apache-2.0` |
 | `memchr` | `2.8.3` | `Unlicense OR MIT` |
@@ -38,6 +41,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `serde_core` | `1.0.229` | `MIT OR Apache-2.0` |
 | `serde_derive` | `1.0.229` | `MIT OR Apache-2.0` |
 | `serde_json` | `1.0.151` | `MIT OR Apache-2.0` |
+| `serde_spanned` | `1.1.1` | `MIT OR Apache-2.0` |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` |
 | `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` |
 | `smallvec` | `1.16.1` | `MIT OR Apache-2.0` |
@@ -46,6 +50,10 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `syn` | `3.0.5` | `MIT OR Apache-2.0` |
 | `tokio` | `1.53.1` | `MIT` |
 | `tokio-rustls` | `0.26.5` | `MIT OR Apache-2.0` |
+| `toml` | `1.1.6+spec-1.1.0` | `MIT OR Apache-2.0` |
+| `toml_datetime` | `1.1.1+spec-1.1.0` | `MIT OR Apache-2.0` |
+| `toml_parser` | `1.1.3+spec-1.1.0` | `MIT OR Apache-2.0` |
+| `toml_writer` | `1.1.2+spec-1.1.0` | `MIT OR Apache-2.0` |
 | `tower-service` | `0.3.3` | `MIT` |
 | `tracing` | `0.1.44` | `MIT` |
 | `tracing-core` | `0.1.36` | `MIT` |
@@ -67,6 +75,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `windows_x86_64_gnu` | `0.52.6` | `MIT OR Apache-2.0` |
 | `windows_x86_64_gnullvm` | `0.52.6` | `MIT OR Apache-2.0` |
 | `windows_x86_64_msvc` | `0.52.6` | `MIT OR Apache-2.0` |
+| `winnow` | `1.0.4` | `MIT` |
 | `zeroize` | `1.9.0` | `Apache-2.0 OR MIT` |
 | `zmij` | `1.0.23` | `MIT` |
 

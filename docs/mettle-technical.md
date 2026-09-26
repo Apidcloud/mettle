@@ -79,7 +79,7 @@ Queues and concurrency limits must be bounded from their first introduction. Bac
 
 Mettle code, the compiler, scheduling policies, and capability interfaces remain platform-independent. Tokio is planned as the asynchronous runtime boundary. It maps its portable APIs to platform facilities such as `epoll` on Linux, `kqueue` on macOS/BSD, and Windows I/O mechanisms.
 
-Linux is the primary development environment. Native CI verifies Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS. Platform-specific optimizations must remain behind internal interfaces and include a portable fallback. Experimental facilities such as `io_uring` are not part of the initial architecture.
+Linux and MacOs are the primary development environments. Native CI verifies Linux x64, Windows x64, and Apple Silicon macOS. Platform-specific optimizations must remain behind internal interfaces and include a portable fallback. Experimental facilities such as `io_uring` are not part of the initial architecture.
 
 ## 3. Workspace architecture
 
@@ -482,7 +482,7 @@ User acceptance executes a release checklist from a clean machine, runs the soak
 
 ### Portability baseline
 
-The production crates use Rust standard-library paths, Tokio networking and signals, Hyper, and Rustls without direct operating-system APIs. Windows drive paths receive explicit file-URI normalization in the language server. GitHub Actions runs workspace tests, Clippy, and the portable HTTP/load acceptance suite on Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS.
+The production crates use Rust standard-library paths, Tokio networking and signals, Hyper, and Rustls without direct operating-system APIs. Windows drive paths receive explicit file-URI normalization in the language server. GitHub Actions runs workspace tests, Clippy, and the portable HTTP/load acceptance suite on Linux x64, Windows x64, and Apple Silicon macOS.
 
 Linux-specific `/proc` sampling remains isolated to the optional benchmark script. Bash acceptance scripts remain useful for the primary development environment, while `scripts/acceptance-portable.py` covers the runtime surface without shell-specific process control.
 

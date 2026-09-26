@@ -119,7 +119,7 @@ The HTTP examples need an internet connection but no account or credentials.
 
 ### Platform support
 
-The Mettle compiler, runtime, HTTP capability, CLI, and VS Code extension support Linux, Windows, and macOS. Native CI builds and tests Linux x64, Windows x64, Apple Silicon macOS, and Intel macOS. The portable acceptance suite executes real HTTP workflows and a local load test on each platform.
+The Mettle compiler, runtime, HTTP capability, CLI, and VS Code extension support Linux x64, Windows x64, and macOS on Apple Silicon. Native CI builds and tests these platforms. Intel macOS is not a supported target. The portable acceptance suite executes real HTTP workflows and a local load test on each supported platform.
 
 The repository does not publish prebuilt executables yet, so the current installation path requires Rustup and Cargo on every platform. Release archives and package-manager installation are part of release readiness work.
 
