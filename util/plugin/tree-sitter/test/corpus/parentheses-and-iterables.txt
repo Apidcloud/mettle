@@ -1,0 +1,160 @@
+================================================================================
+Parenthesized names are callable
+================================================================================
+
+flow f = [1]
+flow main = (f)()
+flow qualified = ((core.f))()
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (array (integer)))
+  (flow_declaration
+    (identifier)
+    (call_expression
+      (parenthesized_expression (identifier))
+      (argument_list)))
+  (flow_declaration
+    (identifier)
+    (call_expression
+      (parenthesized_expression
+        (parenthesized_expression
+          (member_expression (identifier) (identifier))))
+      (argument_list))))
+
+================================================================================
+Parenthesized assertion messages remain strings
+================================================================================
+
+flow main {
+    assert(true, ("yes"))
+    assert(true, (("nested")))
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (block
+      (assert_statement
+        (boolean)
+        (parenthesized_expression (string (string_content))))
+      (assert_statement
+        (boolean)
+        (parenthesized_expression
+          (parenthesized_expression (string (string_content))))))))
+
+================================================================================
+The first braces after the iterable are the loop body
+================================================================================
+
+flow f = [1]
+flow main {
+    for x in f() {}
+    {}
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (array (integer)))
+  (flow_declaration
+    (identifier)
+    (block
+      (expression_statement
+        (for_expression
+          (identifier)
+          (call_expression (identifier) (argument_list))
+          (block)))
+      (expression_statement (object)))))
+
+================================================================================
+Parenthesized iterable callees and ordinary call options
+================================================================================
+
+flow main {
+    for x in ((f))() {
+        f() {}
+    }
+    f()
+    {}
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (block
+      (expression_statement
+        (for_expression
+          (identifier)
+          (call_expression
+            (parenthesized_expression (parenthesized_expression (identifier)))
+            (argument_list))
+          (block
+            (expression_statement
+              (call_expression (identifier) (argument_list) (object))))))
+      (expression_statement
+        (call_expression (identifier) (argument_list) (object))))))
+
+================================================================================
+Nested loop bodies retain the enclosing iterable context
+================================================================================
+
+flow main = for x in for y in f() {
+    f()
+    {}
+} {
+    f() {}
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (for_expression
+      (identifier)
+      (for_expression
+        (identifier)
+        (call_expression (identifier) (argument_list))
+        (block
+          (expression_statement (call_expression (identifier) (argument_list)))
+          (expression_statement (object))))
+      (block
+        (expression_statement
+          (call_expression (identifier) (argument_list) (object)))))))
+
+================================================================================
+Policies inside iterables also suppress call options
+================================================================================
+
+flow main = for x in retry(attempts: 1) {
+    f()
+    {}
+} {
+    f() {}
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (for_expression
+      (identifier)
+      (retry_expression
+        (attempts_option (identifier) (integer))
+        (expression_body
+          (expression_statement (call_expression (identifier) (argument_list)))
+          (expression_statement (object))))
+      (block
+        (expression_statement
+          (call_expression (identifier) (argument_list) (object)))))))

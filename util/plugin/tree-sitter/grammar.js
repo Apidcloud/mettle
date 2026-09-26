@@ -8,8 +8,12 @@ const block = ($, rule, commas = false) => seq(
     optional(commas ? choice(",", $._newline) : $._newline))),
   "}",
 );
+const call = ($, allowOptions) => prec.right(PREC.call, seq(
+  field("function", $._call_target), $._call_continuation, $.argument_list,
+  ...(allowOptions ? [optional(seq($._call_options_start, field("options", $.object)))] : []),
+));
 
-module.exports = grammar({
+const definition = {
   name: "mettle",
   extras: $ => [/[ \t\r\n]/, $.comment],
   externals: $ => [
@@ -18,7 +22,12 @@ module.exports = grammar({
     $._comparison_continuation, $._call_options_start, $._else_start, $._error_sentinel,
   ],
   word: $ => $.identifier,
-  conflicts: $ => [[$._positional_arguments], [$._named_arguments], [$.call_expression]],
+  conflicts: $ => [
+    [$._positional_arguments], [$._named_arguments],
+    [$._primary_expression, $._call_target],
+    [$._iterable_positional_arguments], [$._iterable_named_arguments],
+    [$._iterable_primary_expression, $._iterable_call_target],
+  ],
   reserved: {
     global: _ => [
       "flow", "test", "context", "namespace", "defaults", "use", "return", "assert",
@@ -55,7 +64,9 @@ module.exports = grammar({
     ),
     binding: $ => seq(field("name", $.identifier), "=", field("value", $._expression)),
     return_statement: $ => seq("return", $._expression),
-    assert_statement: $ => seq("assert", "(", $._expression, optional(seq(",", $.string)), ")"),
+    assert_statement: $ => seq("assert", "(", $._expression, optional(seq(",", $._assertion_message)), ")"),
+    _assertion_message: $ => choice($.string, alias($._parenthesized_message, $.parenthesized_expression)),
+    _parenthesized_message: $ => seq("(", $._assertion_message, ")"),
     if_statement: $ => prec.right(seq("if", "(", field("condition", $._expression), ")",
       field("consequence", $.block), optional(seq($._else_start, "else", field("alternative", choice($.block, $.if_statement)))))),
     expression_statement: $ => $._expression,
@@ -81,10 +92,10 @@ module.exports = grammar({
       $.rate_expression, $.concurrency_expression, $.for_expression, $.fail_expression,
     ),
     parenthesized_expression: $ => seq("(", $._expression, ")"),
-    call_expression: $ => prec(PREC.call, seq(
-      field("function", choice($.identifier, $.member_expression)),
-      $._call_continuation, $.argument_list, optional(seq($._call_options_start, field("options", $.object))),
-    )),
+    call_expression: $ => call($, true),
+    _call_target: $ => choice($.identifier, $.member_expression,
+      alias($._parenthesized_callee, $.parenthesized_expression)),
+    _parenthesized_callee: $ => seq("(", $._call_target, ")"),
     argument_list: $ => seq("(", optional(choice(
       seq($._positional_arguments, optional(seq(",", $._named_arguments)), optional(",")),
       seq($._named_arguments, optional(",")),
@@ -119,8 +130,8 @@ module.exports = grammar({
     named_branch: $ => seq(field("name", $.identifier), ":", field("value", $._expression)),
     fail_expression: $ => seq("fail", "(", $._expression, ")"),
     for_expression: $ => seq("for", optional(seq(field("key", $.identifier), ",")),
-      field("value", $.identifier), "in", field("iterable", $._expression),
-      optional($._call_options_start), field("body", $.block)),
+      field("value", $.identifier), "in", field("iterable", $._iterable_expression),
+      field("body", $.block)),
 
     identifier: _ => /[A-Za-z_][A-Za-z0-9_]*/,
     integer: _ => /-?(0[xX][0-9a-fA-F](_?[0-9a-fA-F])*|0[bB][01](_?[01])*|[0-9](_?[0-9])*)/,
@@ -135,4 +146,38 @@ module.exports = grammar({
     interpolation_path: _ => token.immediate(/[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*/),
     comment: _ => token(seq("//", /[^\n]*/)),
   },
-});
+};
+
+// Rust suppresses trailing call options throughout a loop iterable, including
+// nested arguments, objects, policies, and inner loops. Use a second expression
+// context with options disabled, aliasing its nodes to the ordinary public tree
+// types. The outer loop body returns to the ordinary rules; a loop nested inside
+// an iterable keeps the restricted context in its body, just like Rust's flag.
+// Keeping this in grammar rules avoids mutable scanner state during recovery.
+const iterableRules = new Set([
+  "_expression", "binary_expression", "_comparison_operand", "unary_expression",
+  "_primary_expression", "parenthesized_expression", "call_expression", "_call_target",
+  "_parenthesized_callee", "argument_list", "_positional_arguments", "_named_arguments",
+  "named_argument", "member_expression", "index_expression", "array", "object", "object_field",
+  "within_expression", "retry_expression", "parallel_expression", "rate_expression",
+  "concurrency_expression", "timeout_option", "attempts_option", "delay_option", "limit_option",
+  "target_option", "period_option", "duration_option", "expression_body", "parallel_body",
+  "named_branch", "fail_expression", "for_expression", "block", "_statement", "binding",
+  "return_statement", "assert_statement", "if_statement", "expression_statement",
+]);
+const iterableName = name => `_iterable_${name.replace(/^_/, "")}`;
+function inIterable(rule, $) {
+  if (Array.isArray(rule)) return rule.map(child => inIterable(child, $));
+  if (rule === null || typeof rule !== "object") return rule;
+  if (rule.type === "SYMBOL" && iterableRules.has(rule.name)) {
+    const symbol = $[iterableName(rule.name)];
+    return rule.name.startsWith("_") ? symbol : alias(symbol, $[rule.name]);
+  }
+  return Object.fromEntries(Object.entries(rule).map(([key, value]) => [key, inIterable(value, $)]));
+}
+for (const name of iterableRules) {
+  const rule = definition.rules[name];
+  definition.rules[iterableName(name)] = $ => inIterable(name === "call_expression" ? call($, false) : rule($), $);
+}
+
+module.exports = grammar(definition);

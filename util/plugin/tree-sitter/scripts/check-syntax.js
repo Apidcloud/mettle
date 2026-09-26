@@ -25,6 +25,11 @@ const invalid = [
   'flow main() = within(duration: 1s) { fetch() }',
   'flow main() = retry(attempts: 2) { first() second() }',
   'flow main() { assert(true, 123) }',
+  'flow main() { assert(true, ((123))) }',
+  'flow main() { assert(true, (message)) }',
+  'flow main = (1)()',
+  'flow main = for x in f(g() {}) {}',
+  'flow main = for x in [f() {}] {}',
   'flow main(return) = return',
 ];
 

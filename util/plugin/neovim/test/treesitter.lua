@@ -93,4 +93,34 @@ vim.api.nvim_buf_set_text(buf, 3, 25, 4, 4, { "" })
 check_edit(3, 0, 0, { "" })
 assert(check_edit(4, 0, 1, { "" }):has_error())
 assert(not check_edit(4, 0, 0, { "}" }):has_error())
+
+-- The first braces belong to the loop, even with another object on the next
+-- line. Verify ranges as well as fresh/incremental equivalence after edits.
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+  "flow f = [1]",
+  "flow main {",
+  "  for x in f() {}",
+  "  {}",
+  '  assert(true, ("yes"))',
+  "}",
+})
+local function check_loop_boundaries(root)
+  assert(not root:has_error())
+  local body = root:named_child(1):field("body")[1]
+  assert(body:named_child_count() == 3, "Loop must not consume the following object")
+  local loop = body:named_child(0):named_child(0)
+  assert(loop:type() == "for_expression")
+  assert(#loop:field("iterable")[1]:field("options") == 0, "Iterable call must not take options")
+  local first_row, _, last_row = loop:field("body")[1]:range()
+  assert(first_row == 2 and last_row == 2, "Loop body must use the first braces")
+  assert(body:named_child(1):named_child(0):type() == "object")
+end
+check_loop_boundaries(check_edit(2, 11, 12, { "f" }))
+check_loop_boundaries(check_edit(2, 11, 12, { "(f)" }))
+check_loop_boundaries(check_edit(2, 11, 14, { "((f))" }))
+assert(check_edit(2, 11, 16, { "((f)" }):has_error())
+check_loop_boundaries(check_edit(2, 11, 15, { "((f))" }))
+check_loop_boundaries(check_edit(4, 15, 22, { '(("yes"))' }))
+assert(check_edit(4, 17, 22, { "123" }):has_error())
+check_loop_boundaries(check_edit(4, 17, 20, { '"yes"' }))
 print("Neovim: setup, parser registration, shared queries, highlights, and incremental edits passed.")
