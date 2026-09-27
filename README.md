@@ -908,7 +908,8 @@ the exhaustive option list, defaults, and result fields.
 
 Every reserved word also has hover documentation, including `assert`, `use`,
 `flow`, and execution policies such as `parallel`. Core helpers (`env`, `senv`,
-`secret`, `echo`) have argument descriptions and signature help; primitive kinds
+`secret`, `echo`) and parameterized keywords show individual argument descriptions
+on hover as well as in signature help and the full reference; primitive kinds
 have references when used with `is` or `as`. Keyword spellings/documentation share
 the lexer inventory, and helper descriptions share compiler intrinsic resolution.
 Use `language.<name>` to disambiguate a primitive from a capability, for example

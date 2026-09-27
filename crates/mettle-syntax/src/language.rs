@@ -1,6 +1,7 @@
 //! Core-language references and the lexer keyword inventory, authored together.
 
 use crate::{Span, TokenKind, ValueKind};
+use std::fmt::Write as _;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Item {
@@ -12,21 +13,31 @@ pub struct Item {
 }
 
 impl Item {
+    fn overview(self) -> String {
+        format!("```text\n{}\n```\n\n{}", self.form, self.description)
+    }
+
     #[must_use]
     pub fn hover(self) -> String {
-        format!(
-            "```text\n{}\n```\n\n{}\n\n```mettle\n{}\n```",
-            self.form, self.description, self.example
-        )
+        let mut output = self.overview();
+        for (name, description) in self.parameters {
+            let _ = write!(output, "\n\n**{name}** — {description}");
+        }
+        let _ = write!(output, "\n\n```mettle\n{}\n```", self.example);
+        output
     }
 
     #[must_use]
     pub fn reference(self) -> String {
-        let mut output = format!("# {}\n\n{}\n", self.name, self.hover());
+        let mut output = format!(
+            "# {}\n\n{}\n\n```mettle\n{}\n```\n",
+            self.name,
+            self.overview(),
+            self.example
+        );
         if !self.parameters.is_empty() {
             output.push_str("\n## Parameters\n");
             for (name, description) in self.parameters {
-                use std::fmt::Write as _;
                 let _ = write!(output, "\n### {name}\n\n{description}\n");
             }
         }
@@ -145,6 +156,26 @@ pub fn at(source: &str, byte: usize) -> Option<(&'static str, Span)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyword_hovers_include_parameters_without_duplicating_reference_descriptions() {
+        for item in KEYWORDS {
+            let hover = item.hover();
+            let reference = item.reference();
+            for (name, description) in item.parameters {
+                assert!(hover.contains(&format!("**{name}** — {description}")));
+                assert_eq!(reference.matches(description).count(), 1, "{}", item.name);
+                assert!(reference.contains(&format!("### {name}\n\n{description}")));
+            }
+            assert!(hover.ends_with(&format!("```mettle\n{}\n```", item.example)));
+            if item.parameters.is_empty() {
+                assert_eq!(
+                    hover,
+                    format!("{}\n\n```mettle\n{}\n```", item.overview(), item.example)
+                );
+            }
+        }
+    }
+
     #[test]
     fn keyword_inventory_is_documented_and_examples_parse() {
         for item in KEYWORDS {

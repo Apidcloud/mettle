@@ -703,6 +703,16 @@ mod tests {
                 hover["mettleReference"],
                 uri(&format!("language.{}", item.name))
             );
+            for (name, description) in item.parameters {
+                assert!(
+                    hover["contents"]["value"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("**{name}** — {description}")),
+                    "{} parameter {name}",
+                    item.name
+                );
+            }
             fixture.server.virtual_documentation = true;
             let target = fixture
                 .server
@@ -729,6 +739,16 @@ mod tests {
                     .unwrap()
                     .contains(item.description)
             );
+            for (name, description) in item.parameters {
+                assert!(
+                    hover["contents"]["value"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("**{name}** — {description}")),
+                    "{} parameter {name}",
+                    item.name
+                );
+            }
         }
         for text in [
             "flow main { assert(true, ",
