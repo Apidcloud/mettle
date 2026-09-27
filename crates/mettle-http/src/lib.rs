@@ -260,9 +260,8 @@ impl HttpCapability {
             }
             if !is_identity_content_encoding(response.headers().get(CONTENT_ENCODING)) {
                 return Err(CapabilityError::new(
-                    format!(
-                        "HTTP response uses an unsupported Content-Encoding; only `identity` is supported"
-                    ),
+                    "HTTP response uses an unsupported Content-Encoding; only `identity` is supported"
+                        .to_string(),
                     span,
                 ));
             }
