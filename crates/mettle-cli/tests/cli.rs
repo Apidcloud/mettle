@@ -2,8 +2,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TEMPORARY_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1142,30 +1142,32 @@ fn jobs_overlap_entries_respect_the_limit_and_report_completion_order() {
     let maximum = Arc::new(AtomicUsize::new(0));
     let server_active = active.clone();
     let server_maximum = maximum.clone();
+    let (requests, arrivals) = mpsc::channel();
     let server = std::thread::spawn(move || {
         let mut handlers = Vec::new();
         for _ in 0..3 {
             let (mut stream, _) = listener.accept().expect("request should arrive");
             let active = server_active.clone();
             let maximum = server_maximum.clone();
+            let requests = requests.clone();
             handlers.push(std::thread::spawn(move || {
                 let mut request = [0_u8; 1024];
                 let bytes = stream.read(&mut request).expect("request should be readable");
                 let request = String::from_utf8_lossy(&request[..bytes]);
-                let delay = if request.contains(" /slow ") {
-                    Duration::from_millis(250)
-                } else if request.contains(" /fast ") {
-                    Duration::from_millis(20)
-                } else {
-                    Duration::from_millis(60)
-                };
+                let route = request.split_whitespace().nth(1).expect("request path");
+                let (release, ready) = mpsc::channel();
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 maximum.fetch_max(current, Ordering::SeqCst);
-                std::thread::sleep(delay);
+                requests
+                    .send((route.to_owned(), release))
+                    .expect("test should receive request arrivals");
+                ready
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("test should release the response");
+                active.fetch_sub(1, Ordering::SeqCst);
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}")
                     .expect("response should be writable");
-                active.fetch_sub(1, Ordering::SeqCst);
             }));
         }
         for handler in handlers {
@@ -1175,21 +1177,51 @@ fn jobs_overlap_entries_respect_the_limit_and_report_completion_order() {
     let path = source_file(&format!(
         "flow first = http.get(\"http://{address}/slow\")\nflow second = http.get(\"http://{address}/fast\")\nflow third = http.get(\"http://{address}/medium\")\n"
     ));
-    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mettle"))
         .arg("run")
         .arg(&path)
         .args(["--all", "--jobs", "2", "--output", "json"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("batch should start");
+    let mut stdout = BufReader::new(child.stdout.take().expect("batch stdout"));
+    let mut read_record = || {
+        let mut line = String::new();
+        assert!(stdout.read_line(&mut line).expect("JSON record") > 0);
+        serde_json::from_str::<serde_json::Value>(&line).expect("JSON record")
+    };
+    let mut records = vec![read_record()];
+    let mut responses = std::collections::BTreeMap::new();
+    // Hold both initial requests to prove overlap without depending on timing.
+    for _ in 0..2 {
+        let (route, release) = arrivals
+            .recv_timeout(Duration::from_secs(10))
+            .expect("initial requests should overlap");
+        responses.insert(route, release);
+    }
+    assert_eq!(
+        responses.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["/fast", "/slow"]
+    );
+    responses.remove("/fast").unwrap().send(()).unwrap();
+    records.push(read_record());
+    let (route, release) = arrivals
+        .recv_timeout(Duration::from_secs(10))
+        .expect("third request should use the released slot");
+    assert_eq!(route, "/medium");
+    release.send(()).unwrap();
+    records.push(read_record());
+    // Observe each emitted result before allowing the next response to finish.
+    responses.remove("/slow").unwrap().send(()).unwrap();
+    records.push(read_record());
+    records.push(read_record());
+    let output = child.wait_with_output().expect("batch should complete");
     fs::remove_file(path).expect("test source should be removable");
     server.join().expect("server should complete");
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(maximum.load(Ordering::SeqCst), 2);
-    let records = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSON record"))
-        .collect::<Vec<_>>();
     assert_eq!(records[0]["jobs"], 2);
     assert_eq!(records[1]["sourceIndex"], 2);
     assert_eq!(records[2]["sourceIndex"], 3);
