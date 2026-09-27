@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use http_body_util::{BodyExt, Full};
-use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
+use hyper::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use hyper::{Method, Request, Uri};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
@@ -255,6 +255,14 @@ impl HttpCapability {
             {
                 return Err(CapabilityError::new(
                     format!("HTTP response exceeded the {max_response_bytes} byte limit"),
+                    span,
+                ));
+            }
+            if !is_identity_content_encoding(response.headers().get(CONTENT_ENCODING)) {
+                return Err(CapabilityError::new(
+                    format!(
+                        "HTTP response uses an unsupported Content-Encoding; only `identity` is supported"
+                    ),
                     span,
                 ));
             }
@@ -595,6 +603,16 @@ fn type_error(name: &str, expected: &str, value: &Value, span: Span) -> Capabili
     )
 }
 
+fn is_identity_content_encoding(value: Option<&HeaderValue>) -> bool {
+    value.is_none_or(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .all(|encoding| encoding.trim().eq_ignore_ascii_case("identity"))
+        })
+    })
+}
+
 fn error_chain(error: &dyn Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
@@ -659,7 +677,8 @@ mod tests {
 
     use mettle_capability::{Capability, Object, Span, Value};
 
-    use super::{HttpCapability, resolve_url};
+    use super::{HttpCapability, is_identity_content_encoding, resolve_url};
+    use hyper::header::HeaderValue;
     use mettle_capability::content::BuiltinCodec;
     use mettle_capability::content::from_json;
 
@@ -673,6 +692,29 @@ mod tests {
             resolve_url("/users", &options, Span::default()).expect("URL should resolve"),
             "http://localhost:8000/users"
         );
+    }
+
+    #[test]
+    fn content_encoding_verification() {
+        assert!(is_identity_content_encoding(None));
+        assert!(is_identity_content_encoding(Some(
+            &HeaderValue::from_static("identity")
+        )));
+        assert!(is_identity_content_encoding(Some(
+            &HeaderValue::from_static("Identity")
+        )));
+        assert!(!is_identity_content_encoding(Some(
+            &HeaderValue::from_static("gzip")
+        )));
+        assert!(!is_identity_content_encoding(Some(
+            &HeaderValue::from_static("br")
+        )));
+        assert!(!is_identity_content_encoding(Some(
+            &HeaderValue::from_static("identity, gzip")
+        )));
+        assert!(is_identity_content_encoding(Some(
+            &HeaderValue::from_static("identity, identity")
+        )));
     }
 
     #[test]
