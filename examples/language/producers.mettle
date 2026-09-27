@@ -1,0 +1,31 @@
+// No network or input files needed. Run from the repository root:
+// mettle run examples/language/producers.mettle
+// Writes target/producer-example.txt; overwrite is explicit for repeatable runs.
+// Append --raw for the result, or --raw > result.json to save it.
+
+/// Create a lazy, single-consumer UTF-8 byte source. No work happens until consumed.
+/// @param payload Complete string to split into lines before sending.
+/// @returns Byte source. Each yield is bytes, not a packet or a remote acknowledgement.
+flow lines(payload) = source {
+    for line in text.split(payload, "\n") {
+        if (line == "STOP") { break }
+        yield "${line}\n"
+    }
+}
+
+flow main {
+    content = lines("first\nsecond\nSTOP\nignored")
+    assert(content is source)
+    // A producer can yield strings and pre-encoded bytes, in their written order.
+    fs.write("target/producer-example.txt", source {
+        yield "Heading\n"
+        yield text.encode("first\nsecond\n")
+    }, overwrite: true)
+    assert(fs.readText("target/producer-example.txt") == "Heading\nfirst\nsecond\n")
+    // The first source was never opened. It can be passed through helpers safely.
+    fs.write("target/producer-lines.txt", content, overwrite: true)
+    assert(fs.readText("target/producer-lines.txt") == "first\nsecond\n")
+    // Producer-derived content/counts are conservatively sensitive; report only
+    // this public completion marker, not a secret-derived write count.
+    { completed: true }
+}

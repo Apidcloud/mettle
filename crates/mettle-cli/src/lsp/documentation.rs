@@ -545,7 +545,7 @@ mod tests {
         fn query(&self, method: &str, needle: &str) -> Value {
             self.server
                 .documentation_query(&self.params(needle), method)
-                .unwrap()
+                .unwrap_or_else(|| panic!("missing {method} for `{needle}`"))
         }
     }
     impl Drop for Fixture {
@@ -871,6 +871,60 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("application/json")
+        );
+    }
+
+    #[test]
+    fn streamed_response_text_match_and_contextual_source_hovers_share_native_metadata() {
+        let fixture = Fixture::new(
+            "flow main { response = http.get(\"/x\", stream: true, maxCaptureBytes: 1024)\n response.chunks }",
+        );
+        let option = fixture.query("textDocument/hover", "maxCaptureBytes:");
+        assert!(
+            option["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Maximum complete capture")
+        );
+        let field = fixture.query("textDocument/hover", "chunks");
+        assert!(
+            field["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Single-consumer raw response bytes")
+        );
+        let reference = reference_query(&json!({ "name": "http.get" })).unwrap();
+        assert!(reference["content"].as_str().unwrap().contains("close"));
+
+        let fixture = Fixture::new(
+            "flow main { match = text.find(\"é id=42\", regex: \"(?P<id>[0-9]+)\")\n match.start }",
+        );
+        let field = fixture.query("textDocument/hover", "start");
+        assert!(
+            field["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Unicode scalar")
+        );
+        let signature = fixture.query("textDocument/signatureHelp", "regex: ");
+        assert!(
+            signature["signatures"][0]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["documentation"]["value"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("Regular-expression selector"))
+        );
+
+        let fixture = Fixture::new("flow main { source = 42\n source }");
+        let variable = fixture.query("textDocument/hover", "source }");
+        assert!(
+            variable["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("source: integer")
         );
     }
 

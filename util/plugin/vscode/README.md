@@ -12,7 +12,8 @@ Basic language support for `.mettle` source files.
 - snippets for named flows, anonymous flows, tests, namespaces, assertions, terminal `fail()`,
   reusable and anonymous file contexts, `senv()`, `echo()`, conditionals, assertion messages, loops, named parallel branches, structured and load execution
   policies, and HTTP requests using named `body`;
-- snippets for complete filesystem reads, incremental copies, and streamed HTTP uploads;
+- snippets for complete filesystem reads, incremental copies, streamed HTTP downloads/uploads, and lazy `source`/`yield` producers;
+- highlighting and compiler-backed references for `source`, `yield`, and loop `break`;
 - highlighting for built-in `is`/`as` kind operations and snippets for codecs/media types;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - **Run Test** play buttons above each test declaration; each runs only that test;
@@ -62,6 +63,10 @@ example. The `…` in a hover signature stands for optional named options; signa
 help and the full reference retain the complete option list. HTTP descriptions
 explain request-body encoding and distinguish error status codes from call failures;
 filesystem and codec descriptions explain buffering, consumption, and decoding rules.
+`text.split`, `text.find`, `text.findAll`, `text.matches`, and `text.replace` include
+selector and bound descriptions. Match fields come from the same Rust record that
+constructs runtime results. HTTP `stream`/`maxCaptureBytes` and streamed response
+`chunks`/`close` are documented in the registered schema, not in editor-only data.
 
 HTTP response references describe decoded native `.body` values and normalized
 `.mediaType`; `.bodyBytes` retains the representation bytes. The old response

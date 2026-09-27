@@ -1,0 +1,39 @@
+// No network or input files needed.
+// mettle run examples/language/text.mettle
+// mettle test examples/language/text.mettle
+// Append --raw for just the result, or --raw > result.json to save it.
+
+flow main {
+    parts = text.split("Ada, Lin; Grace", regex: "[,;]\\s*")
+    match = text.find("é id=1042", regex: "(?P<id>[0-9]+)")
+    assert(match is object)
+    assert(match.start == 5)
+    assert(match.end == 9)
+    assert(match.namedGroups.id == "1042")
+
+    selected = for name in parts {
+        if (name == "Grace") { break }
+        name
+    }
+    return {
+        names: selected
+        id: match.groups[0] as integer
+        label: text.replace("request-id", text: "-", with: "_")
+        valid: text.matches("1042", regex: "^[0-9]+$")
+    }
+}
+
+test "literal splitting keeps empty parts and an explicit remainder" {
+    assert(text.split(",a,,", ",") == ["", "a", "", ""])
+    assert(text.split("a,b,c", separator: ",", limit: 2) == ["a", "b,c"])
+}
+
+test "find results are optional native objects, not regex value types" {
+    assert(text.find("hello", text: "missing") is null)
+    matches = text.findAll("a1 b2", regex: "[0-9]+")
+    assert(matches[0].text == "1")
+    assert(matches[1].text == "2")
+    optional = text.find("12", regex: "([0-9]+)(x)?")
+    assert(optional.groups[1] is null)
+    assert(text.replace("12", regex: "[0-9]", with: "$1") == "$1$1")
+}

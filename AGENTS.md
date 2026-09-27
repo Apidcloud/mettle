@@ -57,6 +57,15 @@ indefinitely.
 - Preserve structured concurrency: work has an owner, cancellation propagates,
   cleanup is bounded, and queues, concurrency, capture, and metrics remain bounded.
   Do not introduce detached runtime work or blocking I/O on async execution paths.
+- Keep generated `source`/`yield` production pull-driven and single-consumer; a
+  consumer drop, early HTTP response, or entry cancellation must stop its owned
+  production work. `break` stays within the nearest collection loop and cannot
+  escape a producer or execution-policy boundary.
+- Streamed HTTP responses belong to the entry's `IoContext`. Keep `.chunks` raw
+  and single-consumer, `.body`/`.bodyBytes` one shared bounded capture, and
+  `close()`/entry cleanup prompt and idempotent. Observation, CLI reports, and LSP
+  must snapshot metadata without acquiring or retaining live body handles. A
+  final execution result cannot contain live responses or sources.
 - Preserve sensitive-value metadata and redaction through transformations,
   diagnostics, reports, and editor output. Never commit real credentials; checked-in
   environment examples and TLS material are local fixtures only.

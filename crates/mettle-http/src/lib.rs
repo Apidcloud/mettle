@@ -24,6 +24,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 mod incoming;
 mod outgoing;
 mod request_body;
+mod response_stream;
 mod schema;
 #[cfg(test)]
 mod streaming_tests;
@@ -146,6 +147,17 @@ impl HttpCapability {
             usize::try_from(mettle_capability::DEFAULT_READ_BYTES).expect("default response bound"),
             span,
         )?;
+        let stream_response = match options.get("stream").map(Value::revealed) {
+            None => false,
+            Some(Value::Boolean(value)) => *value,
+            _ => return Err(CapabilityError::new("stream must be a boolean", span)),
+        };
+        let max_capture_bytes = option_usize(
+            &options,
+            "maxCaptureBytes",
+            usize::try_from(mettle_capability::DEFAULT_READ_BYTES).expect("default capture bound"),
+            span,
+        )?;
         let verify_certificates = options
             .get("tls")
             .and_then(Value::as_object)
@@ -162,6 +174,12 @@ impl HttpCapability {
             ));
         }
         let prepared = outgoing::prepare(&options, span)?;
+        // A server may echo or transform a sensitive request payload. Keep that
+        // content protected in both complete and deferred response views.
+        let payload_sensitive = options
+            .get("body")
+            .or_else(|| options.get("json"))
+            .is_some_and(Value::contains_sensitive);
         let upload = Arc::new(UploadControl::default());
         let _upload_guard = UploadGuard(upload.clone());
         let mut request = Request::builder().method(method.clone()).uri(uri);
@@ -223,6 +241,9 @@ impl HttpCapability {
             })?;
 
             upload.stop();
+            if let Some(error) = upload.error.lock().expect("upload error lock").clone() {
+                return Err(error);
+            }
 
             let status = response.status().as_u16();
             let has_no_body = incoming::bodyless(&method, status);
@@ -253,8 +274,57 @@ impl HttpCapability {
                     (name.as_str().to_owned(), value)
                 })
                 .collect::<BTreeMap<_, _>>();
+            if stream_response {
+                let streamed = response_stream::ResponseStream::new(
+                    response_body,
+                    parts.headers,
+                    response_stream::Settings {
+                        media: media.clone(),
+                        bodyless: has_no_body,
+                        deadline,
+                        max_transfer: max_response_bytes,
+                        max_capture: max_capture_bytes.min(max_response_bytes),
+                        sensitive: payload_sensitive,
+                        span,
+                    },
+                    context,
+                )?;
+                let mut value = schema::ResponseValue {
+                    body: streamed.field(response_stream::FieldKind::Body),
+                    body_bytes: streamed.field(response_stream::FieldKind::Bytes),
+                    duration: Value::Duration(started.elapsed()),
+                    headers: Value::Object(headers),
+                    media_type: media
+                        .map_or(Value::Null, |media| Value::String(media.normalized())),
+                    method: Value::String(method.to_string()),
+                    status: Value::Integer(i64::from(status)),
+                    url: if url_sensitive {
+                        Value::String(url).sensitive()
+                    } else {
+                        Value::String(url)
+                    },
+                }
+                .into_value();
+                let Value::Object(fields) = &mut value else {
+                    unreachable!()
+                };
+                let Value::Object(extra) = (schema::StreamFields {
+                    chunks: streamed.chunks(context),
+                    close: streamed.field(response_stream::FieldKind::Close),
+                })
+                .into_value() else {
+                    unreachable!()
+                };
+                fields.extend(extra);
+                return Ok(value);
+            }
             let bytes = read_bounded_body(response_body, max_response_bytes, span).await?;
             let body_bytes = Value::Bytes(Arc::from(bytes));
+            let body_bytes = if payload_sensitive {
+                body_bytes.sensitive()
+            } else {
+                body_bytes
+            };
             let decoded = incoming::decode(
                 &body_bytes,
                 media.as_ref(),
@@ -348,7 +418,10 @@ impl Capability for HttpCapability {
             .iter()
             .map(|(name, value)| (name.clone(), value.to_string()))
             .collect();
-        let payload = fields.get("body").cloned();
+        let payload = fields
+            .get("body")
+            .filter(|value| !matches!(value.revealed(), Value::Deferred(_)))
+            .cloned();
         let mut sections = vec![ReportSection::Fields {
             title: "Headers".to_owned(),
             fields: header_fields,
@@ -361,7 +434,11 @@ impl Capability for HttpCapability {
         }
         Some(OperationReport {
             summary: format!("{method:<6} {url}"),
-            outcome: status.to_string(),
+            outcome: if fields.contains_key("chunks") {
+                format!("{status} (headers received; body not captured)")
+            } else {
+                status.to_string()
+            },
             outcome_kind: match status {
                 200..=399 => ReportOutcome::Success,
                 400..=499 => ReportOutcome::Warning,
@@ -380,6 +457,15 @@ impl Capability for HttpCapability {
         span: Span,
     ) -> CapabilityFuture<'_> {
         Box::pin(async move {
+            if options
+                .get("stream")
+                .is_some_and(|value| matches!(value.revealed(), Value::Boolean(true)))
+            {
+                return Err(CapabilityError::new(
+                    "streamed HTTP responses require an execution-owned I/O context",
+                    span,
+                ));
+            }
             let context = IoContext::new(std::env::current_dir().map_err(|error| {
                 CapabilityError::new(
                     format!("could not determine execution directory: {error}"),

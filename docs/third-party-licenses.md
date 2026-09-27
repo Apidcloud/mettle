@@ -4,6 +4,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 
 | Package | Version | Declared licence |
 | --- | --- | --- |
+| `aho-corasick` | `1.1.5` | `Unlicense OR MIT` |
 | `atomic-waker` | `1.1.2` | `Apache-2.0 OR MIT` |
 | `bytes` | `1.12.1` | `MIT` |
 | `cc` | `1.4.6` | `MIT OR Apache-2.0` |
@@ -33,6 +34,9 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `pin-project-lite` | `0.2.17` | `Apache-2.0 OR MIT` |
 | `proc-macro2` | `1.0.107` | `MIT OR Apache-2.0` |
 | `quote` | `1.0.47` | `MIT OR Apache-2.0` |
+| `regex` | `1.13.1` | `MIT OR Apache-2.0` |
+| `regex-automata` | `0.4.18` | `MIT OR Apache-2.0` |
+| `regex-syntax` | `0.8.11` | `MIT OR Apache-2.0` |
 | `ring` | `0.17.14` | `Apache-2.0 AND ISC` |
 | `rustls` | `0.23.45` | `Apache-2.0 OR ISC OR MIT` |
 | `rustls-pki-types` | `1.15.1` | `MIT OR Apache-2.0` |
@@ -49,6 +53,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `subtle` | `2.6.1` | `BSD-3-Clause` |
 | `syn` | `3.0.5` | `MIT OR Apache-2.0` |
 | `tokio` | `1.53.1` | `MIT` |
+| `tokio-macros` | `2.7.2` | `MIT` |
 | `tokio-rustls` | `0.26.5` | `MIT OR Apache-2.0` |
 | `toml` | `1.1.6+spec-1.1.0` | `MIT OR Apache-2.0` |
 | `toml_datetime` | `1.1.1+spec-1.1.0` | `MIT OR Apache-2.0` |

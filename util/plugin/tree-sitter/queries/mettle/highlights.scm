@@ -17,6 +17,8 @@
 "return" @keyword.return
 ["if" "else"] @keyword.conditional
 ["for" "in"] @keyword.repeat
+["break" "yield"] @keyword.return
+(source_expression "source" @keyword)
 ["within" "retry" "parallel" "rate" "concurrency"] @keyword
 ["assert" "fail"] @function.builtin
 ["and" "or" "not" "is" "as"] @keyword.operator

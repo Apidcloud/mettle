@@ -132,6 +132,8 @@ fn instructions(
 ) {
     for instruction in body {
         match instruction {
+            Instruction::Break(_) => {}
+            Instruction::Yield(value) => expression(value, locals, origins, capabilities, errors),
             Instruction::Bind {
                 slot,
                 expression: value,
@@ -183,6 +185,7 @@ fn expression(
     let mut visit =
         |value: &PlanExpression| expression(value, locals, origins, capabilities, errors);
     match &value.kind {
+        PlanExpressionKind::ResourceCall { receiver, .. } => visit(receiver),
         PlanExpressionKind::Member {
             value: object,
             member,
@@ -248,7 +251,10 @@ fn expression(
                 }
             }
         }
-        PlanExpressionKind::Block {
+        PlanExpressionKind::Source {
+            instructions: body, ..
+        }
+        | PlanExpressionKind::Block {
             instructions: body, ..
         } => instructions(body, &mut locals.clone(), origins, capabilities, errors),
         PlanExpressionKind::For {

@@ -57,6 +57,8 @@ pub struct MettlePlan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
+    Break(Span),
+    Yield(PlanExpression),
     Echo {
         value: PlanExpression,
         span: Span,
@@ -104,6 +106,14 @@ pub struct PlanExpression {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanExpressionKind {
+    Source {
+        instructions: Vec<Instruction>,
+        local_count: usize,
+    },
+    ResourceCall {
+        receiver: Box<PlanExpression>,
+        method: String,
+    },
     Constant(Constant),
     Local(usize),
     Context(usize),
@@ -236,8 +246,10 @@ impl ValueType {
 const fn schema_value_type(schema: SchemaType) -> ValueType {
     match schema {
         SchemaType::Boolean => ValueType::Boolean,
+        SchemaType::Array | SchemaType::ObjectArray(_) => ValueType::Array,
         SchemaType::Value
         | SchemaType::NullableString
+        | SchemaType::NullableObject(_)
         | SchemaType::Body
         | SchemaType::Json
         | SchemaType::Writable

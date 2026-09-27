@@ -1600,6 +1600,7 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
         ExpressionKind::Call { .. }
         | ExpressionKind::Fail(_)
         | ExpressionKind::Block(_)
+        | ExpressionKind::Source(_)
         | ExpressionKind::For { .. }
         | ExpressionKind::Member { .. }
         | ExpressionKind::Index { .. }

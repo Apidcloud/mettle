@@ -36,6 +36,8 @@ jobs:
         run: python scripts/acceptance-filesystem.py
       - name: Exercise codecs and representation metadata
         run: python scripts/acceptance-content.py
+      - name: Exercise producers and streamed responses
+        run: python scripts/acceptance-streaming.py
 
   repository-checks:
     name: Repository checks

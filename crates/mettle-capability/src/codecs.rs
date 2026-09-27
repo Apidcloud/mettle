@@ -1,6 +1,8 @@
 //! Built-in codec capabilities exposed through the same compiler interface as I/O.
 
 use crate::content::BuiltinCodec;
+#[path = "text_ops.rs"]
+mod text_ops;
 use crate::documentation::{DefaultValue, OperationDocumentation};
 
 use crate::{
@@ -86,6 +88,11 @@ const TEXT_OPERATIONS: &[OperationSchema] = &[
         mutually_exclusive: &[],
         result: SchemaType::String,
     },
+    text_ops::SPLIT,
+    text_ops::MATCHES,
+    text_ops::FIND,
+    text_ops::FIND_ALL,
+    text_ops::REPLACE,
 ];
 const BYTE_OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
@@ -139,7 +146,7 @@ pub const JSON_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
 pub const TEXT_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     removed_result_fields: &[],
     name: "text",
-    description: "Protocol-independent UTF-8 text encoding and strict decoding.",
+    description: "Protocol-independent UTF-8 codecs and bounded literal/regex string operations.",
     constants: &[CapabilityConstant {
         name: "mediaType",
         description: MEDIA_TYPE_DESCRIPTION,
@@ -175,6 +182,11 @@ impl Capability for CodecCapability {
         match operation {
             0 => "encode",
             1 => "decode",
+            2 if self.0 == BuiltinCodec::Text => "split",
+            3 if self.0 == BuiltinCodec::Text => "matches",
+            4 if self.0 == BuiltinCodec::Text => "find",
+            5 if self.0 == BuiltinCodec::Text => "findAll",
+            6 if self.0 == BuiltinCodec::Text => "replace",
             _ => "unknown",
         }
     }
@@ -186,6 +198,12 @@ impl Capability for CodecCapability {
         span: Span,
     ) -> CapabilityFuture<'_> {
         Box::pin(async move {
+            if self.0 == BuiltinCodec::Text && operation >= 2 {
+                let context = crate::IoContext::new(std::path::PathBuf::new());
+                let result = text_ops::invoke(operation, arguments, options, span, &context).await;
+                context.cleanup().await?;
+                return result;
+            }
             let value = arguments
                 .first()
                 .ok_or_else(|| CapabilityError::new("codec requires an input value", span))?;
@@ -206,6 +224,22 @@ impl Capability for CodecCapability {
                 _ => Err(CapabilityError::new("unknown codec operation", span)),
             }
         })
+    }
+    fn invoke_with_context<'a>(
+        &'a self,
+        operation: usize,
+        arguments: Vec<Value>,
+        options: Object,
+        span: Span,
+        context: &'a crate::IoContext,
+    ) -> CapabilityFuture<'a> {
+        if self.0 == BuiltinCodec::Text && operation >= 2 {
+            Box::pin(text_ops::invoke(
+                operation, arguments, options, span, context,
+            ))
+        } else {
+            self.invoke(operation, arguments, options, span)
+        }
     }
     fn observed_result(&self, _operation: usize, result: &Value) -> Value {
         let value = Value::String(format!("{} value", result.type_name()));

@@ -6,7 +6,9 @@ tests, contexts, namespaces, conditionals, assertions, calls and option blocks,
 structured and load policies, `for` expressions, `fail()`, named arguments and
 parallel branches, values, member/index access, and interpolation. It supports
 optional declaration parentheses, trailing commas in arrays/calls/policy options,
-signed and base-prefixed numbers, exponents, and fractional durations.
+signed and base-prefixed numbers, exponents, and fractional durations, plus lazy
+`source { ... }` producers, `yield` statements, and loop `break`. `source` remains
+usable as a variable, parameter, or field name outside a producer expression.
 Built-in `is`/`as` kind operations have matching Rust precedence, including
 continuations across comments/newlines and use inside loop iterables.
 The compiler remains responsible for name resolution, valid call targets,

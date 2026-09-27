@@ -60,6 +60,9 @@ macro_rules! keywords {
 }
 
 keywords! {
+    Break => ("break", "break", "Exit the nearest collection loop. A value-producing loop returns only completed iterations. It does not exit the flow or an enclosing source producer; producer completion still ends its body normally. Cannot cross execution-policy or source boundaries.", "flow main { for value in [1, 2] { if (value == 2) { break } }\n 42 }", &[]),
+    Yield => ("yield", "yield content", "Supply UTF-8 string or byte content from a lazy source producer under backpressure. Production pauses until the consumer asks for more. A piece is not a packet, flush, or remote acceptance. Only valid inside its source block; aliases cannot duplicate consumption.", "flow main { content = source { yield \"Hello\" }\n 42 }", &[("content", "String encoded as UTF-8 or bytes transmitted unchanged; other kinds fail.")]),
+    Source => ("source", "source { ... yield content ... }", "Create an execution-owned, single-consumer byte source without running its body. Capture bindings at construction, then produce on demand. Normal completion ends the source; dropping its consumer stops production. It cannot escape as an execution result. Producers are bounded to 1 GiB and 30 seconds from consumption, and their content is conservatively sensitive. Contextual keyword: existing variables/fields named source remain valid. Also names the primitive source kind in is/as operations.", "flow main { content = source { yield \"Hello\" }\n content is source }", &[]),
     If => ("if", "if (condition) { ... } else { ... }", "Execute only the selected statement branch. The condition must be boolean, and branch bindings stay local. Use return in branches for an early flow result; if is not a value expression.", "flow main { if (true) { return 1 } else { return 2 } }", &[]),
     For => ("for", "for value in collection { ... }", "Iterate an array or object sequentially. A value-producing loop maps into a collection of the same shape; a statement loop need not collect a result. Use two bindings (`for key, value in ...`) to access the array index or object key. This does not create parallel work or consume byte sources.", "flow main = for value in [1, 2] { value }", &[]),
     In => ("in", "for key, value in collection { ... }", "Separate loop bindings from an array or object to iterate. A single binding receives the value; two bindings receive index/key and value. Each iteration has its own local bindings.", "flow main = for index, value in [10, 20] { { index: index, value: value } }", &[]),
@@ -150,12 +153,36 @@ pub fn at(source: &str, byte: usize) -> Option<(&'static str, Span)> {
         let kind = ValueKind::parse(source.get(token.span.start..token.span.end)?)?;
         return Some((kind.name(), token.span));
     }
+    if matches!(token.kind, TokenKind::Source)
+        && !tokens
+            .get(index + 1)
+            .is_some_and(|next| matches!(next.kind, TokenKind::LeftBrace))
+    {
+        // Contextual keyword: an existing binding or field named `source` is not
+        // producer syntax, and compiler-backed variable hover should win.
+        return None;
+    }
     Some((keyword_name(&token.kind)?, token.span))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_hovers_only_when_it_starts_a_producer_or_kind_operation() {
+        let variable = "flow main { source = 1\n source }";
+        let binding = variable.find("source").unwrap();
+        let reference = variable.rfind("source").unwrap();
+        assert!(at(variable, binding).is_none());
+        assert!(at(variable, reference).is_none());
+        let producer = "flow main = source { yield \"x\" }";
+        assert_eq!(
+            at(producer, producer.find("source").unwrap()).unwrap().0,
+            "source"
+        );
+        let kind = "flow main = value is source";
+        assert_eq!(at(kind, kind.rfind("source").unwrap()).unwrap().0, "source");
+    }
     #[test]
     fn keyword_hovers_include_parameters_without_duplicating_reference_descriptions() {
         for item in KEYWORDS {
@@ -183,7 +210,12 @@ mod tests {
             assert_eq!(keyword_name(&token), Some(item.name));
             assert!(!item.description.is_empty());
             crate::parse(item.example).unwrap_or_else(|error| panic!("{}: {error}", item.name));
-            assert_eq!(at(item.name, 0).unwrap().0, item.name);
+            let spelling = if item.name == "source" {
+                "source { yield \"x\" }"
+            } else {
+                item.name
+            };
+            assert_eq!(at(spelling, 0).unwrap().0, item.name);
         }
         assert!(at("// assert(true)", 3).is_none());
         assert!(at("\"use context\"", 1).is_none());

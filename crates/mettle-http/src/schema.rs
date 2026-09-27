@@ -21,6 +21,8 @@ const FIELD_MAX_RESPONSE_BYTES: FieldSchema =
             "Positive response-body bound, enforced from Content-Length and during acquisition.",
         )
         .with_default(DefaultValue::Bytes(mettle_capability::DEFAULT_READ_BYTES));
+const FIELD_STREAM: FieldSchema = FieldSchema::new("stream", SchemaType::Boolean).documented("Return at final response headers instead of buffering the body. response.chunks is a single-consumer byte source; reading body/bodyBytes acquires a bounded shared capture. Consume or close before entry exit.").with_default(DefaultValue::Boolean(false));
+const FIELD_MAX_CAPTURE_BYTES: FieldSchema = FieldSchema::new("maxCaptureBytes", SchemaType::Integer).documented("Maximum complete capture through streamed response.body/bodyBytes, also capped by maxResponseBytes. Does not restrict streaming response.chunks.").with_default(DefaultValue::Bytes(mettle_capability::DEFAULT_READ_BYTES));
 const FIELD_JSON: FieldSchema = FieldSchema::new("json", SchemaType::Json)
     .documented("Legacy JSON payload. Prefer body; json and body are mutually exclusive.");
 const FIELD_BODY: FieldSchema = FieldSchema::new("body", SchemaType::Body).documented("Objects, arrays, numbers, booleans, and null are encoded as JSON; strings as UTF-8 text. Bytes and byte sources are sent unchanged. Use `mediaType` to select the encoding for ordinary values.");
@@ -35,14 +37,20 @@ const FIELD_MAX_BODY_BYTES: FieldSchema = FieldSchema::new("maxBodyBytes", Schem
     });
 mettle_capability::result_object! {
     pub(crate) struct ResponseValue {
-        body => ("body", SchemaType::Value, "Complete decoded response value. JSON/+json produces native values; text/* produces a UTF-8 string; missing/unknown content types produce bytes. HEAD/204/205/304 have null bodies. A media type does not prove application fields exist."),
-        body_bytes => ("bodyBytes", SchemaType::Bytes, "Complete bounded response representation bytes."),
-        duration => ("duration", SchemaType::Duration, "Elapsed duration of the complete request."),
+        body => ("body", SchemaType::Value, "Decoded native response value. JSON/+json produces native values; text/* produces a UTF-8 string; missing/unknown content types produce bytes. HEAD/204/205/304 have null bodies. With stream: true, access acquires the complete bounded body and shares its capture with bodyBytes; cannot mix with chunks consumption. A media type does not prove application fields exist."),
+        body_bytes => ("bodyBytes", SchemaType::Bytes, "Complete bounded response representation bytes. With stream: true, access acquires and caches the body; cannot mix with chunks consumption."),
+        duration => ("duration", SchemaType::Duration, "Elapsed duration until the call returns: complete body normally, final response headers with stream: true."),
         headers => ("headers", SchemaType::StringMap, "Response headers; credential-bearing values retain sensitivity."),
         media_type => ("mediaType", SchemaType::NullableString, "Normalized Content-Type string, preserving explicit parameters, or null when absent. No content sniffing, inferred type, or implicit charset parameter is added. The original header remains in headers."),
         method => ("method", SchemaType::String, "HTTP method used for this request."),
         status => ("status", SchemaType::Integer, "Numeric HTTP response status; error statuses are returned rather than thrown automatically."),
         url => ("url", SchemaType::String, "Resolved request URL; sensitive input remains redacted."),
+    }
+}
+mettle_capability::result_object! {
+    pub(crate) struct StreamFields {
+        chunks => ("chunks", SchemaType::Source, "Only present with stream: true. Single-consumer raw response bytes; aliases share the claim. Protocol/encoding processing is not applied. Consume with fs.write or explicitly capture body/bodyBytes instead."),
+        close => ("close", SchemaType::Value, "Only present with stream: true. Call response.close() to abandon an unread or partial body. Idempotent; does not promise closure of the physical pooled connection. Entry exit also releases unread transfers."),
     }
 }
 const TLS_FIELDS: &[FieldSchema] = &[FIELD_VERIFY_CERTIFICATES];
@@ -53,6 +61,8 @@ const COMMON_OPTIONS: &[FieldSchema] = &[
     FIELD_HEADERS,
     FIELD_TLS,
     FIELD_MAX_RESPONSE_BYTES,
+    FIELD_STREAM,
+    FIELD_MAX_CAPTURE_BYTES,
 ];
 
 const NO_BODY_OPTIONS: &[FieldSchema] = COMMON_OPTIONS;
@@ -63,6 +73,8 @@ const BODY_OPTIONS: &[FieldSchema] = &[
     FIELD_HEADERS,
     FIELD_TLS,
     FIELD_MAX_RESPONSE_BYTES,
+    FIELD_STREAM,
+    FIELD_MAX_CAPTURE_BYTES,
     FIELD_JSON,
     FIELD_BODY,
     FIELD_MEDIA_TYPE,
@@ -72,7 +84,18 @@ const BODY_OPTIONS: &[FieldSchema] = &[
 const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
 const NO_CONFLICTS: &[&[&str]] = &[];
 
-const RESPONSE_FIELDS: &[FieldSchema] = ResponseValue::FIELDS;
+const RESPONSE_FIELDS: &[FieldSchema] = &[
+    ResponseValue::FIELDS[0],
+    ResponseValue::FIELDS[1],
+    ResponseValue::FIELDS[2],
+    ResponseValue::FIELDS[3],
+    ResponseValue::FIELDS[4],
+    ResponseValue::FIELDS[5],
+    ResponseValue::FIELDS[6],
+    ResponseValue::FIELDS[7],
+    StreamFields::FIELDS[0],
+    StreamFields::FIELDS[1],
+];
 
 const RESPONSE_BEHAVIOR: &str = "HTTP error statuses are returned normally; use assertions to check success. Network, TLS, timeout, and body-limit errors fail the call.";
 const RESPONSE_NOTES: &[&str] = &[RESPONSE_BEHAVIOR];

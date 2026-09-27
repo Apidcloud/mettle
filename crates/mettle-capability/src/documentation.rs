@@ -216,7 +216,10 @@ pub fn operation_reference(
 }
 
 fn append_fields(output: &mut String, kind: SchemaType, prefix: &str) {
-    if let SchemaType::Object(fields) = kind {
+    if let SchemaType::Object(fields)
+    | SchemaType::NullableObject(fields)
+    | SchemaType::ObjectArray(fields) = kind
+    {
         for field in fields {
             let _ = write!(
                 output,

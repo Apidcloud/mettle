@@ -2,6 +2,9 @@
 
 ## 1.0.0-alpha.1
 
+- Add `source`/`yield` and `break` highlighting/snippets, a streamed-download
+  snippet, and schema-backed hovers for bounded text/regex and live HTTP fields.
+
 - Add compiler-backed binding/field hovers with native kinds, known shapes,
   helper/alias propagation, context values, and safe sensitivity metadata.
 

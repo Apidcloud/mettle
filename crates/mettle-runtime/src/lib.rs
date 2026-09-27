@@ -193,6 +193,8 @@ struct ActiveContext {
 }
 
 mod execution;
+#[cfg(test)]
+mod producer_tests;
 pub use execution::Runtime;
 
 struct ActiveIteration<'a> {

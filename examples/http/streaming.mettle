@@ -1,0 +1,68 @@
+// Start the local fixture in another terminal:
+// python3 util/test-server/http_fixture.py --port 8080
+// From the repository root:
+// mettle run examples/http/streaming.mettle
+// mettle test examples/http/streaming.mettle --jobs 2
+// Append --raw for just the result, or --raw > result.json to save it.
+// Downloads are written under target/, with explicit overwrite for repeated runs.
+
+use context {
+    defaults http {
+        baseUrl: "http://127.0.0.1:8080"
+        headers: { Authorization: "Bearer local-test-token" }
+        timeout: 5s
+    }
+}
+
+/// Inspect headers before streaming raw representation bytes directly into a file.
+/// @param url Resource to download.
+/// @param destination Output path, relative to the CLI invocation directory.
+/// @returns Filesystem write result, not the live response handle.
+flow download(url, destination) {
+    response = http.get(url, stream: true, maxResponseBytes: 104857600)
+    assert(response.status == 200)
+    // This does not build a complete body in memory. Chunk iteration is future work.
+    fs.write(destination, response.chunks, overwrite: true)
+}
+
+/// Send generated lines progressively. Ordinary POST still returns a complete response.
+/// @param parts Lines to send. EOF follows successful producer-block completion.
+/// @returns Public completion marker; generated content/counts remain protected.
+flow upload(parts) {
+    response = http.post("/upload", mediaType: text.mediaType, body: source {
+        for line in parts { yield "${line}\n" }
+    })
+    assert(response.status == 201)
+    assert(response.body.chunked == true)
+    { status: response.status, accepted: true }
+}
+
+flow main = parallel(limit: 4) {
+    objectDownload: download("/content/object", "target/stream-object.json")
+    textDownload: download("/content/text", "target/stream-text.txt")
+    firstUpload: upload(["first", "second"])
+    secondUpload: upload(["another", "upload"])
+}
+
+test "header inspection and bounded decoded capture" {
+    response = http.get("/content/object", stream: true, maxCaptureBytes: 1024)
+    assert(response.status == 200)
+    assert(response.mediaType == json.mediaType)
+    assert(response.body.name == "Ada")
+    assert(json.decode(response.bodyBytes).name == "Ada")
+    assert(response.body.name == "Ada")
+}
+
+test "close an unwanted response without capturing its body" {
+    response = http.get("/content/error", stream: true)
+    assert(response.status == 422)
+    response.close()
+    response.close()
+}
+
+test "an early final response stops production, not the caller" {
+    response = http.post("/reject-upload", body: source {
+        for part in ["first", "second", "third"] { yield part }
+    })
+    assert(response.status == 413)
+}

@@ -331,6 +331,60 @@ Named `parallel` branches produce an object and attach labels such as `[p1:users
 
 Integers accept decimal (`1_000`), hexadecimal (`0xFF`), and binary (`0b1010`) forms; `-` works with integer and decimal values. Decimals also accept exponents such as `1.25e2`. Durations use `ns`, `us`, `ms`, `s`, `m`, or `h`, including exact fractional forms such as `1.5s` and `0.25ms`. Fractions smaller than one nanosecond, negative durations, non-finite decimals, malformed separators, and out-of-range integers are rejected. Integers remain signed 64-bit values for now; incoming HTTP JSON integers outside that range fail explicitly instead of rounding. Integer and decimal comparisons are numeric without rounding a large integer first. There are no percent, rate, or byte-size suffixes yet; `0xFF` is an integer, not raw bytes.
 
+### Text operations and loop break
+
+```mettle
+parts = text.split("Ada, Lin; Grace", regex: "[,;]\\s*")
+literalParts = text.split("a,b,", ",")
+sameParts = text.split("a,b,", separator: ",")
+valid = text.matches("1042", regex: "^[0-9]+$")
+match = text.find("é id=1042", regex: "(?P<id>[0-9]+)")
+matches = text.findAll("a1 b2", regex: "[0-9]+")
+label = text.replace("request-id", text: "-", with: "_")
+```
+
+`split` takes exactly one literal `separator` or `regex`. Literal separators must
+be nonempty; regex separators that match zero-width positions are rejected.
+Leading, consecutive, and trailing empty parts are preserved. `limit: 2` splits
+`"a,b,c"` into `["a", "b,c"]`, retaining the unsplit remainder.
+
+`find`, `findAll`, and `replace` take exactly one `text` or `regex` selector.
+`find` returns the first match or null; `findAll` returns an array, empty when
+there are no matches. A match is an ordinary native object:
+
+```mettle
+{ text: "1042", start: 5, end: 9, groups: ["1042"], namedGroups: { id: "1042" } }
+```
+
+Offsets count Unicode scalar values (not UTF-8 bytes or grapheme clusters), with
+an exclusive end. `groups[0]` is the first capturing group, not the whole match;
+unmatched optional captures are null. `matches` checks for a match anywhere;
+anchors make a whole-string check. Replacements are always literal: `$1` is not
+a capture template. Regex uses Rust regex syntax, including inline flags such as
+`(?i)`, without lookaround or backreferences; patterns remain ordinary strings.
+
+Processing is execution-owned and bounded. `maxBytes` limits input, result text,
+and capture bookkeeping (default 1 MiB, hard maximum 10 MiB). Selectors are at
+most 4096 bytes; compiled regex is at most 64 KiB with nesting at most 64.
+A 32 MiB pattern-weighted search budget also bounds repeated searches.
+`limit` defaults to 1000, at most 10,000; `findAll` and `replace` fail if another
+match exists instead of silently truncating. Sensitive inputs/options taint the
+result, and reports never capture these operations' payloads.
+These process complete strings, not incremental lines or arbitrary network chunks.
+
+`break` exits the nearest array/object loop, not its flow or source producer:
+
+```mettle
+selected = for name in parts {
+    if (name == "Grace") { break }
+    name
+}
+```
+
+A mapping returns only completed iterations. `break` cannot cross an execution
+policy or producer boundary, and statements after an unconditional break are
+unreachable. See [text examples](examples/language/text.mettle).
+
 ## Put shared setup in contexts
 
 Contexts hold immutable values and capability defaults. A flow applies one context with `use context`; child flows inherit its defaults. A file-level `use context` applies a default to every flow and test in that source file, regardless of where the directive appears; placing it near the top is the recommended convention. For one-file setup, use an anonymous `use context { ... }`. Name it with `use context name { ... }` only when it should also be reusable. Plain `context name { ... }` remains reusable without applying itself. A flow-level context overrides the file default. Contexts can compose, so base URLs, authentication, and service-specific settings can live separately.
@@ -722,6 +776,8 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `timeout` | Duration | Deadline for the complete request; default: 30 seconds |
 | `headers` | Object of strings | Request headers |
 | `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
+| `stream` | Boolean | Return at final response headers and expose a single-consumer body source; default: `false` |
+| `maxCaptureBytes` | Positive integer | Complete capture limit for streamed `.body`/`.bodyBytes`, also capped by `maxResponseBytes`; default: 10 MiB |
 | `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
 | `body` | JSON-compatible value, string, bytes, or byte source | Request payload for `post`, `put`, `patch`, or `delete` |
 | `mediaType` | String or codec media-type constant | Select representation encoding and generate `Content-Type` |
@@ -768,6 +824,80 @@ content types can select encoding, and buffered outgoing payloads have a bound.
 Check calls that previously used a deliberately mismatched header.
 A response declaring malformed JSON still fails clearly. Its size limit is
 enforced from `Content-Length` when available and during body acquisition.
+
+### Generated bodies and streamed responses
+
+Ordinary HTTP calls still return a complete, bounded response. To inspect headers
+before downloading the body, opt into `stream: true`:
+
+```mettle
+response = http.get("/export", stream: true, maxResponseBytes: 104857600)
+assert(response.status == 200)
+fs.write("./export.bin", response.chunks)
+```
+
+`status`, `headers`, `mediaType`, `method`, and `url` are immediately available.
+`duration` measures until the call returns: final headers in streamed mode, the
+complete body otherwise. CLI HTTP reporting explicitly says **headers received**
+for a streamed call; it does not claim body completion or implicitly read it.
+
+`response.chunks` is a raw byte source, suitable for `fs.write` or another request
+body. Accessing `response.body` or `.bodyBytes` instead acquires a bounded complete
+capture; those fields share its cache, including concurrent aliases. Decoding is
+selected from Content-Type as usual. Once chunk consumption starts, complete
+capture is unavailable, and vice versa. Every chunk alias shares one consumption
+claim; construct a new request for a new read. Network/timeout/size errors can
+occur later during consumption even after successful headers.
+
+`maxResponseBytes` bounds the total representation transfer, including raw
+streaming; `maxCaptureBytes` separately bounds complete memory acquisition.
+The HTTP `timeout` starts at request creation and remains effective through body
+consumption. Sink/source deadlines can impose tighter limits. Raw chunks preserve
+the transmitted representation; no implicit decompression or record decoding
+occurs. Complete decoded capture still validates encoding and representation.
+
+Call `response.close()` when the body is unwanted. It is idempotent and abandons
+the body, not a promise to close the physical pooled connection. Entry completion,
+failure, and cancellation also release unread/partial responses without draining
+unbounded data. Helpers may pass live responses within their entry, but final
+execution results cannot contain live response fields or byte sources. There are
+at most 64 live streamed responses per entry; consume or close before opening more.
+
+For generated request content, use an ordinary `body` with a lazy producer:
+
+```mettle
+response = http.post("/upload", mediaType: text.mediaType, body: source {
+    for line in text.split(payload, "\n") {
+        yield "${line}\n"
+    }
+})
+assert(response.status == 201)
+```
+
+`source { ... }` snapshots bindings without executing its body. Consumption drives
+ordered `yield` of strings (UTF-8) or bytes under backpressure; successful block
+completion supplies EOF. A yield is not a packet boundary, flush, or remote
+acknowledgement. There is no public writer/exchange state to poll. Dropping a
+consumer or receiving an early final HTTP response stops production; the caller
+can still inspect that response. Producer failures fail the call, and terminal
+`fail` bypasses retry. Create fresh sources inside retries: aliases cannot replay.
+`break` ends a producer loop, letting the rest of its source block complete;
+`return` and `yield` outside their supported scopes fail compilation.
+
+Producers are limited to 1 GiB and 30 seconds from consumption, in addition to
+transfer/sink bounds. Their content is conservatively sensitive because it may
+read secrets later; derived content/counts stay protected. Response content also
+retains sensitivity when a request payload is sensitive, including deferred/raw
+views. Unopened sources can pass through helpers, but never escape their entry.
+`source` is contextual, so existing variables and fields named `source` still work.
+
+Use `fs.stream(path)` for unchanged large files; splitting a complete string does
+not make file reading incremental. For independent transfers, put helpers in
+named `parallel` branches, each owning its response/source. See
+[parallel streaming](examples/http/streaming.mettle) and
+[offline producers](examples/language/producers.mettle).
+Current `for` loops still iterate arrays/objects; source iteration, incremental
+SSE/record processors, custom codecs, and HTTP/2 are separate future phases.
 
 External data does not have to use Mettle identifier names. Use a quoted or computed string key after brackets for HTTP headers or JSON properties containing punctuation:
 
@@ -1024,7 +1154,7 @@ focused source modules.
 ## Current limits
 
 - no redirects or proxy discovery
-- request bodies support JSON, UTF-8 text, bytes, and filesystem byte sources; multipart forms and manual streaming exchanges are not implemented
+- request bodies support JSON, UTF-8 text, bytes, filesystem sources, and lazy generated byte producers; responses can stream raw bytes. Multipart forms and incremental decoded event/record iteration are not implemented
 - no workload ramping or distributed workers yet; operation metrics are local and source-site aggregated, not distributed traces
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS

@@ -22,7 +22,7 @@ const definition = {
     $._comparison_continuation, $._call_options_start, $._else_start, $._error_sentinel,
     $._type_continuation,
   ],
-  word: $ => $.identifier,
+  word: $ => $._identifier_word,
   conflicts: $ => [
     [$._positional_arguments], [$._named_arguments],
     [$._primary_expression, $._call_target],
@@ -34,7 +34,7 @@ const definition = {
       "flow", "test", "context", "namespace", "defaults", "use", "return", "assert",
       "if", "else", "and", "or", "not", "within", "retry", "parallel", "rate",
       "concurrency", "true", "false", "null", "for", "in", "fail",
-      "is", "as",
+      "is", "as", "yield", "break",
     ],
   },
 
@@ -62,10 +62,12 @@ const definition = {
     block: $ => block($, $._statement),
     _statement: $ => choice(
       $.context_use, $.binding, $.return_statement, $.assert_statement,
-      $.if_statement, $.expression_statement,
+      $.if_statement, $.expression_statement, $.yield_statement, $.break_statement,
     ),
     binding: $ => seq(field("name", $.identifier), "=", field("value", $._expression)),
     return_statement: $ => seq("return", $._expression),
+    yield_statement: $ => seq("yield", $._expression),
+    break_statement: _ => "break",
     assert_statement: $ => seq("assert", "(", $._expression, optional(seq(",", $._assertion_message)), ")"),
     _assertion_message: $ => choice($.string, alias($._parenthesized_message, $.parenthesized_expression)),
     _parenthesized_message: $ => seq("(", $._assertion_message, ")"),
@@ -92,7 +94,7 @@ const definition = {
       $.member_expression, $.index_expression,
       $.type_operation,
       $.within_expression, $.retry_expression, $.parallel_expression,
-      $.rate_expression, $.concurrency_expression, $.for_expression, $.fail_expression,
+      $.rate_expression, $.concurrency_expression, $.for_expression, $.fail_expression, $.source_expression,
     ),
     parenthesized_expression: $ => seq("(", $._expression, ")"),
     type_operation: $ => prec.left(PREC.kind, seq(
@@ -137,11 +139,14 @@ const definition = {
     parallel_body: $ => block($, choice($.named_branch, $._expression), true),
     named_branch: $ => seq(field("name", $.identifier), ":", field("value", $._expression)),
     fail_expression: $ => seq("fail", "(", $._expression, ")"),
+    source_expression: $ => prec(1, seq("source", $.block)),
     for_expression: $ => seq("for", optional(seq(field("key", $.identifier), ",")),
       field("value", $.identifier), "in", field("iterable", $._iterable_expression),
       field("body", $.block)),
 
-    identifier: _ => /[A-Za-z_][A-Za-z0-9_]*/,
+    // Contextual producer keyword: retain existing variables/fields named source.
+    identifier: $ => choice($._identifier_word, "source"),
+    _identifier_word: _ => /[A-Za-z_][A-Za-z0-9_]*/,
     integer: _ => /-?(0[xX][0-9a-fA-F](_?[0-9a-fA-F])*|0[bB][01](_?[01])*|[0-9](_?[0-9])*)/,
     float: _ => /-?[0-9](_?[0-9])*(\.[0-9](_?[0-9])*([eE][+-]?[0-9](_?[0-9])*)?|[eE][+-]?[0-9](_?[0-9])*)/,
     duration: _ => /[0-9](_?[0-9])*(\.[0-9](_?[0-9])*)?(ns|us|ms|s|m|h)/,
@@ -172,7 +177,7 @@ const iterableRules = new Set([
   "concurrency_expression", "timeout_option", "attempts_option", "delay_option", "limit_option",
   "target_option", "period_option", "duration_option", "expression_body", "parallel_body",
   "named_branch", "fail_expression", "for_expression", "block", "_statement", "binding",
-  "return_statement", "assert_statement", "if_statement", "expression_statement",
+  "return_statement", "assert_statement", "if_statement", "expression_statement", "source_expression", "yield_statement", "break_statement",
 ]);
 const iterableName = name => `_iterable_${name.replace(/^_/, "")}`;
 function inIterable(rule, $) {

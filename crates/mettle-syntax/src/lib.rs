@@ -116,6 +116,11 @@ impl Program {
 
 fn set_statement_source(statement: &mut Statement, source: usize) {
     match statement {
+        Statement::Break(span) => *span = span.with_source(source),
+        Statement::Yield { expression, span } | Statement::Return { expression, span } => {
+            *span = span.with_source(source);
+            set_expression_source(expression, source);
+        }
         Statement::If {
             branches,
             else_body,
@@ -138,10 +143,6 @@ fn set_statement_source(statement: &mut Statement, source: usize) {
         Statement::UseContext { name, span } | Statement::Bind { name, span, .. } => {
             name.span = name.span.with_source(source);
             *span = span.with_source(source);
-        }
-        Statement::Return { expression, span } => {
-            *span = span.with_source(source);
-            set_expression_source(expression, source);
         }
         Statement::Assert {
             expression,
@@ -181,7 +182,7 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
                 set_field_source(field, source);
             }
         }
-        ExpressionKind::Block(statements) => {
+        ExpressionKind::Block(statements) | ExpressionKind::Source(statements) => {
             for statement in statements {
                 set_statement_source(statement, source);
             }
@@ -364,6 +365,11 @@ pub enum DeclarationKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
+    Break(Span),
+    Yield {
+        expression: Expression,
+        span: Span,
+    },
     If {
         branches: Vec<IfBranch>,
         else_body: Option<Vec<Statement>>,
@@ -394,7 +400,9 @@ impl Statement {
     #[must_use]
     pub const fn span(&self) -> Span {
         match self {
-            Self::If { span, .. }
+            Self::Break(span)
+            | Self::Yield { span, .. }
+            | Self::If { span, .. }
             | Self::UseContext { span, .. }
             | Self::Bind { span, .. }
             | Self::Return { span, .. }
@@ -435,6 +443,7 @@ pub enum ExpressionKind {
     Array(Vec<Expression>),
     Object(Vec<ObjectField>),
     Block(Vec<Statement>),
+    Source(Vec<Statement>),
     Fail(Box<Expression>),
     For {
         key: Option<Spanned<String>>,
@@ -604,6 +613,9 @@ enum TokenKind {
     Defaults,
     Use,
     Return,
+    Break,
+    Yield,
+    Source,
     Assert,
     Fail,
     Within,

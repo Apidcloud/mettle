@@ -81,6 +81,8 @@ struct Compiler<'a> {
     errors: Vec<CompileError>,
     call_edges: Vec<Vec<(usize, Span)>>,
     bindings: Vec<super::semantics::BindingSource>,
+    loop_depth: usize,
+    source_depth: usize,
 }
 
 impl<'a> Compiler<'a> {
@@ -95,6 +97,8 @@ impl<'a> Compiler<'a> {
             errors: Vec::new(),
             call_edges: vec![Vec::new(); program.flows.len()],
             bindings: Vec::new(),
+            loop_depth: 0,
+            source_depth: 0,
         }
     }
 
@@ -612,15 +616,48 @@ impl<'a> Compiler<'a> {
     ) -> (Vec<Instruction>, bool) {
         let mut instructions = Vec::new();
         let mut returned = false;
+        let mut stopped = false;
         for statement in statements {
-            if returned {
+            if returned || stopped {
                 self.errors.push(CompileError::new(
-                    "statement is unreachable because the flow already returned or failed",
+                    "statement is unreachable because the block already returned, failed, or broke",
                     statement.span(),
                 ));
                 continue;
             }
             match statement {
+                Statement::Break(span) => {
+                    if self.loop_depth == 0 {
+                        self.errors.push(CompileError::new(
+                            "`break` requires an enclosing loop in the same execution scope",
+                            *span,
+                        ));
+                    }
+                    instructions.push(Instruction::Break(*span));
+                    stopped = true;
+                }
+                Statement::Yield { expression, span } => {
+                    if self.source_depth == 0 {
+                        self.errors.push(CompileError::new(
+                            "`yield` is only allowed in a source producer",
+                            *span,
+                        ));
+                    }
+                    if let Some(value) =
+                        self.compile_expression(Some(flow_id), expression, locals, active_context)
+                    {
+                        if !matches!(
+                            value.value_type,
+                            ValueType::String | ValueType::Bytes | ValueType::Inferred
+                        ) {
+                            self.errors.push(CompileError::new(
+                                "`yield` requires a string or bytes",
+                                value.span,
+                            ));
+                        }
+                        instructions.push(Instruction::Yield(value));
+                    }
+                }
                 Statement::UseContext { span, .. } => {
                     if !top_level {
                         self.errors.push(CompileError::new(
@@ -868,6 +905,38 @@ impl<'a> Compiler<'a> {
                 let fields = self.compile_fields(current_flow, fields, locals, context, None);
                 (PlanExpressionKind::Object(fields), ValueType::Object)
             }
+            ExpressionKind::Source(statements) => {
+                let flow_id = current_flow?;
+                if let Some(span) = expression_block_return(statements) {
+                    self.errors.push(CompileError::new(
+                        "`return` cannot exit a source producer; let its block complete",
+                        span,
+                    ));
+                }
+                let mut scope = locals.clone();
+                let mut next_slot = locals.values().copied().max().map_or(0, |slot| slot + 1);
+                let flow = self.program.flows[flow_id].clone();
+                let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
+                self.source_depth += 1;
+                let (instructions, _) = self.compile_statements(
+                    flow_id,
+                    &flow,
+                    statements,
+                    &mut scope,
+                    &mut next_slot,
+                    context,
+                    false,
+                );
+                self.source_depth -= 1;
+                self.loop_depth = previous_loop;
+                (
+                    PlanExpressionKind::Source {
+                        instructions,
+                        local_count: next_slot,
+                    },
+                    ValueType::Source,
+                )
+            }
             ExpressionKind::Block(statements) => {
                 let flow_id = current_flow?;
                 if let Some(span) = expression_block_return(statements) {
@@ -888,6 +957,8 @@ impl<'a> Compiler<'a> {
                 let mut next_slot = locals.values().copied().max().map_or(0, |slot| slot + 1);
                 let mut flow = self.program.flows[flow_id].clone();
                 flow.kind = DeclarationKind::Flow;
+                let previous_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let previous_source = std::mem::replace(&mut self.source_depth, 0);
                 let (instructions, returns_value) = self.compile_statements(
                     flow_id,
                     &flow,
@@ -897,6 +968,8 @@ impl<'a> Compiler<'a> {
                     context,
                     false,
                 );
+                self.loop_depth = previous_loop;
+                self.source_depth = previous_source;
                 if !returns_value {
                     self.errors.push(CompileError::new(
                         "execution block must end with a value",
@@ -987,6 +1060,7 @@ impl<'a> Compiler<'a> {
                 }
                 let mut flow = self.program.flows[flow_id].clone();
                 flow.kind = DeclarationKind::Flow;
+                self.loop_depth += 1;
                 let (instructions, produces_value) = self.compile_statements(
                     flow_id,
                     &flow,
@@ -996,6 +1070,7 @@ impl<'a> Compiler<'a> {
                     context,
                     false,
                 );
+                self.loop_depth -= 1;
                 (
                     PlanExpressionKind::For {
                         iterable: Box::new(iterable),
@@ -1459,6 +1534,28 @@ impl<'a> Compiler<'a> {
             });
         }
 
+        if let Some((receiver, method)) = callee.value.rsplit_once('.')
+            && let root = receiver.split('.').next().unwrap_or(receiver)
+            && locals.contains_key(root)
+            && !self.capability_ids.contains_key(root)
+        {
+            if !arguments.is_empty() || !named_arguments.is_empty() || !options.is_empty() {
+                self.errors.push(CompileError::new(
+                    "owned resource operations currently take no arguments or options",
+                    span,
+                ));
+                return None;
+            }
+            let receiver = self.resolve_name(receiver, callee.span, locals, context)?;
+            return Some(PlanExpression {
+                kind: PlanExpressionKind::ResourceCall {
+                    receiver: Box::new(receiver),
+                    method: method.to_owned(),
+                },
+                value_type: ValueType::Inferred,
+                span,
+            });
+        }
         if let Some((capability_name, operation_name)) = callee.value.split_once('.') {
             let Some(capability_id) = self.capability_ids.get(capability_name).copied() else {
                 self.errors.push(CompileError::new(
@@ -1482,12 +1579,17 @@ impl<'a> Compiler<'a> {
                 self.errors.push(CompileError::new(message, callee.span));
                 return None;
             };
-            if arguments.len() > operation.parameters.len() {
+            let positional_options = operation
+                .options
+                .iter()
+                .filter(|field| field.positional)
+                .collect::<Vec<_>>();
+            if arguments.len() > operation.parameters.len() + positional_options.len() {
                 self.errors.push(CompileError::new(
                     format!(
                         "operation `{}` accepts at most {} positional argument(s), but {} were provided",
                         callee.value,
-                        operation.parameters.len(),
+                        operation.parameters.len() + positional_options.len(),
                         arguments.len()
                     ),
                     span,
@@ -1495,10 +1597,28 @@ impl<'a> Compiler<'a> {
                 return None;
             }
             let mut bound = vec![None; operation.parameters.len()];
-            for (index, argument) in arguments.iter().enumerate() {
+            for (index, argument) in arguments
+                .iter()
+                .take(operation.parameters.len())
+                .enumerate()
+            {
                 bound[index] = Some(argument);
             }
             let mut option_fields = Vec::new();
+            for (index, argument) in arguments
+                .iter()
+                .skip(operation.parameters.len())
+                .enumerate()
+            {
+                option_fields.push(mettle_syntax::ObjectField {
+                    span: argument.span,
+                    name: mettle_syntax::Spanned {
+                        value: positional_options[index].name.to_owned(),
+                        span: argument.span,
+                    },
+                    expression: argument.clone(),
+                });
+            }
             for field in named_arguments {
                 if let Some(index) = operation
                     .parameter_names
@@ -1566,7 +1686,13 @@ impl<'a> Compiler<'a> {
                 Some(operation.options),
             );
             let mut evaluation_order = (0..arguments.len())
-                .map(super::CallEvaluation::Parameter)
+                .map(|index| {
+                    if index < operation.parameters.len() {
+                        super::CallEvaluation::Parameter(index)
+                    } else {
+                        super::CallEvaluation::Option(index - operation.parameters.len())
+                    }
+                })
                 .collect::<Vec<_>>();
             for field in named_arguments {
                 if let Some(index) = operation
@@ -1774,6 +1900,10 @@ impl<'a> Compiler<'a> {
         let valid = match expected {
             SchemaType::Value => true,
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
+            SchemaType::Array | SchemaType::ObjectArray(_) => value.value_type == ValueType::Array,
+            SchemaType::NullableObject(_) => {
+                matches!(value.value_type, ValueType::Object | ValueType::Null)
+            }
             SchemaType::Body => value.value_type != ValueType::Duration,
             SchemaType::Json => !matches!(
                 value.value_type,

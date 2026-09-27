@@ -338,6 +338,17 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.at(&TokenKind::Break) {
+            return Ok(Statement::Break(self.advance().span));
+        }
+        if self.at(&TokenKind::Yield) {
+            let start = self.advance().span;
+            let expression = self.parse_expression()?;
+            return Ok(Statement::Yield {
+                span: start.join(expression.span),
+                expression,
+            });
+        }
         if self.at(&TokenKind::Return) {
             let start = self.advance().span;
             let expression = self.parse_expression()?;
@@ -371,8 +382,10 @@ impl<'a> Parser<'a> {
             });
         }
 
-        if matches!(self.current().kind, TokenKind::Identifier(_))
-            && self.peek_at(1, &TokenKind::Equal)
+        if matches!(
+            self.current().kind,
+            TokenKind::Identifier(_) | TokenKind::Source
+        ) && self.peek_at(1, &TokenKind::Equal)
         {
             let name = self.take_identifier("a binding name")?;
             self.take(&TokenKind::Equal)?;
@@ -453,6 +466,7 @@ impl<'a> Parser<'a> {
             let name = match &token.kind {
                 TokenKind::Identifier(name) => name.as_str(),
                 TokenKind::Null => "null",
+                TokenKind::Source => "source",
                 _ => {
                     return Err(SyntaxError::new(
                         "expected a built-in value kind after `is` or `as`",
@@ -482,8 +496,17 @@ impl<'a> Parser<'a> {
 
     #[allow(clippy::too_many_lines)]
     fn parse_primary_expression(&mut self) -> Result<Expression, SyntaxError> {
-        let token = self.advance();
+        let mut token = self.advance();
+        // `source` is contextual: existing variables, parameters and fields may
+        // use the name; only `source { ... }` creates a producer.
+        if token.kind == TokenKind::Source && !self.at(&TokenKind::LeftBrace) {
+            token.kind = TokenKind::Identifier("source".to_owned());
+        }
         let mut expression = match token.kind {
+            TokenKind::Source if self.at(&TokenKind::LeftBrace) => {
+                let (body, end) = self.parse_statement_block()?;
+                literal(ExpressionKind::Source(body), token.span.join(end))
+            }
             TokenKind::Within => self.parse_within(token.span)?,
             TokenKind::For => self.parse_for(token.span)?,
             TokenKind::Retry => self.parse_retry(token.span)?,
@@ -511,7 +534,7 @@ impl<'a> Parser<'a> {
                 while self.at(&TokenKind::Dot)
                     && matches!(
                         self.tokens.get(self.cursor + 1).map(|token| &token.kind),
-                        Some(TokenKind::Identifier(_))
+                        Some(TokenKind::Identifier(_) | TokenKind::Source)
                     )
                 {
                     self.advance();
@@ -546,8 +569,10 @@ impl<'a> Parser<'a> {
             let mut named_arguments = Vec::new();
             if !self.at(&TokenKind::RightParen) {
                 loop {
-                    if matches!(self.current().kind, TokenKind::Identifier(_))
-                        && self.peek_at(1, &TokenKind::Colon)
+                    if matches!(
+                        self.current().kind,
+                        TokenKind::Identifier(_) | TokenKind::Source
+                    ) && self.peek_at(1, &TokenKind::Colon)
                     {
                         named_arguments.push(self.parse_object_field()?);
                     } else if named_arguments.is_empty() {
@@ -707,8 +732,10 @@ impl<'a> Parser<'a> {
             if self.at(&TokenKind::End) {
                 return Err(self.expected("a parallel branch or `}`"));
             }
-            let name = if matches!(self.current().kind, TokenKind::Identifier(_))
-                && self.peek_at(1, &TokenKind::Colon)
+            let name = if matches!(
+                self.current().kind,
+                TokenKind::Identifier(_) | TokenKind::Source
+            ) && self.peek_at(1, &TokenKind::Colon)
             {
                 let name = self.take_identifier("a parallel branch name")?;
                 self.take(&TokenKind::Colon)?;
@@ -869,6 +896,10 @@ impl<'a> Parser<'a> {
     fn parse_object_field(&mut self) -> Result<ObjectField, SyntaxError> {
         let token = self.advance();
         let name = match token.kind {
+            TokenKind::Source => Spanned {
+                value: "source".to_owned(),
+                span: token.span,
+            },
             TokenKind::Identifier(value) | TokenKind::String(value) => Spanned {
                 value,
                 span: token.span,
@@ -892,6 +923,10 @@ impl<'a> Parser<'a> {
     fn take_identifier(&mut self, expected: &'static str) -> Result<Spanned<String>, SyntaxError> {
         let token = self.advance();
         match token.kind {
+            TokenKind::Source => Ok(Spanned {
+                value: "source".to_owned(),
+                span: token.span,
+            }),
             TokenKind::Identifier(value) => Ok(Spanned {
                 value,
                 span: token.span,
@@ -1012,6 +1047,9 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::Defaults => "`defaults`",
         TokenKind::Use => "`use`",
         TokenKind::Return => "`return`",
+        TokenKind::Break => "`break`",
+        TokenKind::Yield => "`yield`",
+        TokenKind::Source => "`source`",
         TokenKind::Assert => "`assert`",
         TokenKind::Fail => "`fail`",
         TokenKind::Within => "`within`",

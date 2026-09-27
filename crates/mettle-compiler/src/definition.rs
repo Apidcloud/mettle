@@ -187,6 +187,7 @@ impl<'a> DefinitionFinder<'a> {
     ) -> Option<Span> {
         for statement in statements {
             match statement {
+                Statement::Break(_) => {}
                 Statement::If {
                     branches,
                     else_body,
@@ -231,7 +232,9 @@ impl<'a> DefinitionFinder<'a> {
                     }
                     locals.insert(name.value.clone(), name.span);
                 }
-                Statement::Return { expression, .. } | Statement::Expression(expression) => {
+                Statement::Yield { expression, .. }
+                | Statement::Return { expression, .. }
+                | Statement::Expression(expression) => {
                     if let Some(target) = self.find_in_expression(expression, locals, Some(flow)) {
                         return Some(target);
                     }
@@ -283,7 +286,7 @@ impl<'a> DefinitionFinder<'a> {
                     }
                 }
             }
-            ExpressionKind::Block(statements) => {
+            ExpressionKind::Block(statements) | ExpressionKind::Source(statements) => {
                 if let Some(flow) = flow {
                     return self.find_in_statements(statements, &mut locals.clone(), flow);
                 }

@@ -117,14 +117,11 @@ pub(crate) fn tokens(source: &str) -> Vec<Token> {
 }
 
 fn qualified(tokens: &[Token], end: usize) -> Option<(String, Span)> {
-    let TokenKind::Identifier(last) = &tokens.get(end)?.kind else {
-        return None;
-    };
-    let mut name = last.clone();
+    let mut name = name_token(&tokens.get(end)?.kind)?.to_owned();
     let mut span = tokens[end].span;
     let mut index = end;
     while index >= 2 && tokens[index - 1].kind == TokenKind::Dot {
-        let TokenKind::Identifier(part) = &tokens[index - 2].kind else {
+        let Some(part) = name_token(&tokens[index - 2].kind) else {
             break;
         };
         name = format!("{part}.{name}");
@@ -132,6 +129,14 @@ fn qualified(tokens: &[Token], end: usize) -> Option<(String, Span)> {
         index -= 2;
     }
     Some((name, span))
+}
+
+fn name_token(token: &TokenKind) -> Option<&str> {
+    match token {
+        TokenKind::Identifier(value) => Some(value),
+        TokenKind::Source => Some("source"),
+        _ => None,
+    }
 }
 
 fn call_target(tokens: &[Token], end: usize) -> Option<(String, Span)> {
@@ -248,6 +253,7 @@ pub fn call_site(source: &str, byte: usize) -> Option<CallSite> {
                                 TokenKind::Identifier(name) | TokenKind::String(name) => {
                                     Some(name.clone())
                                 }
+                                TokenKind::Source => Some("source".to_owned()),
                                 _ => None,
                             });
                     if let Some(call) = &mut frame.call {
@@ -273,7 +279,7 @@ pub fn call_site(source: &str, byte: usize) -> Option<CallSite> {
 pub fn identifier_spans(source: &str) -> Vec<Span> {
     tokens(source)
         .into_iter()
-        .filter_map(|token| matches!(token.kind, TokenKind::Identifier(_)).then_some(token.span))
+        .filter_map(|token| name_token(&token.kind).map(|_| token.span))
         .collect()
 }
 
@@ -282,9 +288,7 @@ pub fn identifier_spans(source: &str) -> Vec<Span> {
 pub fn symbol(source: &str, byte: usize) -> Option<(String, Span)> {
     let tokens = tokens(source);
     let index = tokens.iter().position(|token| {
-        token.span.start <= byte
-            && byte < token.span.end
-            && matches!(token.kind, TokenKind::Identifier(_))
+        token.span.start <= byte && byte < token.span.end && name_token(&token.kind).is_some()
     })?;
     let mut end = index;
     while tokens
@@ -292,7 +296,7 @@ pub fn symbol(source: &str, byte: usize) -> Option<(String, Span)> {
         .is_some_and(|token| token.kind == TokenKind::Dot)
         && tokens
             .get(end + 2)
-            .is_some_and(|token| matches!(token.kind, TokenKind::Identifier(_)))
+            .is_some_and(|token| name_token(&token.kind).is_some())
     {
         end += 2;
     }

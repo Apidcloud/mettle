@@ -14,7 +14,7 @@ hyper-rustls = { workspace = true, features = ["http1", "ring", "tls12", "webpki
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "sync", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }

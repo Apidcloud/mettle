@@ -11,7 +11,10 @@ use super::{
     format_duration, process_environment,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+#[path = "producer.rs"]
+mod producer;
 
+#[derive(Clone)]
 pub struct Runtime {
     capabilities: Vec<Arc<dyn Capability>>,
     clock: Arc<dyn Clock>,
@@ -112,6 +115,9 @@ impl Runtime {
         });
         let _guard = ExecutionIoGuard(io.clone());
         let mut result = Executor {
+            runtime: self,
+            producer: None,
+            breaking: false,
             plan,
             capabilities: &self.capabilities,
             clock: self.clock.as_ref(),
@@ -131,7 +137,7 @@ impl Runtime {
         .await;
         if result.as_ref().is_ok_and(Value::contains_source) {
             result = Err(RuntimeError {
-                message: "a byte source cannot be returned as an execution result; consume it within the entry".to_owned(),
+                message: "a live byte source or response cannot be returned as an execution result; consume or close it within the entry".to_owned(),
                 span: plan.flows[flow].span,
                 flow_stack: Vec::new(), scope_path: Vec::new().into_boxed_slice(),
                 assertions: Vec::new(), assertion_only: false, terminal: false,
@@ -204,6 +210,9 @@ impl Drop for ExecutionIoGuard {
 
 #[derive(Clone)]
 struct Executor<'a> {
+    runtime: &'a Runtime,
+    producer: Option<Arc<producer::Output>>,
+    breaking: bool,
     plan: &'a ExecutionPlan,
     capabilities: &'a [Arc<dyn Capability>],
     clock: &'a dyn Clock,
@@ -221,6 +230,22 @@ struct Executor<'a> {
 }
 
 impl Executor<'_> {
+    async fn resolve_deferred(&self, value: Value, span: Span) -> Result<Value, RuntimeError> {
+        if let Value::Deferred(field) = value.revealed() {
+            let result = field.0.resolve(span).await.map_err(|error| {
+                let mut result = self.error(error.message, error.span);
+                result.terminal = error.terminal;
+                result
+            })?;
+            Ok(if value.is_sensitive() {
+                result.sensitive()
+            } else {
+                result
+            })
+        } else {
+            Ok(value)
+        }
+    }
     fn execute_flow<'b>(
         &'b mut self,
         flow_id: usize,
@@ -405,13 +430,28 @@ impl Executor<'_> {
         Box::pin(async move {
             for instruction in instructions {
                 match instruction {
+                    Instruction::Break(_) => {
+                        self.breaking = true;
+                        return Ok(None);
+                    }
+                    Instruction::Yield(expression) => {
+                        let value = self.evaluate(expression, locals, context).await?;
+                        let producer = self
+                            .producer
+                            .clone()
+                            .ok_or_else(|| self.error("yield outside a source", expression.span))?;
+                        producer
+                            .emit(value, expression.span)
+                            .await
+                            .map_err(|error| self.error(error.message, error.span))?;
+                    }
                     Instruction::Echo { value, span } => {
                         let value = self
                             .evaluate(value, locals, context)
                             .await
                             .map_err(|error| error.with_assertions(assertions))?;
                         self.observer.execution_event(ExecutionEvent {
-                            kind: ExecutionEventKind::Echo(value),
+                            kind: ExecutionEventKind::Echo(value.snapshot()),
                             scope_path: self.scope_path.clone(),
                             span: *span,
                             inside_workload: self.inside_workload,
@@ -511,6 +551,9 @@ impl Executor<'_> {
                             .map_err(|error| error.with_assertions(assertions));
                     }
                 }
+                if self.breaking {
+                    return Ok(None);
+                }
             }
 
             Ok(None)
@@ -570,6 +613,45 @@ impl Executor<'_> {
     ) -> Pin<Box<dyn Future<Output = Result<Value, RuntimeError>> + Send + 'b>> {
         Box::pin(async move {
             match &expression.kind {
+                PlanExpressionKind::Source {
+                    instructions,
+                    local_count,
+                } => Ok(producer::create(
+                    self.runtime.clone(),
+                    self.plan.clone(),
+                    instructions.clone(),
+                    *local_count,
+                    locals.to_vec(),
+                    context.clone(),
+                    self.io,
+                    self.flow_stack.clone(),
+                    self.scope_path.clone(),
+                    self.secrets.clone(),
+                    self.inside_workload,
+                    self.workload_id,
+                    self.next_scope_id.clone(),
+                    expression.span,
+                )),
+                PlanExpressionKind::ResourceCall { receiver, method } => {
+                    let value = self.evaluate(receiver, locals, context).await?;
+                    let sensitive = value.is_sensitive();
+                    let field = value.as_object().and_then(|fields| fields.get(method));
+                    let Some(Value::Deferred(field)) = field.map(Value::revealed) else {
+                        return Err(
+                            self.error("receiver does not support this operation", expression.span)
+                        );
+                    };
+                    let result = field.0.call(expression.span).await.map_err(|error| {
+                        let mut result = self.error(error.message, error.span);
+                        result.terminal = error.terminal;
+                        result
+                    })?;
+                    Ok(if sensitive {
+                        result.sensitive()
+                    } else {
+                        result
+                    })
+                }
                 PlanExpressionKind::Constant(constant) => Ok(match constant {
                     Constant::Null => Value::Null,
                     Constant::Boolean(value) => Value::Boolean(*value),
@@ -685,6 +767,10 @@ impl Executor<'_> {
                                         collect_assertions,
                                     )
                                     .await?;
+                                if self.breaking {
+                                    self.breaking = false;
+                                    break;
+                                }
                                 if *produces_value {
                                     results.push(result.ok_or_else(|| {
                                         self.error(
@@ -728,6 +814,10 @@ impl Executor<'_> {
                                         collect_assertions,
                                     )
                                     .await?;
+                                if self.breaking {
+                                    self.breaking = false;
+                                    break;
+                                }
                                 if *produces_value {
                                     results.insert(
                                         name.clone(),
@@ -758,7 +848,7 @@ impl Executor<'_> {
                             expression.span,
                         ));
                     };
-                    fields
+                    let result = fields
                         .get(member)
                         .cloned()
                         .map(|value| {
@@ -770,7 +860,8 @@ impl Executor<'_> {
                         })
                         .ok_or_else(|| {
                             self.error(format!("object has no member `{member}`"), expression.span)
-                        })
+                        })?;
+                    self.resolve_deferred(result, expression.span).await
                 }
                 PlanExpressionKind::Index { value, index } => {
                     let value = self.evaluate(value, locals, context).await?;
@@ -778,9 +869,10 @@ impl Executor<'_> {
                     let inherited_sensitivity = value.is_sensitive() || index.is_sensitive();
                     let result = match (value.revealed(), index.revealed()) {
                         (Value::Object(fields), Value::String(key)) => {
-                            fields.get(key).cloned().ok_or_else(|| {
+                            let result = fields.get(key).cloned().ok_or_else(|| {
                                 self.error(format!("object has no member `{key}`"), expression.span)
-                            })?
+                            })?;
+                            self.resolve_deferred(result, expression.span).await?
                         }
                         (Value::Array(values), Value::Integer(position)) if *position >= 0 => {
                             usize::try_from(*position)
@@ -1114,7 +1206,9 @@ impl Executor<'_> {
                             Ok(value)
                         }
                         Err(error) => {
-                            let error = self.error(error.message, error.span);
+                            let terminal = error.terminal;
+                            let mut error = self.error(error.message, error.span);
+                            error.terminal = terminal;
                             if let Some(workload_id) = self.workload_id {
                                 self.observer.workload_operation(WorkloadOperation {
                                     workload_id,

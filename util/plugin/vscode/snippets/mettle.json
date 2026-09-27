@@ -1,4 +1,14 @@
 {
+  "Lazy byte producer": {
+    "prefix": "source",
+    "description": "Produce ordered UTF-8 strings or bytes on demand",
+    "body": ["source {", "    for part in ${1:parts} {", "        yield part", "    }", "}"]
+  },
+  "Streamed HTTP response": {
+    "prefix": "httpstream",
+    "description": "Check response headers before streaming a download to a file",
+    "body": ["response = http.get(\"${1:url}\", stream: true, maxResponseBytes: ${3:104857600})", "assert(response.status == 200)", "fs.write(\"${2:./download.bin}\", response.chunks)"]
+  },
   "Documented flow": {
     "prefix": "flowdoc",
     "description": "Declare a flow with documentation and a parameter description",

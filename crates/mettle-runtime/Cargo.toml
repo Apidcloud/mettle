@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 mettle-capability = { path = "../mettle-capability" }
 mettle-compiler = { path = "../mettle-compiler" }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "rt"] }
 
 [dev-dependencies]
 mettle-syntax = { path = "../mettle-syntax" }

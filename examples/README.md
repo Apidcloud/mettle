@@ -23,6 +23,8 @@ The standalone language files below require no network access.
 | Example | What it demonstrates | Try it |
 | --- | --- | --- |
 | [Basics](language/basics.mettle) | Reusable flows, implicit final value, and a test | `mettle run examples/language/basics.mettle` |
+| [Text operations](language/text.mettle) | Literal/regex split, Unicode offsets, captures, find, replace, and loop break | `mettle run examples/language/text.mettle` |
+| [Lazy producers](language/producers.mettle) | Backpressured `source`/`yield`, byte production, helpers, and files | `mettle run examples/language/producers.mettle` |
 | [Code documentation](language/documentation.mettle) | `///` descriptions, `@param`/`@returns`, keyword/helper and primitive-kind hovers, signature help, and offline references | `mettle run examples/language/documentation.mettle` |
 | [Variable intelligence](language/variable-intelligence.mettle) | Native-kind/field hovers, aliases, contexts, helper results, finite collections, and safe sensitivity metadata | `mettle run examples/language/variable-intelligence.mettle` |
 | [Conditionals](language/conditionals.mettle) | `if`/`else`, boolean logic, indexing, and terminal `fail()` | `mettle test examples/language/conditionals.mettle` |
@@ -64,6 +66,20 @@ memory; `fs.stream` supplies one incremental read. Standalone paths use the CLI
 invocation directory; project paths use the root or configured `workingDir`.
 
 ## HTTP — local file uploads
+
+[Streaming](http/streaming.mettle) runs two downloads and two generated uploads in
+named `parallel` branches, using the local fixture below. It also demonstrates
+header-first inspection, shared bounded body capture, and `response.close()`:
+
+```bash
+mettle run examples/http/streaming.mettle
+mettle test examples/http/streaming.mettle --jobs 2
+mettle run examples/http/streaming.mettle --raw > result.json
+```
+
+`stream: true` exposes raw `response.chunks` for `fs.write` without complete memory
+capture. Normal requests still return complete responses. Source/event iteration
+and SSE decoding are future work; current `for` loops iterate arrays/objects.
 
 [Content representations](http/content.mettle) uses the same local fixture to
 demonstrate optional media types, custom JSON representations, scalar bodies,

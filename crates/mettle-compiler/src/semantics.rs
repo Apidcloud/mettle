@@ -377,6 +377,7 @@ impl Analyzer<'_> {
         let mut returns = Vec::new();
         for instruction in body {
             match instruction {
+                Instruction::Break(_) => break,
                 Instruction::Bind { slot, expression } => {
                     let info = self.expression(expression, locals, flow, context, depth + 1);
                     if let Some(flow) = flow {
@@ -389,7 +390,9 @@ impl Analyzer<'_> {
                     }
                     locals.insert(*slot, info);
                 }
-                Instruction::Echo { value, .. } | Instruction::Evaluate(value) => {
+                Instruction::Yield(value)
+                | Instruction::Echo { value, .. }
+                | Instruction::Evaluate(value) => {
                     self.expression(value, locals, flow, context, depth + 1);
                 }
                 Instruction::Return(value) => {
@@ -446,6 +449,14 @@ impl Analyzer<'_> {
             return ValueInfo::unknown();
         }
         let mut info = match &expression.kind {
+            PlanExpressionKind::Source { instructions, .. } => {
+                self.block(instructions, &mut locals.clone(), flow, context, depth + 1);
+                ValueInfo::new(ValueType::Source, Sensitivity::Unknown)
+            }
+            PlanExpressionKind::ResourceCall { receiver, .. } => {
+                self.expression(receiver, locals, flow, context, depth + 1);
+                ValueInfo::new(ValueType::Null, Sensitivity::Unknown)
+            }
             PlanExpressionKind::Constant(_) => {
                 ValueInfo::new(expression.value_type, Sensitivity::Public)
             }
@@ -789,11 +800,18 @@ fn schema(kind: SchemaType, depth: usize, steps: &mut usize) -> ValueInfo {
     }
     *steps -= 1;
     let mut info = ValueInfo::new(crate::schema_value_type(kind), Sensitivity::Unknown);
-    info.nullable = kind == SchemaType::NullableString;
+    info.nullable = matches!(
+        kind,
+        SchemaType::NullableString | SchemaType::NullableObject(_)
+    );
     if info.nullable {
-        info.kind = ValueType::String;
+        info.kind = if kind == SchemaType::NullableString {
+            ValueType::String
+        } else {
+            ValueType::Object
+        };
     }
-    if let SchemaType::Object(fields) = kind {
+    if let SchemaType::Object(fields) | SchemaType::NullableObject(fields) = kind {
         info.fields = Arc::new(
             fields
                 .iter()
@@ -809,6 +827,12 @@ fn schema(kind: SchemaType, depth: usize, steps: &mut usize) -> ValueInfo {
                 .collect(),
         );
         info.fields_truncated = fields.len() > MAX_FIELDS;
+    } else if let SchemaType::ObjectArray(fields) = kind {
+        info.element = Some(Arc::new(schema(
+            SchemaType::Object(fields),
+            depth + 1,
+            steps,
+        )));
     } else if kind == SchemaType::StringMap {
         info.element = Some(Arc::new(ValueInfo::new(
             ValueType::String,

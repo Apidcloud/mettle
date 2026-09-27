@@ -1,0 +1,44 @@
+================================================================================
+Lazy producer yield and loop break
+================================================================================
+
+flow main = source {
+    for part in ["a", "b"] {
+        yield part
+        break
+    }
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (source_expression
+      (block
+        (expression_statement
+          (for_expression
+            (identifier)
+            (array (string (string_content)) (string (string_content)))
+            (block
+              (yield_statement (identifier))
+              (break_statement))))))))
+
+================================================================================
+Source remains usable as a parameter variable and field
+================================================================================
+
+flow choose(source) {
+    source = { source: source }
+    source.source
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (parameter_list (identifier))
+    (block
+      (binding (identifier) (object (object_field (identifier) (identifier))))
+      (expression_statement (member_expression (identifier) (identifier))))))

@@ -10,8 +10,10 @@ use std::time::Duration;
 
 pub use mettle_syntax::Span;
 mod conversion;
+mod deferred;
 mod result;
 pub use conversion::{cast_value, matches_kind};
+pub use deferred::{Deferred, DeferredField};
 pub mod codecs;
 pub mod content;
 pub mod documentation;
@@ -19,7 +21,7 @@ mod io;
 pub mod media_type;
 pub use io::{
     ByteReader, ByteSource, CHUNK_BYTES, ChunkFuture, DEFAULT_READ_BYTES, DEFAULT_TRANSFER_BYTES,
-    IoCancellation, IoContext, ReaderFuture, SourceFactory,
+    IoCancellation, IoContext, IoResource, ReaderFuture, SourceFactory,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +29,9 @@ pub enum SchemaType {
     /// An ordinary value whose native kind is determined at runtime.
     Value,
     Boolean,
+    Array,
+    ObjectArray(&'static [FieldSchema]),
+    NullableObject(&'static [FieldSchema]),
     Body,
     Bytes,
     Source,
@@ -47,6 +52,9 @@ impl SchemaType {
         match self {
             Self::Value => "value (native kind determined at runtime)",
             Self::Boolean => "boolean",
+            Self::Array => "array",
+            Self::ObjectArray(_) => "array of objects",
+            Self::NullableObject(_) => "object or null",
             Self::Body => "HTTP body value",
             Self::Bytes => "bytes",
             Self::Source => "byte source",
@@ -69,6 +77,8 @@ pub struct FieldSchema {
     pub value_type: SchemaType,
     pub description: &'static str,
     pub default: Option<documentation::DefaultValue>,
+    /// Allow this optional field after the required positional parameters.
+    pub positional: bool,
 }
 
 impl FieldSchema {
@@ -79,12 +89,19 @@ impl FieldSchema {
             value_type,
             description: "",
             default: None,
+            positional: false,
         }
     }
 
     #[must_use]
     pub const fn documented(mut self, description: &'static str) -> Self {
         self.description = description;
+        self
+    }
+
+    #[must_use]
+    pub const fn positional(mut self) -> Self {
+        self.positional = true;
         self
     }
 
@@ -143,6 +160,7 @@ pub enum Value {
     String(String),
     Bytes(Arc<[u8]>),
     Source(Arc<ByteSource>),
+    Deferred(Deferred),
     Duration(Duration),
     Array(Vec<Self>),
     Object(Object),
@@ -150,6 +168,26 @@ pub enum Value {
 }
 
 impl Value {
+    /// Resource-free observation; never consumes a source or resolves a field.
+    #[must_use]
+    pub fn snapshot(&self) -> Self {
+        match self {
+            Self::Source(_) => Self::Object(Object::from([(
+                "type".to_owned(),
+                Self::String("byteSource".to_owned()),
+            )])),
+            Self::Deferred(field) => field.0.snapshot(),
+            Self::Array(values) => Self::Array(values.iter().map(Self::snapshot).collect()),
+            Self::Object(fields) => Self::Object(
+                fields
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.snapshot()))
+                    .collect(),
+            ),
+            Self::Sensitive(value) => value.snapshot().sensitive(),
+            value => value.clone(),
+        }
+    }
     #[must_use]
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -161,6 +199,7 @@ impl Value {
             Self::String(_) => "string",
             Self::Bytes(_) => "bytes",
             Self::Source(_) => "byte source",
+            Self::Deferred(_) => "deferred field",
             Self::Duration(_) => "duration",
             Self::Array(_) => "array",
             Self::Object(_) => "object",
@@ -210,7 +249,7 @@ impl Value {
     #[must_use]
     pub fn contains_source(&self) -> bool {
         match self.revealed() {
-            Self::Source(_) => true,
+            Self::Source(_) | Self::Deferred(_) => true,
             Self::Array(values) => values.iter().any(Self::contains_source),
             Self::Object(fields) => fields.values().any(Self::contains_source),
             _ => false,
@@ -307,6 +346,7 @@ impl fmt::Display for Value {
                 formatter.write_str("]")
             }
             Self::Source(_) => formatter.write_str("<byte source>"),
+            Self::Deferred(value) => value.0.snapshot().fmt(formatter),
             Self::Duration(value) => write!(formatter, "{}ns", value.as_nanos()),
             Self::Array(values) => {
                 formatter.write_str("[")?;
@@ -365,6 +405,7 @@ fn escape_json(value: &str) -> String {
 pub struct CapabilityError {
     pub message: String,
     pub span: Span,
+    pub terminal: bool,
 }
 
 impl CapabilityError {
@@ -373,6 +414,7 @@ impl CapabilityError {
         Self {
             message: message.into(),
             span,
+            terminal: false,
         }
     }
 }
@@ -434,7 +476,7 @@ pub trait Capability: Send + Sync {
 
     /// Snapshot an operation for observers without retaining live resources.
     fn observed_result(&self, _operation: usize, result: &Value) -> Value {
-        result.clone()
+        result.snapshot()
     }
 
     fn invoke(

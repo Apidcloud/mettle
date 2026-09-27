@@ -1,7 +1,7 @@
 {
   "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "mettle",
-  "word": "identifier",
+  "word": "_identifier_word",
   "rules": {
     "source_file": {
       "type": "REPEAT",
@@ -554,6 +554,14 @@
         {
           "type": "SYMBOL",
           "name": "expression_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "yield_statement"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "break_statement"
         }
       ]
     },
@@ -594,6 +602,23 @@
           "name": "_expression"
         }
       ]
+    },
+    "yield_statement": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "yield"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
+        }
+      ]
+    },
+    "break_statement": {
+      "type": "STRING",
+      "value": "break"
     },
     "assert_statement": {
       "type": "SEQ",
@@ -1194,6 +1219,10 @@
         {
           "type": "SYMBOL",
           "name": "fail_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "source_expression"
         }
       ]
     },
@@ -2589,6 +2618,23 @@
         }
       ]
     },
+    "source_expression": {
+      "type": "PREC",
+      "value": 1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "source"
+          },
+          {
+            "type": "SYMBOL",
+            "name": "block"
+          }
+        ]
+      }
+    },
     "for_expression": {
       "type": "SEQ",
       "members": [
@@ -2652,6 +2698,19 @@
       ]
     },
     "identifier": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_identifier_word"
+        },
+        {
+          "type": "STRING",
+          "value": "source"
+        }
+      ]
+    },
+    "_identifier_word": {
       "type": "PATTERN",
       "value": "[A-Za-z_][A-Za-z0-9_]*"
     },
@@ -3308,6 +3367,15 @@
           },
           "named": true,
           "value": "fail_expression"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_iterable_source_expression"
+          },
+          "named": true,
+          "value": "source_expression"
         }
       ]
     },
@@ -4974,6 +5042,24 @@
           },
           "named": true,
           "value": "expression_statement"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_iterable_yield_statement"
+          },
+          "named": true,
+          "value": "yield_statement"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_iterable_break_statement"
+          },
+          "named": true,
+          "value": "break_statement"
         }
       ]
     },
@@ -5150,6 +5236,45 @@
     "_iterable_expression_statement": {
       "type": "SYMBOL",
       "name": "_iterable_expression"
+    },
+    "_iterable_source_expression": {
+      "type": "PREC",
+      "value": 1,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "source"
+          },
+          {
+            "type": "ALIAS",
+            "content": {
+              "type": "SYMBOL",
+              "name": "_iterable_block"
+            },
+            "named": true,
+            "value": "block"
+          }
+        ]
+      }
+    },
+    "_iterable_yield_statement": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "yield"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_iterable_expression"
+        }
+      ]
+    },
+    "_iterable_break_statement": {
+      "type": "STRING",
+      "value": "break"
     }
   },
   "extras": [
@@ -5338,6 +5463,14 @@
       {
         "type": "STRING",
         "value": "as"
+      },
+      {
+        "type": "STRING",
+        "value": "yield"
+      },
+      {
+        "type": "STRING",
+        "value": "break"
       }
     ]
   }

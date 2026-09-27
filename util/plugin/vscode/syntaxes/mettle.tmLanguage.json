@@ -133,7 +133,11 @@
         },
         {
           "name": "keyword.control.mettle",
-          "match": "\\b(?:return|assert|fail|if|else|for|in|concurrency|parallel|rate|retry|within)\\b"
+          "match": "\\b(?:return|assert|fail|if|else|for|in|concurrency|parallel|rate|retry|within|yield|break)\\b"
+        },
+        {
+          "name": "keyword.control.mettle",
+          "match": "\\bsource(?=\\s*\\{)"
         },
         {
           "name": "keyword.operator.logical.mettle",

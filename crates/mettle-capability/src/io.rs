@@ -5,7 +5,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
@@ -26,6 +26,13 @@ struct Resources {
     readers: Arc<Semaphore>,
     jobs: Mutex<Vec<Job>>,
     temporary: Mutex<Vec<PathBuf>>,
+    owned: Mutex<Vec<Weak<dyn IoResource>>>,
+}
+
+/// A live transfer owned by an entry, without retaining it in observations.
+pub trait IoResource: Send + Sync {
+    fn cancel(&self);
+    fn active(&self) -> bool;
 }
 
 /// Resources belonging to one execution entry, shared by its owned branches.
@@ -52,6 +59,7 @@ impl IoContext {
             readers: Arc::new(Semaphore::new(64)),
             jobs: Mutex::new(Vec::new()),
             temporary: Mutex::new(Vec::new()),
+            owned: Mutex::new(Vec::new()),
         }))
     }
 
@@ -108,6 +116,16 @@ impl IoContext {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.readers.close();
         self.0.capacity.close();
+        for resource in self
+            .0
+            .owned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+        {
+            resource.cancel();
+        }
         for (_, state) in self
             .0
             .jobs
@@ -117,6 +135,35 @@ impl IoContext {
         {
             let _ = state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
         }
+    }
+
+    /// Register a bounded, execution-owned live transfer.
+    /// # Errors
+    /// Fails if the owner is closed or already owns 64 live transfers.
+    pub fn register_resource(
+        &self,
+        resource: &Arc<dyn IoResource>,
+        span: Span,
+    ) -> Result<(), CapabilityError> {
+        let mut resources = self
+            .0
+            .owned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        resources.retain(|weak| weak.upgrade().is_some_and(|resource| resource.active()));
+        if self.0.cancelled.load(Ordering::Acquire) {
+            resource.cancel();
+            return Err(CapabilityError::new("I/O execution cancelled", span));
+        }
+        if resources.len() >= 64 {
+            resource.cancel();
+            return Err(CapabilityError::new(
+                "too many live response transfers; consume or close earlier responses",
+                span,
+            ));
+        }
+        resources.push(Arc::downgrade(resource));
+        Ok(())
     }
 
     /// Run filesystem work off the executor and retain ownership if its waiter drops.
