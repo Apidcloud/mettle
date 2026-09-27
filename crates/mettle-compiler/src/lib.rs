@@ -272,7 +272,7 @@ mod lowering;
 pub use lowering::{compile, compile_with_capabilities};
 
 mod definition;
-pub use definition::{find_definition, find_implementation};
+pub use definition::{find_definition, find_implementation, resolve_documentation_flow};
 
 fn flow_display_name(flow: &MettleDecl, flow_id: usize) -> String {
     if let Some(name) = &flow.name {
@@ -422,41 +422,22 @@ mod tests {
         find_definition, find_implementation,
     };
 
-    const TLS_OPTIONS: &[FieldSchema] = &[FieldSchema {
-        name: "verifyCertificates",
-        value_type: SchemaType::Boolean,
-    }];
+    const TLS_OPTIONS: &[FieldSchema] =
+        &[FieldSchema::new("verifyCertificates", SchemaType::Boolean)];
     const HTTP_OPTIONS: &[FieldSchema] = &[
-        FieldSchema {
-            name: "baseUrl",
-            value_type: SchemaType::String,
-        },
-        FieldSchema {
-            name: "timeout",
-            value_type: SchemaType::Duration,
-        },
-        FieldSchema {
-            name: "headers",
-            value_type: SchemaType::StringMap,
-        },
-        FieldSchema {
-            name: "tls",
-            value_type: SchemaType::Object(TLS_OPTIONS),
-        },
+        FieldSchema::new("baseUrl", SchemaType::String),
+        FieldSchema::new("timeout", SchemaType::Duration),
+        FieldSchema::new("headers", SchemaType::StringMap),
+        FieldSchema::new("tls", SchemaType::Object(TLS_OPTIONS)),
     ];
     const BODY_OPTIONS: &[FieldSchema] = &[
-        FieldSchema {
-            name: "json",
-            value_type: SchemaType::Json,
-        },
-        FieldSchema {
-            name: "body",
-            value_type: SchemaType::String,
-        },
+        FieldSchema::new("json", SchemaType::Json),
+        FieldSchema::new("body", SchemaType::String),
     ];
     const HTTP_OPERATIONS: &[OperationSchema] = &[
         OperationSchema {
             name: "get",
+            documentation: mettle_capability::documentation::OperationDocumentation::EMPTY,
             parameters: &[SchemaType::String],
             parameter_names: &["url"],
             options: HTTP_OPTIONS,
@@ -465,6 +446,7 @@ mod tests {
         },
         OperationSchema {
             name: "post",
+            documentation: mettle_capability::documentation::OperationDocumentation::EMPTY,
             parameters: &[SchemaType::String],
             parameter_names: &["url"],
             options: BODY_OPTIONS,
@@ -474,6 +456,7 @@ mod tests {
     ];
     const HTTP: CapabilityDescriptor = CapabilityDescriptor {
         name: "http",
+        description: "",
         constants: &[],
         defaults: HTTP_OPTIONS,
         operations: HTTP_OPERATIONS,

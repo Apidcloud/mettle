@@ -34,6 +34,7 @@ Usage:
   mettle run <file> [flow-name] [--all | --line <line>] [--jobs <count>] [--arg <name=value>]... [--profile <name>] [output options]
   mettle test <file> [test-name | --line <line>] [--jobs <count>] [--profile <name>] [--verbose | --quiet | --output json] [--no-progress] [--no-color]
   mettle lsp
+  mettle docs <capability[.operation]>
   mettle --help
   mettle --version
 
@@ -43,6 +44,7 @@ Commands:
   run     Validate the source and execute a selected flow, or every zero-argument flow
   test    Execute tests in the selected file, or one selected test
   lsp     Start the Mettle language server over standard input/output
+  docs    Print the installed version's capability reference as Markdown
 
 Run output options:
   --profile NAME  Overlay .env.NAME from the entry folder and project root
@@ -176,6 +178,15 @@ fn run_cli(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             Ok(())
         }
         "check" if arguments.len() == 2 => check(Path::new(&arguments[1])),
+        "docs" if arguments.len() == 2 => {
+            let name = arguments[1]
+                .to_str()
+                .ok_or_else(|| CliError::Usage("documentation name must be UTF-8".into()))?;
+            let content = mettle_capability::documentation::reference(CAPABILITIES, name)
+                .ok_or_else(|| CliError::Usage(format!("unknown documentation symbol `{name}`")))?;
+            print!("{content}");
+            Ok(())
+        }
         "list" if arguments.len() == 2 => list_flows(Path::new(&arguments[1]), false),
         "list" if arguments.len() == 3 && arguments[2] == "--json" => {
             list_flows(Path::new(&arguments[1]), true)

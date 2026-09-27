@@ -12,6 +12,8 @@ continuations across comments/newlines and use inside loop iterables.
 The compiler remains responsible for name resolution, valid call targets,
 numeric limits, required/duplicate policy options, and semantic validation.
 VS Code continues using its TextMate grammar and the Mettle language server.
+Contiguous `///` documentation comments use the `comment.documentation` highlight
+capture; they remain ordinary comments in the syntax tree and do not affect execution.
 
 ## Develop and test
 

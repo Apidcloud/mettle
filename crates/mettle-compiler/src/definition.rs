@@ -14,6 +14,31 @@ pub fn find_definition(program: &Program, source: usize, byte: usize) -> Option<
     DefinitionFinder::new(program, source, byte).find()
 }
 
+/// Resolve a flow for editor documentation using compiler namespace rules.
+#[must_use]
+pub fn resolve_documentation_flow(
+    program: &Program,
+    name: &str,
+    namespace: &str,
+    uses: &[mettle_syntax::Spanned<String>],
+) -> Option<usize> {
+    let ids = program
+        .flows
+        .iter()
+        .enumerate()
+        .filter(|(_, flow)| flow.kind == DeclarationKind::Flow)
+        .filter_map(|(id, flow)| {
+            flow.name
+                .as_ref()
+                .map(|name| (qualified_name(&flow.namespace, &name.value), id))
+        })
+        .collect();
+    match resolve_visible_name(&ids, name, namespace, uses) {
+        NameResolution::Found(id) => Some(id),
+        _ => None,
+    }
+}
+
 /// Find the declaration behind a flow call or local binding reference.
 #[must_use]
 pub fn find_implementation(program: &Program, source: usize, byte: usize) -> Option<Span> {

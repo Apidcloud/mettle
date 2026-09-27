@@ -620,6 +620,7 @@ mod tests {
 
     const PROBE_OPERATIONS: &[OperationSchema] = &[OperationSchema {
         name: "wait",
+        documentation: mettle_capability::documentation::OperationDocumentation::EMPTY,
         parameters: &[],
         parameter_names: &[],
         options: &[],
@@ -628,6 +629,7 @@ mod tests {
     }];
     const PROBE: CapabilityDescriptor = CapabilityDescriptor {
         name: "probe",
+        description: "",
         constants: &[],
         defaults: &[],
         operations: PROBE_OPERATIONS,

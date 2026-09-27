@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+pub mod documentation;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Span {
     pub source: usize,

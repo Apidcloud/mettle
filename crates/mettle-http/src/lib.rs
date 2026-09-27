@@ -31,6 +31,9 @@ mod streaming_tests;
 use request_body::{RequestBody, UploadControl, UploadGuard};
 pub use schema::DESCRIPTOR;
 
+const DEFAULT_TIMEOUT: Duration = mettle_capability::DEFAULT_IO_TIMEOUT;
+const DEFAULT_VERIFY_CERTIFICATES: bool = true;
+
 type HttpClient = Client<HttpsConnector<HttpConnector>, RequestBody>;
 
 #[derive(Clone)]
@@ -131,20 +134,24 @@ impl HttpCapability {
             ));
         }
 
-        let timeout = option_duration(&options, "timeout", Duration::from_secs(30), span)?;
+        let timeout = option_duration(&options, "timeout", DEFAULT_TIMEOUT, span)?;
         let started = Instant::now();
         let deadline = tokio::time::Instant::from_std(
             started
                 .checked_add(timeout)
                 .ok_or_else(|| CapabilityError::new("HTTP timeout is too large", span))?,
         );
-        let max_response_bytes =
-            option_usize(&options, "maxResponseBytes", 10 * 1024 * 1024, span)?;
+        let max_response_bytes = option_usize(
+            &options,
+            "maxResponseBytes",
+            usize::try_from(mettle_capability::DEFAULT_READ_BYTES).expect("default response bound"),
+            span,
+        )?;
         let verify_certificates = options
             .get("tls")
             .and_then(Value::as_object)
             .and_then(|tls| tls.get("verifyCertificates"))
-            .map_or(Ok(true), |value| match value {
+            .map_or(Ok(DEFAULT_VERIFY_CERTIFICATES), |value| match value {
                 Value::Boolean(value) => Ok(*value),
                 other => Err(type_error("tls.verifyCertificates", "boolean", other, span)),
             })?;

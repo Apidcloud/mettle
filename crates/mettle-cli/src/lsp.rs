@@ -6,6 +6,8 @@ use mettle_compiler::{compile_with_capabilities, find_definition, find_implement
 use mettle_syntax::{Span, parse};
 use serde_json::{Value, json};
 
+mod documentation;
+
 use super::{
     CAPABILITIES, CliError, SourceDocument, combine_parsed_sources, find_project_root,
     load_project_documents_with_overlays, load_project_with_overlays,
@@ -42,6 +44,7 @@ struct Server {
     documents: HashMap<PathBuf, String>,
     published: HashMap<PathBuf, BTreeSet<PathBuf>>,
     shutdown: bool,
+    virtual_documentation: bool,
 }
 
 impl Server {
@@ -50,28 +53,48 @@ impl Server {
         let id = message.get("id").cloned();
 
         match (method, id) {
-            (Some("initialize"), Some(id)) => write_result(
-                writer,
-                &id,
-                &json!({
-                    "capabilities": {
-                        "definitionProvider": true,
-                        "implementationProvider": true,
-                        "textDocumentSync": {
-                            "openClose": true,
-                            "change": 1,
-                            "save": true
+            (Some("initialize"), Some(id)) => {
+                self.virtual_documentation = message
+                    .pointer("/params/capabilities/experimental/mettleDocumentation")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                write_result(
+                    writer,
+                    &id,
+                    &json!({
+                        "capabilities": {
+                            "definitionProvider": true,
+                            "implementationProvider": true,
+                            "hoverProvider": true,
+                            "signatureHelpProvider": { "triggerCharacters": ["(", ",", ":"], "retriggerCharacters": [","] },
+                            "textDocumentSync": {
+                                "openClose": true,
+                                "change": 1,
+                                "save": true
+                            }
+                        },
+                        "serverInfo": {
+                            "name": "mettle",
+                            "version": env!("CARGO_PKG_VERSION")
                         }
-                    },
-                    "serverInfo": {
-                        "name": "mettle",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
-                }),
-            )?,
+                    }),
+                )?;
+            }
             (Some("shutdown"), Some(id)) => {
                 self.shutdown = true;
                 write_result(writer, &id, &Value::Null)?;
+            }
+            (Some(method @ ("textDocument/hover" | "textDocument/signatureHelp")), Some(id)) => {
+                let result = message
+                    .get("params")
+                    .and_then(|params| self.documentation_query(params, method));
+                write_result(writer, &id, &result.unwrap_or(Value::Null))?;
+            }
+            (Some("mettle/documentation"), Some(id)) => {
+                let result = message
+                    .get("params")
+                    .and_then(documentation::reference_query);
+                write_result(writer, &id, &result.unwrap_or(Value::Null))?;
             }
             (
                 Some(method @ ("textDocument/definition" | "textDocument/implementation")),
@@ -200,6 +223,11 @@ impl Server {
             match parse(&source.text) {
                 Ok(mut program) => {
                     program.set_source(source_id);
+                    for (span, message) in documentation::warnings(&source.text, &program) {
+                        let mut warning = diagnostic(&source.text, span, &message, "documentation");
+                        warning["severity"] = json!(2);
+                        diagnostics.get_mut(&source.path)?.push(warning);
+                    }
                     parsed.push(program);
                 }
                 Err(error) => {
@@ -236,6 +264,12 @@ impl Server {
     }
 
     fn navigation(&self, params: &Value, method: &str) -> Option<Value> {
+        if method == "textDocument/definition"
+            && self.virtual_documentation
+            && let Some(target) = self.builtin_documentation_target(params)
+        {
+            return Some(target);
+        }
         let uri = params.pointer("/textDocument/uri")?.as_str()?;
         let path = normalize_path(file_uri_to_path(uri)?);
         let line = usize::try_from(params.pointer("/position/line")?.as_u64()?).ok()?;

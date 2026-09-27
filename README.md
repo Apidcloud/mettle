@@ -857,9 +857,43 @@ error: unknown option `banana`
   |         ^^^^^^
 ```
 
+## Code documentation
+
+Built-in capability references are available offline from the CLI:
+
+```bash
+mettle docs http.post
+mettle docs fs.stream
+mettle docs json.encode
+```
+
+Signatures, option types, conflicts, and result fields come from the same
+capability schemas used by the compiler. Default values use shared runtime
+constants; descriptions and examples are authored beside the implementation.
+There is no separate editor API catalogue to maintain.
+Operation hovers use a compact signature (`…` stands for optional named options),
+behavior notes, and a small example. Signature help and the full reference keep
+the exhaustive option list, defaults, and result fields.
+
+Document your own flows or named contexts with contiguous `///` comments
+immediately above the declaration:
+
+```mettle
+/// Build a greeting.
+/// @param name Name to include in the greeting.
+/// @returns A greeting string.
+flow greet(name) = "Hello, ${name}!"
+```
+
+VS Code shows these descriptions on hover and during signature help, including
+named arguments, cross-file references, and unsaved edits. Unknown or duplicate
+`@param` names produce editor warnings, not runtime failures. Blank physical lines
+or ordinary comments detach the documentation block; `///` can separate paragraphs.
+See the [runnable documentation example](examples/language/documentation.mettle).
+
 ## VS Code extension
 
-The included extension provides `.mettle` recognition, syntax highlighting, snippets, folding, parser/compiler diagnostics for unsaved edits, CodeLens play buttons to run individual flows and tests, and Ctrl+Click navigation for flows, contexts, parameters, and local bindings. Navigation and diagnostics are backed by `mettle lsp`, so they follow the same project and namespace rules as the CLI.
+The included extension provides `.mettle` recognition, syntax highlighting, snippets, folding, parser/compiler diagnostics for unsaved edits, CodeLens play buttons to run individual flows and tests, and Ctrl+Click navigation for flows, contexts, parameters, and local bindings. Hover and signature help describe built-in operations/options and documented user declarations. F12 or **Open full reference** on a built-in opens its read-only, version-matched reference with arguments, defaults, and result fields. These features use `mettle lsp`, following the same project and namespace rules as the CLI.
 
 ```bash
 cd util/plugin/vscode

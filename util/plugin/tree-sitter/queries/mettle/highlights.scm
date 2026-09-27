@@ -1,5 +1,7 @@
 (identifier) @variable
 (comment) @comment
+((comment) @comment.documentation
+  (#match? @comment.documentation "^///"))
 (string) @string
 (escape_sequence) @string.escape
 (interpolation_path) @variable

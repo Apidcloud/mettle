@@ -4,6 +4,10 @@
 http.get("https://jsonplaceholder.typicode.com/posts/1")
 
 // Add a name and parameters when a request needs inputs.
+/// Fetch one post from the demo API without asserting its status.
+/// @param baseUrl HTTP/HTTPS address of the API, without a trailing slash.
+/// @param requestId Identifier of the post to request.
+/// @returns The complete HTTP response; inspect status, headers, json, or body.
 flow inspectRequest(baseUrl, requestId) =
     http.get("${baseUrl}/posts/${requestId}")
 

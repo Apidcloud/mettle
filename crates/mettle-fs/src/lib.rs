@@ -2,7 +2,6 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mettle_capability::{
     ByteSource, Capability, CapabilityError, CapabilityFuture, DEFAULT_READ_BYTES,
@@ -15,6 +14,7 @@ mod source;
 mod tests;
 mod write;
 pub use schema::DESCRIPTOR;
+const DEFAULT_OVERWRITE: bool = false;
 
 #[derive(Debug, Default)]
 pub struct FsCapability;
@@ -55,7 +55,7 @@ impl FsCapability {
             }
         };
         let timeout = match options.get("timeout").map(Value::revealed) {
-            None => Duration::from_secs(30),
+            None => mettle_capability::DEFAULT_IO_TIMEOUT,
             Some(Value::Duration(value)) if !value.is_zero() => *value,
             _ => {
                 return Err(CapabilityError::new(
@@ -109,7 +109,7 @@ impl FsCapability {
                         .get(1)
                         .ok_or_else(|| CapabilityError::new("fs.write requires content", span))?;
                     let overwrite = match options.get("overwrite").map(Value::revealed) {
-                        None => false,
+                        None => DEFAULT_OVERWRITE,
                         Some(Value::Boolean(value)) => *value,
                         _ => return Err(CapabilityError::new("overwrite must be boolean", span)),
                     };

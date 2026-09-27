@@ -2,6 +2,13 @@
 
 ## 1.0.0-alpha.1
 
+- Keep operation hovers compact, with practical HTTP/filesystem/codec descriptions
+  and examples; retain exhaustive options in signature help and full references.
+- Add schema-backed hover, named-argument signature help, and read-only offline
+  references for built-in capabilities through F12 or a hover link.
+- Support user `///` documentation with `@param`/`@returns`, cross-file and unsaved
+  documentation lookup, and nonblocking warnings for mismatched parameter tags.
+- Add documentation highlighting and the `flowdoc` snippet.
 - Align the extension's pre-release version with the Mettle workspace.
 - Add file contexts, profiles, tests, conditionals, terminal `fail()`, load
   workloads, structured HTTP output, and richer execution diagnostics.

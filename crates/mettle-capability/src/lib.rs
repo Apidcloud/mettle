@@ -13,6 +13,7 @@ mod conversion;
 pub use conversion::{cast_value, matches_kind};
 pub mod codecs;
 pub mod content;
+pub mod documentation;
 mod io;
 pub mod media_type;
 pub use io::{
@@ -60,6 +61,32 @@ impl SchemaType {
 pub struct FieldSchema {
     pub name: &'static str,
     pub value_type: SchemaType,
+    pub description: &'static str,
+    pub default: Option<documentation::DefaultValue>,
+}
+
+impl FieldSchema {
+    #[must_use]
+    pub const fn new(name: &'static str, value_type: SchemaType) -> Self {
+        Self {
+            name,
+            value_type,
+            description: "",
+            default: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn documented(mut self, description: &'static str) -> Self {
+        self.description = description;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_default(mut self, value: documentation::DefaultValue) -> Self {
+        self.default = Some(value);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +97,7 @@ pub struct OperationSchema {
     pub options: &'static [FieldSchema],
     pub mutually_exclusive: &'static [&'static [&'static str]],
     pub result: SchemaType,
+    pub documentation: documentation::OperationDocumentation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,13 +106,17 @@ pub struct CapabilityDescriptor {
     pub constants: &'static [CapabilityConstant],
     pub defaults: &'static [FieldSchema],
     pub operations: &'static [OperationSchema],
+    pub description: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilityConstant {
     pub name: &'static str,
     pub value: &'static str,
+    pub description: &'static str,
 }
+
+pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type Object = BTreeMap<String, Value>;
 

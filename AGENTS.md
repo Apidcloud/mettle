@@ -71,6 +71,49 @@ indefinitely.
 - Keep changes focused. Preserve unrelated local work and avoid speculative
   abstractions, unrelated refactors, or changing semantics merely to silence tests.
 
+## Code documentation and editor references
+
+Documentation is part of a user-facing code change, not a later cleanup task.
+When adding or changing a capability, operation, argument, option, constant,
+result field, or language behavior, update the applicable in-code documentation,
+README, and executable examples in the same changeset.
+
+- Preserve **one source per fact**. Capability schemas own names, signatures,
+  accepted types, option conflicts, and result shapes. Descriptions and examples
+  are authored beside their capability implementation. Runtime defaults and
+  canonical media types must be shared with documentation through constants or
+  existing accessors, not copied as independent literals.
+- Built-in reference rendering lives in
+  `crates/mettle-capability/src/documentation.rs`; the CLI's `mettle docs` command
+  and LSP consume that metadata. Keep editor adapters presentation-only: do not
+  add a separate JavaScript catalogue of signatures, defaults, or descriptions.
+- Write descriptions that explain behavior rather than merely restating a name
+  (for example, "Send a payload with HTTP POST" is insufficient on its own).
+  Cover meaningful accepted inputs/representations, returned values, errors and
+  status handling, side effects, and relevant bounds, cancellation, or source
+  ownership. Distinguish current behavior from proposed features.
+- Keep hover content useful and scannable. Lead with purpose and important
+  behavior; put exhaustive options and longer explanations in the full reference.
+  Describe each argument/option and nested schema field, including units and
+  conditional defaults where applicable. Include a small valid example using
+  local fixtures and no real credentials; avoid repeating shared prose across
+  operations when a common source can own it.
+- Document reusable user-facing example flows and named contexts with contiguous
+  `///` comments immediately above the declaration. Use `@param` with actual
+  declared parameter names and `@returns` where helpful. These comments describe
+  behavior; they do not introduce runtime annotations or a second type system.
+- Add regression coverage for metadata and affected consumers. Check generated
+  references with `mettle docs <symbol>` and exercise relevant hover/signature-help
+  tests, including incomplete calls, named arguments, source spans, and unsaved
+  cross-file lookup when applicable. Verify examples still parse and compile.
+  Inspect actual output before declaring presentation work complete; distinguish
+  automated checks from any editor UI checks actually performed.
+
+After Rust changes, rebuild the CLI. For the local installed-binary workflow,
+reinstall with `cargo install --path crates/mettle-cli --locked` so CLI/editor
+behavior reflects the changes. Package/update the extension when its code changes,
+and tell the user when a VS Code window reload is needed to restart its LSP.
+
 ## Verification and delivery
 
 For code changes, run the relevant tests first, then the applicable CI checks

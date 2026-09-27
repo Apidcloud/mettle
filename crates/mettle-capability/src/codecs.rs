@@ -1,19 +1,32 @@
 //! Built-in codec capabilities exposed through the same compiler interface as I/O.
 
 use crate::content::BuiltinCodec;
+use crate::documentation::{DefaultValue, OperationDocumentation};
+
 use crate::{
     Capability, CapabilityConstant, CapabilityDescriptor, CapabilityError, CapabilityFuture,
     DEFAULT_READ_BYTES, FieldSchema, Object, OperationReport, OperationSchema, ReportOutcome,
     SchemaType, Span, Value,
 };
 
-const OPTIONS: &[FieldSchema] = &[FieldSchema {
-    name: "maxBytes",
-    value_type: SchemaType::Integer,
-}];
+const DETAILS: &str = "Complete values are reusable and bounded. JSON/text processing rejects invalid JSON, UTF-8, numeric ranges, or nesting where applicable, with a source location. Sensitivity is preserved through encoding/decoding and reports do not capture payload contents.";
+const MEDIA_TYPE_DESCRIPTION: &str = "The codec canonical media type as an ordinary string.";
+
+const OPTIONS: &[FieldSchema] = &[FieldSchema::new("maxBytes", SchemaType::Integer)
+    .documented("Positive byte bound on complete encoded output or input.")
+    .with_default(DefaultValue::Bytes(crate::DEFAULT_READ_BYTES))];
 const JSON_OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "encode",
+        documentation: OperationDocumentation {
+            summary: "Encode an object, array, string, number, boolean, or null into reusable JSON bytes. Sending these bytes does not encode them a second time.",
+            notes: &[],
+            parameters: &[
+                "Value to encode. Bytes, live sources, and durations require explicit conversion for JSON/text.",
+            ],
+            details: DETAILS,
+            example: "json.encode({ ok: true })",
+        },
         parameters: &[SchemaType::Json],
         parameter_names: &["value"],
         options: OPTIONS,
@@ -22,6 +35,15 @@ const JSON_OPERATIONS: &[OperationSchema] = &[
     },
     OperationSchema {
         name: "decode",
+        documentation: OperationDocumentation {
+            summary: "Parse a JSON string or complete bytes into a language value. Invalid JSON or unsupported numeric ranges fail; live sources are not consumed implicitly.",
+            notes: &[],
+            parameters: &[
+                "Complete encoded bytes; JSON/text also accept strings. Live sources are never collected implicitly.",
+            ],
+            details: DETAILS,
+            example: "json.decode(\"{\\\"ok\\\":true}\")",
+        },
         parameters: &[SchemaType::Encoded],
         parameter_names: &["content"],
         options: OPTIONS,
@@ -32,6 +54,15 @@ const JSON_OPERATIONS: &[OperationSchema] = &[
 const TEXT_OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "encode",
+        documentation: OperationDocumentation {
+            summary: "Encode a string as reusable UTF-8 bytes. Other JSON-compatible values use compact JSON spelling: objects are not converted with an arbitrary display format.",
+            notes: &[],
+            parameters: &[
+                "Value to encode. Bytes, live sources, and durations require explicit conversion for JSON/text.",
+            ],
+            details: DETAILS,
+            example: "text.encode(\"Hello!\")",
+        },
         parameters: &[SchemaType::Json],
         parameter_names: &["value"],
         options: OPTIONS,
@@ -40,6 +71,15 @@ const TEXT_OPERATIONS: &[OperationSchema] = &[
     },
     OperationSchema {
         name: "decode",
+        documentation: OperationDocumentation {
+            summary: "Decode complete bytes into a UTF-8 string, or validate an existing string. Invalid UTF-8 fails rather than inserting replacement characters.",
+            notes: &[],
+            parameters: &[
+                "Complete encoded bytes; JSON/text also accept strings. Live sources are never collected implicitly.",
+            ],
+            details: DETAILS,
+            example: "text.decode(text.encode(\"Hello!\"))",
+        },
         parameters: &[SchemaType::Encoded],
         parameter_names: &["content"],
         options: OPTIONS,
@@ -50,6 +90,15 @@ const TEXT_OPERATIONS: &[OperationSchema] = &[
 const BYTE_OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "encode",
+        documentation: OperationDocumentation {
+            summary: "Return reusable bytes unchanged after checking the byte bound. This identity codec does not parse text, serialize objects, or consume live sources.",
+            notes: &[],
+            parameters: &[
+                "Complete reusable bytes. No conversion or source collection is performed.",
+            ],
+            details: DETAILS,
+            example: "bytes.encode(text.encode(\"Hello!\"))",
+        },
         parameters: &[SchemaType::Bytes],
         parameter_names: &["value"],
         options: OPTIONS,
@@ -58,6 +107,15 @@ const BYTE_OPERATIONS: &[OperationSchema] = &[
     },
     OperationSchema {
         name: "decode",
+        documentation: OperationDocumentation {
+            summary: "Return reusable bytes unchanged after checking the byte bound. This identity codec does not parse text, serialize objects, or consume live sources.",
+            notes: &[],
+            parameters: &[
+                "Complete reusable bytes. No conversion or source collection is performed.",
+            ],
+            details: DETAILS,
+            example: "bytes.decode(text.encode(\"Hello!\"))",
+        },
         parameters: &[SchemaType::Bytes],
         parameter_names: &["content"],
         options: OPTIONS,
@@ -68,27 +126,33 @@ const BYTE_OPERATIONS: &[OperationSchema] = &[
 
 pub const JSON_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     name: "json",
+    description: "Protocol-independent JSON encoding and decoding for complete values.",
     constants: &[CapabilityConstant {
         name: "mediaType",
-        value: "application/json",
+        description: MEDIA_TYPE_DESCRIPTION,
+        value: BuiltinCodec::Json.media_type(),
     }],
     defaults: OPTIONS,
     operations: JSON_OPERATIONS,
 };
 pub const TEXT_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     name: "text",
+    description: "Protocol-independent UTF-8 text encoding and strict decoding.",
     constants: &[CapabilityConstant {
         name: "mediaType",
-        value: "text/plain; charset=utf-8",
+        description: MEDIA_TYPE_DESCRIPTION,
+        value: BuiltinCodec::Text.media_type(),
     }],
     defaults: OPTIONS,
     operations: TEXT_OPERATIONS,
 };
 pub const BYTES_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     name: "bytes",
+    description: "Identity codec for complete representation bytes; no implicit conversion.",
     constants: &[CapabilityConstant {
         name: "mediaType",
-        value: "application/octet-stream",
+        description: MEDIA_TYPE_DESCRIPTION,
+        value: BuiltinCodec::Bytes.media_type(),
     }],
     defaults: OPTIONS,
     operations: BYTE_OPERATIONS,

@@ -3,6 +3,7 @@ const { spawn } = require("node:child_process");
 const vscode = require("vscode");
 const { selectCurrentFlow, selectCurrentTest } = require("./mettle-selection");
 const { listProfiles, profileLocations } = require("./mettle-profiles");
+const documentation = require("./mettle-documentation");
 
 const MAX_DISCOVERY_OUTPUT = 1024 * 1024;
 const MAX_LSP_MESSAGE = 8 * 1024 * 1024;
@@ -191,8 +192,14 @@ class MettleLanguageServer {
       processId: process.pid,
       rootUri: folder?.uri.toString() || null,
       workspaceFolders: folders,
-      capabilities: {},
-      clientInfo: { name: "Mettle VS Code", version: "1.0.0-alpha.1" },
+      capabilities: {
+        experimental: { mettleDocumentation: true },
+        textDocument: {
+          hover: { contentFormat: ["markdown", "plaintext"] },
+          signatureHelp: { signatureInformation: { documentationFormat: ["markdown", "plaintext"], activeParameterSupport: true } },
+        },
+      },
+      clientInfo: { name: "Mettle VS Code", version: require("./package.json").version },
     });
     this.notify("initialized", {});
     this.initialized = true;
@@ -422,6 +429,21 @@ class MettleLanguageServer {
       );
     } catch (error) {
       this.output.appendLine(`Mettle definition lookup failed: ${error.message}`);
+      return undefined;
+    }
+  }
+
+  async documentationAt(method, document, position, token) {
+    try {
+      const result = await this.request(method, {
+        textDocument: { uri: document.uri.toString() },
+        position: { line: position.line, character: position.character },
+      }, token);
+      return method === "textDocument/hover"
+        ? documentation.hover(vscode, result)
+        : documentation.signatureHelp(vscode, result);
+    } catch (error) {
+      this.output.appendLine(`Mettle documentation lookup failed: ${error.message}`);
       return undefined;
     }
   }
@@ -726,6 +748,32 @@ function activate(context) {
       }
     }),
     vscode.languages.registerCodeLensProvider({ language: "mettle" }, provider),
+    vscode.workspace.registerTextDocumentContentProvider("mettle-doc", {
+      provideTextDocumentContent: async (uri, token) => {
+        if (!documentation.isDocumentationUri(uri.toString())) return "Invalid Mettle reference URI.";
+        try {
+          const result = await languageServer.request("mettle/documentation", { uri: uri.toString() }, token);
+          return result?.content || "This reference is unavailable in the installed Mettle version.";
+        } catch (error) {
+          output.appendLine(`Mettle reference lookup failed: ${error.message}`);
+          return "Could not load documentation. Check the Mettle language-server output.";
+        }
+      },
+    }),
+    vscode.commands.registerCommand("mettle.openDocumentation", async (reference) => {
+      if (!documentation.isDocumentationUri(reference)) return;
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.parse(reference));
+      await vscode.window.showTextDocument(document, { preview: true });
+    }),
+    vscode.languages.registerHoverProvider(
+      { language: "mettle", scheme: "file" },
+      { provideHover: (document, position, token) => languageServer.documentationAt("textDocument/hover", document, position, token) },
+    ),
+    vscode.languages.registerSignatureHelpProvider(
+      { language: "mettle", scheme: "file" },
+      { provideSignatureHelp: (document, position, token) => languageServer.documentationAt("textDocument/signatureHelp", document, position, token) },
+      "(", ",", ":",
+    ),
     vscode.languages.registerDefinitionProvider(
       { language: "mettle", scheme: "file" },
       { provideDefinition: (document, position, token) => languageServer.definition("textDocument/definition", document, position, token) },

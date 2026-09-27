@@ -3,6 +3,7 @@
   "name": "Mettle",
   "scopeName": "source.mettle",
   "patterns": [
+    { "include": "#documentationComments" },
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#declarations" },
@@ -19,6 +20,14 @@
     { "include": "#punctuation" }
   ],
   "repository": {
+    "documentationComments": {
+      "patterns": [{
+        "name": "comment.line.documentation.mettle",
+        "begin": "///",
+        "end": "$",
+        "patterns": [{ "name": "keyword.other.documentation.mettle", "match": "@(?:param|returns)\\b" }]
+      }]
+    },
     "comments": {
       "patterns": [
         {

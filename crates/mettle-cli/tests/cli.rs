@@ -100,6 +100,117 @@ fn receive_lsp_response(stdout: &mut BufReader<ChildStdout>, id: u64) -> serde_j
 }
 
 #[test]
+fn docs_render_registered_metadata_without_a_source_file_or_network() {
+    for name in [
+        "http.post",
+        "fs.stream",
+        "json.encode",
+        "text.mediaType",
+        "http",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .args(["docs", name])
+            .output()
+            .expect("documentation command should start");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let reference = String::from_utf8(output.stdout).unwrap();
+        assert!(reference.starts_with(&format!("# {name}\n")));
+        if name == "http.post" {
+            assert!(reference.contains("### body\n"));
+            assert!(reference.contains("## Result\n"));
+            assert!(reference.contains("Default: `30s`"));
+            assert!(reference.contains("## Example\n"));
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["docs", "http.missing"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn lsp_builtin_hover_signature_and_virtual_definition_share_the_offline_reference() {
+    let text = "flow main = http.post(\"/users\", body: { ok: true })";
+    let path = source_file(text);
+    let uri = file_uri(&path);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 1, "method": "initialize", "params": { "capabilities": { "experimental": { "mettleDocumentation": true } } } }),
+    );
+    let initialized = receive_lsp_response(&mut stdout, 1);
+    assert_eq!(initialized["result"]["capabilities"]["hoverProvider"], true);
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "languageId": "mettle", "version": 1, "text": text } } }),
+    );
+    let position = |offset| serde_json::json!({ "textDocument": { "uri": uri }, "position": { "line": 0, "character": offset } });
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 2, "method": "textDocument/hover", "params": position(text.find("post").unwrap()) }),
+    );
+    let hover = receive_lsp_response(&mut stdout, 2)["result"].clone();
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP POST")
+    );
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 3, "method": "textDocument/signatureHelp", "params": position(text.find("body:").unwrap() + 5) }),
+    );
+    let signature = receive_lsp_response(&mut stdout, 3)["result"].clone();
+    let active = usize::try_from(
+        signature["signatures"][0]["activeParameter"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        signature["signatures"][0]["parameters"][active]["label"]
+            .as_str()
+            .unwrap()
+            .starts_with("body")
+    );
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 4, "method": "textDocument/definition", "params": position(text.find("post").unwrap()) }),
+    );
+    let definition = receive_lsp_response(&mut stdout, 4)["result"].clone();
+    assert_eq!(definition["uri"], hover["mettleReference"]);
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 5, "method": "mettle/documentation", "params": { "uri": definition["uri"] } }),
+    );
+    let reference = receive_lsp_response(&mut stdout, 5)["result"].clone();
+    let cli = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["docs", "http.post"])
+        .output()
+        .unwrap();
+    assert_eq!(reference["content"], String::from_utf8(cli.stdout).unwrap());
+    send_lsp(
+        &mut stdin,
+        &serde_json::json!({ "id": 6, "method": "shutdown" }),
+    );
+    receive_lsp_response(&mut stdout, 6);
+    send_lsp(&mut stdin, &serde_json::json!({ "method": "exit" }));
+    assert!(child.wait().unwrap().success());
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn check_validates_a_source_file() {
     let path = source_file("flow main() { return \"valid\" }");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))

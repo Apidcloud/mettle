@@ -1,4 +1,14 @@
 {
+  "Documented flow": {
+    "prefix": "flowdoc",
+    "description": "Declare a flow with documentation and a parameter description",
+    "body": [
+      "/// ${1:Description.}",
+      "/// @param ${2:value} ${3:Input description.}",
+      "/// @returns ${4:Result description.}",
+      "flow ${5:name}(${2:value}) = $2"
+    ]
+  },
   "Mettle declaration": {
     "prefix": "flow",
     "description": "Declare a reusable Mettle function",

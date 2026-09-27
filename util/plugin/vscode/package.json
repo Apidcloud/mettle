@@ -4,6 +4,11 @@
   "description": "Language support for the Mettle I/O-oriented programming language.",
   "version": "1.0.0-alpha.1",
   "publisher": "mettle-lang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joafalves/mettle.git",
+    "directory": "util/plugin/vscode"
+  },
   "license": "UNLICENSED",
   "engines": {
     "vscode": ">=1.85.0"
@@ -15,7 +20,8 @@
     "onCommand:mettle.runTest",
     "onCommand:mettle.runAllFlows",
     "onCommand:mettle.runTests",
-    "onCommand:mettle.selectProfile"
+    "onCommand:mettle.selectProfile",
+    "onCommand:mettle.openDocumentation"
   ],
   "categories": [
     "Programming Languages",
@@ -29,7 +35,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --allow-missing-repository --out dist/mettle-language-1.0.0-alpha.1.vsix"
+    "package": "mkdir -p dist && npx --yes @vscode/vsce@4.0.0 package --baseContentUrl https://github.com/joafalves/mettle/blob/HEAD/util/plugin/vscode --out dist/mettle-language-1.0.0-alpha.1.vsix"
   },
   "contributes": {
     "commands": [

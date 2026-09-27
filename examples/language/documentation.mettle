@@ -1,0 +1,31 @@
+// Run without network access:
+//   mettle run examples/language/documentation.mettle
+//   mettle test examples/language/documentation.mettle
+// In VS Code, hover greet(), its name parameter, or text.encode().
+// F12 on greet() opens this declaration; F12 on text.encode() opens its
+// read-only, offline reference. Signature help works while typing arguments.
+// Built-in hovers show practical behavior notes and an example; the compact
+// signature's … hides optional named options, not unsupported arguments.
+
+/// Shared greeting settings for this file.
+context greetings {
+    prefix: "Hello"
+}
+
+use context greetings
+
+/// Build a friendly greeting without performing any I/O.
+/// @param name Name to include in the greeting.
+/// @returns The complete greeting as a string.
+flow greet(name) = "${prefix}, ${name}!"
+
+/// Show user-flow documentation alongside built-in codec documentation.
+flow main {
+    greeting = greet(name: "Mettle")
+    encoded = text.encode(greeting)
+    text.decode(encoded)
+}
+
+test "documented flows behave like ordinary flows" {
+    assert(greet("Mettle") == "Hello, Mettle!")
+}
