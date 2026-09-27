@@ -191,15 +191,19 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(representation(&headers, Span::default())
-            .unwrap_err()
-            .message
-            .contains("duplicate"));
+        assert!(
+            representation(&headers, Span::default())
+                .unwrap_err()
+                .message
+                .contains("duplicate")
+        );
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        assert!(decode(&bytes, None, &headers, false, 10, Span::default())
-            .unwrap_err()
-            .message
-            .contains("Content-Encoding"));
+        assert!(
+            decode(&bytes, None, &headers, false, 10, Span::default())
+                .unwrap_err()
+                .message
+                .contains("Content-Encoding")
+        );
     }
 
     #[test]
