@@ -24,6 +24,7 @@ The standalone language files below require no network access.
 | --- | --- | --- |
 | [Basics](language/basics.mettle) | Reusable flows, implicit final value, and a test | `mettle run examples/language/basics.mettle` |
 | [Code documentation](language/documentation.mettle) | `///` descriptions, `@param`/`@returns`, keyword/helper and primitive-kind hovers, signature help, and offline references | `mettle run examples/language/documentation.mettle` |
+| [Variable intelligence](language/variable-intelligence.mettle) | Native-kind/field hovers, aliases, contexts, helper results, finite collections, and safe sensitivity metadata | `mettle run examples/language/variable-intelligence.mettle` |
 | [Conditionals](language/conditionals.mettle) | `if`/`else`, boolean logic, indexing, and terminal `fail()` | `mettle test examples/language/conditionals.mettle` |
 | [Contexts](language/contexts.mettle) | Reusable and anonymous file-level contexts | `mettle run examples/language/contexts.mettle` |
 | [Collections and numbers](language/collections-and-numbers.mettle) | Named parallel work, `for` mapping, retries, numeric literals | `mettle test examples/language/collections-and-numbers.mettle` |
@@ -73,7 +74,9 @@ mettle run examples/http/content.mettle main --arg baseUrl=http://127.0.0.1:8080
 ```
 
 The fixture startup command is below. No public service or real credential is
-needed. Client responses retain `.json` for parsed JSON in this phase.
+needed. Client `.body` is decoded using Content-Type; `.bodyBytes` retains the
+representation bytes and `.mediaType` records normalized metadata. See
+[incoming content](http/incoming-content.mettle) for native kinds and empty bodies.
 
 [File upload](http/file-upload.mettle) demonstrates both buffered and streamed
 request bodies, plus a server that rejects an upload before reading its body.

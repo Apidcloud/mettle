@@ -77,7 +77,7 @@ assert result["put"]["contentType"] == "text/plain; charset=utf-8", result
 assert result["patched"]["method"] == "PATCH", result
 assert result["patched"]["json"] == {"active": True}, result
 assert result["deleted"]["method"] == "DELETE", result
-assert result["headBody"] == "", result
+assert result["headBody"] is None, result
 assert "PATCH" in result["allowed"], result
 assert result["responseContentType"] == "application/json", result
 PY
@@ -105,9 +105,9 @@ import sys
 anonymous = json.loads(sys.argv[1])
 named = json.loads(sys.argv[2])
 assert anonymous["status"] == 200, anonymous
-assert anonymous["json"]["id"] == "seed-42", anonymous
+assert anonymous["body"]["id"] == "seed-42", anonymous
 assert named["status"] == 200, named
-assert named["json"]["id"] == "seed-42", named
+assert named["body"]["id"] == "seed-42", named
 PY
 
 if cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \
@@ -156,7 +156,7 @@ if METTLE_BASE_URL="http://127.0.0.1:$port" \
   exit 1
 fi
 
-rg -q 'HTTP response declared JSON but its body could not be decoded' "$state_dir/invalid-json.err"
+rg -q 'HTTP response body could not be decoded: invalid JSON' "$state_dir/invalid-json.err"
 
 if METTLE_BASE_URL="http://127.0.0.1:$port" \
   cargo run --quiet --manifest-path "$repository_dir/Cargo.toml" -- \

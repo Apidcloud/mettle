@@ -1109,10 +1109,26 @@ fn echo_value(value: &Value, complete: bool) -> String {
 
 fn format_value(value: &Value) -> String {
     match value {
-        Value::Array(_) | Value::Object(_) | Value::Bytes(_) => {
-            serde_json::to_string_pretty(&value_json(value))
-                .expect("Mettle values always convert to JSON")
+        Value::Bytes(bytes) => {
+            use std::fmt::Write as _;
+            const PREVIEW_BYTES: usize = 64;
+            let mut output = format!("{} bytes", bytes.len());
+            if !bytes.is_empty() {
+                output.push_str("\nHex: ");
+                for (index, byte) in bytes.iter().take(PREVIEW_BYTES).enumerate() {
+                    if index > 0 {
+                        output.push(' ');
+                    }
+                    let _ = write!(output, "{byte:02x}");
+                }
+                if bytes.len() > PREVIEW_BYTES {
+                    output.push_str("\n… binary preview limited to 64 bytes; use --raw or --output json for all bytes");
+                }
+            }
+            output
         }
+        Value::Array(_) | Value::Object(_) => serde_json::to_string_pretty(&value_json(value))
+            .expect("Mettle values always convert to JSON"),
         Value::String(value) => value.clone(),
         Value::Sensitive(_) => "[REDACTED]".to_owned(),
         _ => value.to_string(),
@@ -1240,6 +1256,7 @@ fn style(value: &str, code: &str, enabled: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{format_value, value_json};
     use std::collections::BTreeMap;
 
     use super::{CliObserver, ExecutionReport, display_duration, events_json, truncate};
@@ -1337,9 +1354,23 @@ mod tests {
     }
 
     #[test]
+    fn binary_human_preview_is_bounded_without_changing_machine_output() {
+        let bytes = Value::Bytes(std::sync::Arc::from(vec![255; 100]));
+        let human = format_value(&bytes);
+        assert!(human.starts_with("100 bytes\nHex: ff ff"));
+        assert_eq!(human.matches("ff").count(), 64);
+        assert!(human.contains("binary preview limited"));
+        assert_eq!(value_json(&bytes).as_array().unwrap().len(), 100);
+        assert_eq!(format_value(&bytes.sensitive()), "[REDACTED]");
+        assert_eq!(
+            format_value(&Value::Bytes(std::sync::Arc::from([]))),
+            "0 bytes"
+        );
+    }
+
+    #[test]
     fn verbose_output_includes_full_http_response_details() {
         let value = Value::Object(BTreeMap::from([
-            ("body".to_owned(), Value::String("raw body".to_owned())),
             (
                 "bodyBytes".to_owned(),
                 Value::Bytes(std::sync::Arc::from([114, 97, 119])),
@@ -1358,7 +1389,7 @@ mod tests {
                 ])),
             ),
             (
-                "json".to_owned(),
+                "body".to_owned(),
                 Value::Object(BTreeMap::from([(
                     "status".to_owned(),
                     Value::String("ok".to_owned()),
@@ -1397,7 +1428,7 @@ mod tests {
         assert!(verbose.contains("content-type: application/json"));
         assert!(verbose.contains("set-cookie: [REDACTED]"));
         assert!(!verbose.contains("session=secret"));
-        assert!(verbose.contains("JSON body"));
+        assert!(verbose.contains("Body"));
         assert!(verbose.contains("\"status\": \"ok\""));
         assert!(verbose.contains("https://example.test/health"));
         assert!(!verbose.contains("bodyBytes"));

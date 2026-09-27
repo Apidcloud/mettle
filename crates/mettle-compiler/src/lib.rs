@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 pub mod documentation;
+mod result_migrations;
+pub mod semantics;
 
 use mettle_capability::{CapabilityDescriptor, FieldSchema, SchemaType};
 pub use mettle_syntax::BinaryOperator;
@@ -234,9 +236,12 @@ impl ValueType {
 const fn schema_value_type(schema: SchemaType) -> ValueType {
     match schema {
         SchemaType::Boolean => ValueType::Boolean,
-        SchemaType::Body | SchemaType::Json | SchemaType::Writable | SchemaType::Encoded => {
-            ValueType::Inferred
-        }
+        SchemaType::Value
+        | SchemaType::NullableString
+        | SchemaType::Body
+        | SchemaType::Json
+        | SchemaType::Writable
+        | SchemaType::Encoded => ValueType::Inferred,
         SchemaType::Bytes => ValueType::Bytes,
         SchemaType::Source => ValueType::Source,
         SchemaType::Duration => ValueType::Duration,
@@ -456,6 +461,7 @@ mod tests {
         },
     ];
     const HTTP: CapabilityDescriptor = CapabilityDescriptor {
+        removed_result_fields: &[],
         name: "http",
         description: "",
         constants: &[],

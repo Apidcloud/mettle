@@ -117,6 +117,29 @@ impl MediaType {
         }
     }
 
+    /// A deterministic spelling preserving explicit parameters, without guessing defaults.
+    #[must_use]
+    pub fn normalized(&self) -> String {
+        use std::fmt::Write as _;
+        let mut output = self.essence.clone();
+        for (name, value) in &self.parameters {
+            let _ = write!(output, "; {name}=");
+            if valid_token(value) {
+                output.push_str(value);
+            } else {
+                output.push('"');
+                for character in value.chars() {
+                    if matches!(character, '"' | '\\') {
+                        output.push('\\');
+                    }
+                    output.push(character);
+                }
+                output.push('"');
+            }
+        }
+        output
+    }
+
     #[must_use]
     pub fn equivalent(&self, other: &Self) -> bool {
         if self.essence != other.essence {
@@ -176,6 +199,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, b);
+        assert_eq!(
+            a.normalized(),
+            "application/vnd.example+json; charset=utf-8; version=One"
+        );
+        let quoted = MediaType::parse("text/plain; note=\"one;two\\\"three\"", span).unwrap();
+        assert_eq!(
+            MediaType::parse(&quoted.normalized(), span).unwrap(),
+            quoted
+        );
         assert_eq!(a.codec(), BuiltinCodec::Json);
         assert_ne!(
             a,

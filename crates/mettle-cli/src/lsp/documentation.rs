@@ -237,10 +237,20 @@ fn hover(snapshot: &Snapshot) -> Option<(String, Span, Option<String>)> {
     // Locals/context bindings shadow constants, just as in compilation. Operation
     // call targets are always capability-qualified, regardless of such bindings.
     let is_call = mettle_syntax::documentation::is_call_target(text, range);
+    let sources = snapshot
+        .sources
+        .iter()
+        .map(|source| source.text.as_str())
+        .collect::<Vec<_>>();
+    let semantics = (!is_call)
+        .then(|| mettle_compiler::semantics::analyze(&snapshot.program, CAPABILITIES, &sources));
+    let semantic = semantics
+        .as_ref()
+        .and_then(|model| model.at(snapshot.source, snapshot.byte));
     if is_call && let Some(item) = mettle_compiler::documentation::item(&name) {
         return Some((item.hover(), range, Some(uri(&format!("language.{name}")))));
     }
-    if definition.is_none() || is_call {
+    if (definition.is_none() && semantic.is_none()) || is_call {
         if let Some((capability, operation)) = operation(&name) {
             return Some((
                 operation_hover(capability, operation),
@@ -314,7 +324,75 @@ fn hover(snapshot: &Snapshot) -> Option<(String, Span, Option<String>)> {
             }
         }
     }
+    if let Some(info) = semantic {
+        let content = local_hover(snapshot, definition, info);
+        return Some((content, info.span, info.value.operation.as_deref().map(uri)));
+    }
     definition.and_then(|target| declaration_hover(snapshot, target, &name, range))
+}
+
+fn local_hover(
+    snapshot: &Snapshot,
+    definition: Option<Span>,
+    info: &mettle_compiler::semantics::SymbolInfo,
+) -> String {
+    let text = &snapshot.sources[snapshot.source].text;
+    let label = &text[info.span.start..info.span.end];
+    let mut content = semantic_hover(label, info);
+    if let Some(target) = definition {
+        for flow in &snapshot.program.flows {
+            if let Some(parameter) = flow
+                .parameters
+                .iter()
+                .find(|parameter| parameter.span == target)
+            {
+                let description =
+                    parameter_description(&doc_for_flow(snapshot, flow), &parameter.value);
+                if !description.is_empty() {
+                    let _ = write!(content, "\n\n{description}");
+                }
+            }
+        }
+    }
+    content
+}
+
+fn semantic_hover(name: &str, symbol: &mettle_compiler::semantics::SymbolInfo) -> String {
+    use mettle_compiler::semantics::{Sensitivity, SymbolRole};
+    let value = &symbol.value;
+    let mut content = format!("```mettle\n{name}: {}\n```", value.kind_name());
+    if symbol.role == SymbolRole::Parameter {
+        content.push_str("\n\nFlow parameter; its kind depends on the caller.");
+    }
+    if let Some(operation) = &value.operation {
+        let _ = write!(content, "\n\nResult information from `{operation}`.");
+    }
+    if !value.description.is_empty() {
+        let _ = write!(content, "\n\n{}", value.description);
+    }
+    if !value.fields.is_empty() {
+        content.push_str("\n\nKnown fields:\n");
+        for field in value.fields.iter() {
+            let _ = write!(content, "\n- `{}: {}`", field.name, field.value.kind_name());
+            if !field.value.description.is_empty() {
+                let _ = write!(content, " — {}", field.value.description);
+            }
+        }
+        content.push('\n');
+    }
+    if value.fields_truncated {
+        content.push_str("\n\nAdditional fields omitted from this preview.");
+    }
+    match value.sensitivity {
+        Sensitivity::Sensitive => content.push_str(
+            "\n\nSensitive value (or contains sensitive fields); contents are never shown here.",
+        ),
+        Sensitivity::Unknown => content.push_str(
+            "\n\nSensitivity is determined at runtime; contents are never inspected here.",
+        ),
+        Sensitivity::Public => {}
+    }
+    content
 }
 
 fn declaration_hover(
@@ -477,6 +555,124 @@ mod tests {
     }
 
     #[test]
+    fn variable_and_field_hovers_use_normalized_native_shapes_without_execution() {
+        let text = "// 😀 Unsaved, no server or environment needed.\ncontext settings { token: senv(\"EDITOR_UNSET_TOKEN\"), json: { mediaType: \"not-the-codec\" } }\nuse context settings\n/// @param input Caller-owned input.\nflow identity(input) = input\nflow request(url) = http.post(url, body: { name: \"Ada\" })\nflow main {\n created = request(\"http://127.0.0.1:1/unreachable\")\n alias = created\n status = alias.status\n payload = alias.body\n uncertain = payload.name\n credential = token\n local = json.mediaType\n unknown = identity(42)\n created\n}";
+        let fixture = Fixture::new(text);
+        let hover = fixture.query("textDocument/hover", "created =");
+        let markdown = hover["contents"]["value"].as_str().unwrap();
+        assert!(markdown.contains("created: object"));
+        assert!(markdown.contains("status: integer"));
+        assert!(markdown.contains("mediaType: string or null"));
+        assert!(markdown.contains("body: value (kind determined at runtime)"));
+        assert!(!markdown.contains("json:"));
+        assert_eq!(hover["mettleReference"], uri("http.post"));
+        let hover = fixture.query("textDocument/hover", "status\n payload");
+        assert_eq!(
+            hover["range"],
+            span_range(
+                text,
+                Span::new(
+                    text.find("status\n payload").unwrap(),
+                    text.find("status\n payload").unwrap() + 6
+                )
+            )
+        );
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Numeric HTTP response status")
+        );
+        assert_eq!(hover["mettleReference"], uri("http.post"));
+        for needle in ["payload =", "uncertain =", "unknown ="] {
+            assert!(
+                fixture.query("textDocument/hover", needle)["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains("kind determined at runtime")
+            );
+        }
+        let secret = fixture.query("textDocument/hover", "credential =");
+        assert!(
+            secret["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Sensitive value")
+        );
+        assert!(!secret.to_string().contains("EDITOR_UNSET_TOKEN"));
+        let local = fixture.query("textDocument/hover", "json.mediaType");
+        assert!(
+            local["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("json: object")
+        );
+        assert!(local.get("mettleReference").is_none());
+        let parameter = fixture.query("textDocument/hover", "input\nflow request");
+        assert!(
+            parameter["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("Caller-owned input.")
+        );
+    }
+
+    #[test]
+    fn incomplete_variable_hovers_preserve_scope_and_project_overlays() {
+        let mut fixture = Fixture::new(
+            "use namespace remote\nflow main { response = fetch()\n alias = response\n unfinished = http.get(",
+        );
+        std::fs::write(
+            fixture.directory.join("mettle.toml"),
+            "name = \"hover-project\"\n",
+        )
+        .unwrap();
+        let helper = fixture.directory.join("remote.mettle");
+        std::fs::write(
+            &helper,
+            "namespace remote\nflow fetch = { diskOnly: true }\n",
+        )
+        .unwrap();
+        fixture.server.documents.insert(
+            helper.clone(),
+            "namespace remote\nflow fetch = http.get(\"http://127.0.0.1:1\")\n".into(),
+        );
+        let hover = fixture.query("textDocument/hover", "alias =");
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("status: integer")
+        );
+        assert!(!hover.to_string().contains("diskOnly"));
+        fixture.server.documents.insert(
+            helper,
+            "namespace remote\nflow fetch = { updated: true }\n".into(),
+        );
+        let hover = fixture.query("textDocument/hover", "alias =");
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("updated: boolean")
+        );
+        assert!(hover.get("mettleReference").is_none());
+        fixture.server.documents.insert(
+            fixture.path.clone(),
+            "flow main { if (true) { scoped = 1\n echo(scoped) }\n scoped }".into(),
+        );
+        let text = &fixture.server.documents[&fixture.path];
+        let byte = text.rfind("scoped }").unwrap();
+        let params = json!({"textDocument": {"uri": super::super::path_to_file_uri(&fixture.path)}, "position": span_range(text, Span::new(byte, byte))["start"]});
+        assert!(
+            fixture
+                .server
+                .documentation_query(&params, "textDocument/hover")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn all_reserved_words_have_hover_and_virtual_reference_coverage() {
         for item in mettle_syntax::language::KEYWORDS {
             let mut fixture = Fixture::new(item.example);
@@ -573,12 +769,14 @@ mod tests {
             uri("language.secret")
         );
         let fixture = Fixture::new("flow main { echo = \"local\"\n echo }");
+        let hover = fixture.query("textDocument/hover", "echo }");
         assert!(
-            fixture
-                .server
-                .documentation_query(&fixture.params("echo }"), "textDocument/hover")
-                .is_none()
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("echo: string")
         );
+        assert!(hover.get("mettleReference").is_none());
         for text in [
             "// assert(true)\nflow main = 1",
             "flow main = \"use context\"",
@@ -811,12 +1009,14 @@ mod tests {
     fn shadowing_comments_doc_warnings_and_examples_are_safe() {
         let fixture =
             Fixture::new("flow main { json = { mediaType: \"local\" }\n json.mediaType\n}");
+        let hover = fixture.query("textDocument/hover", "json.mediaType");
         assert!(
-            fixture
-                .server
-                .documentation_query(&fixture.params("json.mediaType"), "textDocument/hover")
-                .is_none()
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("json: object")
         );
+        assert!(hover.get("mettleReference").is_none());
         let text = "/// @param wrong Typo.\nflow f(id) = id";
         let program = mettle_syntax::parse(text).unwrap();
         assert_eq!(warnings(text, &program).len(), 1);

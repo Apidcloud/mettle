@@ -99,7 +99,7 @@ def main() -> None:
         assert methods["rawCopy"]["contentType"] == "application/octet-stream", methods
         assert methods["rawCopy"]["body"] == methods["postedResponseBody"], methods
         assert methods["deleted"]["method"] == "DELETE", methods
-        assert methods["headBody"] == "", methods
+        assert methods["headBody"] is None, methods
         assert "OPTIONS" in methods["allowed"], methods
         assert methods["responseContentType"] == "application/json", methods
 

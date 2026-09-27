@@ -53,5 +53,5 @@ flow fixedConcurrency() {
 flow serverMaximumConcurrency() {
     use context localLoad
     response = http.get("/parallel-stats")
-    return response.json.maximum
+    return response.body.maximum
 }

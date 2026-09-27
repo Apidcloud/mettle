@@ -30,14 +30,14 @@ flow main {
     assert(options.status == 204)
 
     return {
-        posted: posted.json
-        postedResponseBody: posted.body
-        put: put.json
-        patched: patched.json
-        jsonString: jsonString.json
-        namedUrl: namedUrl.json
-        rawCopy: rawCopy.json
-        deleted: deleted.json
+        posted: posted.body
+        postedResponseBody: text.decode(posted.bodyBytes)
+        put: put.body
+        patched: patched.body
+        jsonString: jsonString.body
+        namedUrl: namedUrl.body
+        rawCopy: rawCopy.body
+        deleted: deleted.body
         headBody: head.body
         allowed: options.headers["allow"]
         responseContentType: posted.headers["content-type"]

@@ -267,6 +267,16 @@ pub fn call_site(source: &str, byte: usize) -> Option<CallSite> {
     Some(call)
 }
 
+/// Identifier token spans for value-free editor analysis. Uses the language
+/// lexer, including its recovery behavior for unfinished files.
+#[must_use]
+pub fn identifier_spans(source: &str) -> Vec<Span> {
+    tokens(source)
+        .into_iter()
+        .filter_map(|token| matches!(token.kind, TokenKind::Identifier(_)).then_some(token.span))
+        .collect()
+}
+
 /// Qualified identifier under the cursor, excluding strings and comments.
 #[must_use]
 pub fn symbol(source: &str, byte: usize) -> Option<(String, Span)> {
@@ -295,6 +305,43 @@ pub fn symbol(source: &str, byte: usize) -> Option<(String, Span)> {
 pub fn recover(source: &str) -> Program {
     if let Ok(program) = parse(source) {
         return program;
+    }
+    // Preserve finished statements in an unfinished declaration. Only close
+    // its outer brace: never invent arguments, collection items, or policy
+    // bodies. Synthetic closing spans are not used for symbol navigation.
+    let source_tokens = tokens(source);
+    for end in std::iter::once(source.len()).chain(
+        source_tokens
+            .iter()
+            .rev()
+            .take(32)
+            .map(|token| token.span.start),
+    ) {
+        let prefix = &source[..end];
+        let mut stack = Vec::new();
+        let mut mismatched = false;
+        for token in source_tokens
+            .iter()
+            .take_while(|token| token.span.end <= end)
+        {
+            match token.kind {
+                TokenKind::LeftBrace | TokenKind::LeftParen | TokenKind::LeftBracket => {
+                    stack.push(token.kind.clone());
+                }
+                TokenKind::RightBrace => mismatched |= stack.pop() != Some(TokenKind::LeftBrace),
+                TokenKind::RightParen => mismatched |= stack.pop() != Some(TokenKind::LeftParen),
+                TokenKind::RightBracket => {
+                    mismatched |= stack.pop() != Some(TokenKind::LeftBracket);
+                }
+                _ => {}
+            }
+        }
+        if !mismatched
+            && stack == [TokenKind::LeftBrace]
+            && let Ok(program) = parse(&format!("{prefix}\n}}"))
+        {
+            return program;
+        }
     }
     let mut depth = 0usize;
     let mut starts = Vec::new();
@@ -349,7 +396,8 @@ mod tests {
         assert_eq!(call.name, "http.post");
         assert_eq!(call.named.as_deref(), Some("mediaType"));
         assert_eq!(call.argument, 2);
-        assert_eq!(recover(text).flows.len(), 1);
+        // The incomplete declaration retains its finished prefix, too.
+        assert_eq!(recover(text).flows.len(), 2);
         let text = "http.post(\"/\", tls: { verifyCertificates: ";
         assert_eq!(call_site(text, text.len()).unwrap().path, ["tls"]);
         assert!(symbol("\"http.post\"", 4).is_none());

@@ -13,8 +13,6 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use mettle_capability::content::BuiltinCodec;
-use mettle_capability::media_type::MediaType;
 use mettle_capability::{
     Capability, CapabilityError, CapabilityFuture, IoContext, Object, OperationReport,
     ReportOutcome, ReportSection, Span, Value, merge_objects,
@@ -23,6 +21,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
+mod incoming;
 mod outgoing;
 mod request_body;
 mod schema;
@@ -226,7 +225,8 @@ impl HttpCapability {
             upload.stop();
 
             let status = response.status().as_u16();
-            if method != Method::HEAD
+            let has_no_body = incoming::bodyless(&method, status);
+            if !has_no_body
                 && let Some(length) = response.headers().get(CONTENT_LENGTH)
                 && let Ok(length) = length.to_str()
                 && let Ok(length) = length.parse::<u64>()
@@ -237,13 +237,10 @@ impl HttpCapability {
                     span,
                 ));
             }
-            let declares_json = response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(is_json_content_type);
-            let headers = response
-                .headers()
+            let media = incoming::representation(response.headers(), span)?;
+            let (parts, response_body) = response.into_parts();
+            let headers = parts
+                .headers
                 .iter()
                 .map(|(name, value)| {
                     let value =
@@ -256,40 +253,32 @@ impl HttpCapability {
                     (name.as_str().to_owned(), value)
                 })
                 .collect::<BTreeMap<_, _>>();
-            let bytes = read_bounded_body(response.into_body(), max_response_bytes, span).await?;
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            let empty_body = bytes.is_empty();
+            let bytes = read_bounded_body(response_body, max_response_bytes, span).await?;
             let body_bytes = Value::Bytes(Arc::from(bytes));
-            let json = match BuiltinCodec::Json.decode(&body_bytes, max_response_bytes, span) {
-                Ok(value) => value,
-                Err(_) if empty_body || !declares_json => Value::Null,
-                Err(error) => {
-                    return Err(CapabilityError::new(
-                        format!(
-                            "HTTP response declared JSON but its body could not be decoded: {error}"
-                        ),
-                        span,
-                    ));
-                }
-            };
+            let decoded = incoming::decode(
+                &body_bytes,
+                media.as_ref(),
+                &parts.headers,
+                has_no_body,
+                max_response_bytes,
+                span,
+            )?;
 
-            Ok(Value::Object(BTreeMap::from([
-                ("body".to_owned(), Value::String(text)),
-                ("bodyBytes".to_owned(), body_bytes),
-                ("duration".to_owned(), Value::Duration(started.elapsed())),
-                ("headers".to_owned(), Value::Object(headers)),
-                ("json".to_owned(), json),
-                ("method".to_owned(), Value::String(method.to_string())),
-                ("status".to_owned(), Value::Integer(i64::from(status))),
-                (
-                    "url".to_owned(),
-                    if url_sensitive {
-                        Value::String(url).sensitive()
-                    } else {
-                        Value::String(url)
-                    },
-                ),
-            ])))
+            Ok(schema::ResponseValue {
+                body: decoded,
+                body_bytes,
+                duration: Value::Duration(started.elapsed()),
+                headers: Value::Object(headers),
+                media_type: media.map_or(Value::Null, |media| Value::String(media.normalized())),
+                method: Value::String(method.to_string()),
+                status: Value::Integer(i64::from(status)),
+                url: if url_sensitive {
+                    Value::String(url).sensitive()
+                } else {
+                    Value::String(url)
+                },
+            }
+            .into_value())
         };
 
         tokio::time::timeout_at(deadline, exchange)
@@ -359,17 +348,14 @@ impl Capability for HttpCapability {
             .iter()
             .map(|(name, value)| (name.clone(), value.to_string()))
             .collect();
-        let (payload_title, payload) = match fields.get("json") {
-            Some(Value::Null) | None => ("Body", fields.get("body").cloned()),
-            Some(json) => ("JSON body", Some(json.clone())),
-        };
+        let payload = fields.get("body").cloned();
         let mut sections = vec![ReportSection::Fields {
             title: "Headers".to_owned(),
             fields: header_fields,
         }];
         if let Some(value) = &payload {
             sections.push(ReportSection::Value {
-                title: payload_title.to_owned(),
+                title: "Body".to_owned(),
                 value: value.clone(),
             });
         }
@@ -523,14 +509,6 @@ fn type_error(name: &str, expected: &str, value: &Value, span: Span) -> Capabili
     )
 }
 
-fn is_json_content_type(value: &str) -> bool {
-    // Incoming representation detection keeps its existing contract: parameters
-    // must not hide a JSON declaration and silently suppress decoding failures.
-    let essence = value.split(';').next().unwrap_or(value).trim();
-    MediaType::parse(essence, Span::default())
-        .is_ok_and(|media| media.codec() == BuiltinCodec::Json)
-}
-
 fn error_chain(error: &dyn Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
@@ -595,7 +573,8 @@ mod tests {
 
     use mettle_capability::{Capability, Object, Span, Value};
 
-    use super::{BuiltinCodec, HttpCapability, is_json_content_type, resolve_url};
+    use super::{HttpCapability, resolve_url};
+    use mettle_capability::content::BuiltinCodec;
     use mettle_capability::content::from_json;
 
     #[test]
@@ -675,16 +654,5 @@ mod tests {
             Some(&Value::String("Bearer new".to_owned()))
         );
         assert!(!headers.contains_key("Authorization"));
-    }
-
-    #[test]
-    fn recognizes_json_media_types() {
-        assert!(is_json_content_type("application/json"));
-        assert!(is_json_content_type("Application/JSON; charset=utf-8"));
-        assert!(is_json_content_type("application/merge-patch+json"));
-        assert!(is_json_content_type(
-            "application/json; charset=\"unfinished"
-        ));
-        assert!(!is_json_content_type("text/plain"));
     }
 }

@@ -19,15 +19,15 @@ flow browseUser {
     user = http.get("/users/1")
     assert(user.status == 200)
 
-    posts = http.get("/posts?userId=${user.json.id}")
+    posts = http.get("/posts?userId=${user.body.id}")
     assert(posts.status == 200)
-    posts.json
+    posts.body
 }
 
 flow readPost {
     post = http.get("/posts/1")
     assert(post.status == 200)
-    post.json
+    post.body
 }
 
 flow main {

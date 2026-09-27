@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub use mettle_syntax::Span;
 mod conversion;
+mod result;
 pub use conversion::{cast_value, matches_kind};
 pub mod codecs;
 pub mod content;
@@ -23,6 +24,8 @@ pub use io::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaType {
+    /// An ordinary value whose native kind is determined at runtime.
+    Value,
     Boolean,
     Body,
     Bytes,
@@ -34,6 +37,7 @@ pub enum SchemaType {
     Json,
     Object(&'static [FieldSchema]),
     String,
+    NullableString,
     StringMap,
 }
 
@@ -41,6 +45,7 @@ impl SchemaType {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Value => "value (native kind determined at runtime)",
             Self::Boolean => "boolean",
             Self::Body => "HTTP body value",
             Self::Bytes => "bytes",
@@ -49,9 +54,10 @@ impl SchemaType {
             Self::Encoded => "complete string or bytes",
             Self::Duration => "duration",
             Self::Integer => "integer",
-            Self::Json => "JSON value",
+            Self::Json => "JSON-compatible value",
             Self::Object(_) => "object",
             Self::String => "string",
+            Self::NullableString => "string or null",
             Self::StringMap => "object containing string values",
         }
     }
@@ -107,6 +113,14 @@ pub struct CapabilityDescriptor {
     pub defaults: &'static [FieldSchema],
     pub operations: &'static [OperationSchema],
     pub description: &'static str,
+    /// Migration diagnostics for fields removed from this capability's results.
+    pub removed_result_fields: &'static [RemovedResultField],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RemovedResultField {
+    pub name: &'static str,
+    pub message: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,0 +1,60 @@
+// Start the local fixture: python3 util/test-server/http_fixture.py --port 8080
+// Run: mettle run examples/http/incoming-content.mettle --arg baseUrl=http://127.0.0.1:8080
+// Print just the result: append --raw; save it: append --raw > incoming-result.json
+// JSON is a representation. The decoded body uses native kinds, not a JSON type.
+// This file uses the local fixture's demonstration credential, not a real secret.
+// Inspect one response with headers: mettle run examples/http/incoming-content.mettle inspect --arg baseUrl=http://127.0.0.1:8080 --arg representation=binary --verbose
+
+use context {
+    defaults http {
+        headers: { Authorization: "Bearer local-test-token" }
+    }
+}
+
+/// Fetch one fixture representation to inspect its decoded body and headers.
+/// @param baseUrl Base URL of the local HTTP fixture.
+/// @param representation Fixture case: object, array, text, binary, missing, etc.
+/// @returns The complete HTTP response with decoded body and original bytes.
+flow inspect(baseUrl, representation) = http.get("${baseUrl}/content/${representation}")
+
+/// Inspect complete, bounded responses with different representation metadata.
+/// @param baseUrl Base URL of the repository's local HTTP fixture.
+/// @returns Decoded values and normalized metadata, without duplicate byte dumps.
+flow main(baseUrl) {
+    object = http.get("${baseUrl}/content/object")
+    assert(object.body is object)
+    assert(object.body.name == "Ada")
+    // `json` here is an ordinary payload field, not a special response property.
+    assert(object.body.json == "ordinary field")
+    assert(json.decode(object.bodyBytes) == object.body)
+
+    array = http.get("${baseUrl}/content/array")
+    assert(array.body is array)
+    number = http.get("${baseUrl}/content/number")
+    assert(number.body is number)
+    text = http.get("${baseUrl}/content/text")
+    assert(text.body is string)
+    binary = http.get("${baseUrl}/content/binary")
+    assert(binary.body is bytes)
+    missing = http.get("${baseUrl}/content/missing")
+    assert(missing.mediaType == null)
+    assert(missing.body is bytes)
+
+    empty = http.get("${baseUrl}/content/empty-text")
+    assert(empty.body == "")
+    absent = http.get("${baseUrl}/content/no-content")
+    assert(absent.body == null)
+    head = http.head("${baseUrl}/content/object")
+    assert(head.body == null)
+
+    {
+        user: object.body
+        values: array.body
+        number: number.body
+        text: text.body
+        mediaType: object.mediaType
+        binaryBytes: binary.body
+        emptyText: empty.body
+        absentBody: absent.body
+    }
+}

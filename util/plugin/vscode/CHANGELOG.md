@@ -2,6 +2,11 @@
 
 ## 1.0.0-alpha.1
 
+- Add compiler-backed binding/field hovers with native kinds, known shapes,
+  helper/alias propagation, context values, and safe sensitivity metadata.
+
+- Normalize incoming HTTP bodies into native values and expose `mediaType`;
+  replace response `.json` with `.body`, with compiler migration diagnostics.
 - Document every reserved word, core helpers, and contextual primitive kinds on
   hover and in offline references; add argument hints for checks and policies.
 - Keep operation hovers compact, with practical HTTP/filesystem/codec descriptions

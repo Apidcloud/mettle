@@ -36,7 +36,7 @@ const JSON_OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "decode",
         documentation: OperationDocumentation {
-            summary: "Parse a JSON string or complete bytes into a language value. Invalid JSON or unsupported numeric ranges fail; live sources are not consumed implicitly.",
+            summary: "Parse JSON into a native object, array, scalar, or null. JSON is a representation, not a native kind. Invalid JSON or unsupported numeric ranges fail; live sources are not consumed implicitly.",
             notes: &[],
             parameters: &[
                 "Complete encoded bytes; JSON/text also accept strings. Live sources are never collected implicitly.",
@@ -48,7 +48,7 @@ const JSON_OPERATIONS: &[OperationSchema] = &[
         parameter_names: &["content"],
         options: OPTIONS,
         mutually_exclusive: &[],
-        result: SchemaType::Json,
+        result: SchemaType::Value,
     },
 ];
 const TEXT_OPERATIONS: &[OperationSchema] = &[
@@ -125,6 +125,7 @@ const BYTE_OPERATIONS: &[OperationSchema] = &[
 ];
 
 pub const JSON_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+    removed_result_fields: &[],
     name: "json",
     description: "Protocol-independent JSON encoding and decoding for complete values.",
     constants: &[CapabilityConstant {
@@ -136,6 +137,7 @@ pub const JSON_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     operations: JSON_OPERATIONS,
 };
 pub const TEXT_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+    removed_result_fields: &[],
     name: "text",
     description: "Protocol-independent UTF-8 text encoding and strict decoding.",
     constants: &[CapabilityConstant {
@@ -147,6 +149,7 @@ pub const TEXT_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     operations: TEXT_OPERATIONS,
 };
 pub const BYTES_DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+    removed_result_fields: &[],
     name: "bytes",
     description: "Identity codec for complete representation bytes; no implicit conversion.",
     constants: &[CapabilityConstant {

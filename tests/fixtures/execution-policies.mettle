@@ -27,9 +27,9 @@ flow policies() {
 
     stats = http.get("/parallel-stats")
     return {
-        retryAttempt: recovered.json.attempt
+        retryAttempt: recovered.body.attempt
         resultCount: responses
-        maximumConcurrency: stats.json.maximum
+        maximumConcurrency: stats.body.maximum
     }
 }
 

@@ -19,8 +19,8 @@ use context {
 flow upload(path) {
     response = http.post("/upload", body: fs.stream(path))
     assert(response.status == 201)
-    assert(response.json.chunked == true)
-    response.json
+    assert(response.body.chunked == true)
+    response.body
 }
 
 flow bufferedUpload(path) {
@@ -29,8 +29,8 @@ flow bufferedUpload(path) {
     response = http.post("/upload", body: payload)
     assert(response.status == 201)
     again = http.post("/upload", body: payload)
-    assert(again.json.sha256 == response.json.sha256)
-    response.json
+    assert(again.body.sha256 == response.body.sha256)
+    response.body
 }
 
 flow rejectedUpload(path) {
@@ -38,5 +38,5 @@ flow rejectedUpload(path) {
     // Ordinary calls still return a complete, bounded response.
     response = http.post("/reject-upload", body: fs.stream(path))
     assert(response.status == 413)
-    response.json
+    response.body
 }

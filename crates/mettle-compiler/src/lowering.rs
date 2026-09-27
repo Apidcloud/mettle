@@ -58,6 +58,19 @@ pub fn compile_with_capabilities(
     Compiler::new(program, capabilities).compile()
 }
 
+// Editor queries retain independently lowered expressions when other code is
+// incomplete or invalid. They never execute this partial plan.
+pub(super) fn editor_plan(
+    program: &Program,
+    capabilities: &[CapabilityDescriptor],
+) -> (
+    ExecutionPlan,
+    Vec<CompileError>,
+    Vec<super::semantics::BindingSource>,
+) {
+    Compiler::new(program, capabilities).lower()
+}
+
 struct Compiler<'a> {
     program: &'a Program,
     capabilities: &'a [CapabilityDescriptor],
@@ -67,6 +80,7 @@ struct Compiler<'a> {
     flow_ids: HashMap<String, usize>,
     errors: Vec<CompileError>,
     call_edges: Vec<Vec<(usize, Span)>>,
+    bindings: Vec<super::semantics::BindingSource>,
 }
 
 impl<'a> Compiler<'a> {
@@ -80,10 +94,26 @@ impl<'a> Compiler<'a> {
             flow_ids: HashMap::new(),
             errors: Vec::new(),
             call_edges: vec![Vec::new(); program.flows.len()],
+            bindings: Vec::new(),
         }
     }
 
-    fn compile(mut self) -> Result<ExecutionPlan, Vec<CompileError>> {
+    fn compile(self) -> Result<ExecutionPlan, Vec<CompileError>> {
+        let (plan, errors, _) = self.lower();
+        if errors.is_empty() {
+            Ok(plan)
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn lower(
+        mut self,
+    ) -> (
+        ExecutionPlan,
+        Vec<CompileError>,
+        Vec<super::semantics::BindingSource>,
+    ) {
         self.collect_capability_names();
         self.collect_context_names();
         self.collect_flow_names();
@@ -97,21 +127,25 @@ impl<'a> Compiler<'a> {
             flows.push(self.compile_flow(flow_id, flow, file_context));
         }
         self.detect_recursion();
-
         if self.errors.is_empty() {
-            Ok(ExecutionPlan {
-                capability_names: self
-                    .capabilities
-                    .iter()
-                    .map(|capability| capability.name.to_owned())
-                    .collect(),
-                contexts,
-                flows,
-                default_flow,
-            })
-        } else {
-            Err(self.errors)
+            self.errors.extend(super::result_migrations::check(
+                &flows,
+                &contexts,
+                self.capabilities,
+            ));
         }
+
+        let plan = ExecutionPlan {
+            capability_names: self
+                .capabilities
+                .iter()
+                .map(|capability| capability.name.to_owned())
+                .collect(),
+            contexts,
+            flows,
+            default_flow,
+        };
+        (plan, self.errors, self.bindings)
     }
 
     fn collect_capability_names(&mut self) {
@@ -280,6 +314,11 @@ impl<'a> Compiler<'a> {
             if let Some(flattened) = flattened {
                 for (slot, field) in flattened.fields.iter().enumerate() {
                     self.context_fields[context_id].insert(field.name.value.clone(), slot);
+                    self.bindings.push(super::semantics::BindingSource {
+                        declaration: field.name.span,
+                        initializer: Some(field.expression.span),
+                        owner: super::semantics::BindingOwner::Context(context_id, slot),
+                    });
                 }
             }
         }
@@ -459,6 +498,11 @@ impl<'a> Compiler<'a> {
         let mut locals: HashMap<String, usize> = HashMap::new();
         for parameter in &flow.parameters {
             let next_slot = locals.len();
+            self.bindings.push(super::semantics::BindingSource {
+                declaration: parameter.span,
+                initializer: None,
+                owner: super::semantics::BindingOwner::Flow(flow_id, next_slot),
+            });
             if locals.insert(parameter.value.clone(), next_slot).is_some() {
                 self.errors.push(CompileError::new(
                     format!("parameter `{}` is declared more than once", parameter.value),
@@ -595,11 +639,17 @@ impl<'a> Compiler<'a> {
                         ));
                         continue;
                     }
+                    let initializer = expression.span;
                     let expression =
                         self.compile_expression(Some(flow_id), expression, locals, active_context);
                     let slot = *next_slot;
                     *next_slot += 1;
                     locals.insert(name.value.clone(), slot);
+                    self.bindings.push(super::semantics::BindingSource {
+                        declaration: name.span,
+                        initializer: Some(initializer),
+                        owner: super::semantics::BindingOwner::Flow(flow_id, slot),
+                    });
                     if let Some(expression) = expression {
                         instructions.push(Instruction::Bind { slot, expression });
                     }
@@ -903,6 +953,11 @@ impl<'a> Compiler<'a> {
                     let slot = next_slot;
                     next_slot += 1;
                     scope.insert(key.value.clone(), slot);
+                    self.bindings.push(super::semantics::BindingSource {
+                        declaration: key.span,
+                        initializer: Some(expression.span),
+                        owner: super::semantics::BindingOwner::Loop(flow_id, slot),
+                    });
                     slot
                 });
                 if scope.contains_key(&value.value) {
@@ -917,6 +972,11 @@ impl<'a> Compiler<'a> {
                 let value_slot = next_slot;
                 next_slot += 1;
                 scope.insert(value.value.clone(), value_slot);
+                self.bindings.push(super::semantics::BindingSource {
+                    declaration: value.span,
+                    initializer: Some(expression.span),
+                    owner: super::semantics::BindingOwner::Loop(flow_id, value_slot),
+                });
                 let mut body = body.clone();
                 if let Some(Statement::Expression(result)) = body.last().cloned() {
                     let span = result.span;
@@ -1712,6 +1772,7 @@ impl<'a> Compiler<'a> {
             return;
         }
         let valid = match expected {
+            SchemaType::Value => true,
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
             SchemaType::Body => value.value_type != ValueType::Duration,
             SchemaType::Json => !matches!(
@@ -1728,6 +1789,9 @@ impl<'a> Compiler<'a> {
             SchemaType::Duration => value.value_type == ValueType::Duration,
             SchemaType::Integer => value.value_type == ValueType::Integer,
             SchemaType::String => value.value_type == ValueType::String,
+            SchemaType::NullableString => {
+                matches!(value.value_type, ValueType::String | ValueType::Null)
+            }
             SchemaType::Object(_) | SchemaType::StringMap => value.value_type == ValueType::Object,
         };
         if !valid {

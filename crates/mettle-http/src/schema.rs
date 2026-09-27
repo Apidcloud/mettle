@@ -33,22 +33,18 @@ const FIELD_MAX_BODY_BYTES: FieldSchema = FieldSchema::new("maxBodyBytes", Schem
         buffered: mettle_capability::DEFAULT_READ_BYTES,
         streamed: mettle_capability::DEFAULT_TRANSFER_BYTES,
     });
-const FIELD_RESPONSE_BODY: FieldSchema = FieldSchema::new("body", SchemaType::String).documented("Complete response body as text, using replacement characters for invalid UTF-8. Incoming decoded-body normalization is not implemented yet.");
-const FIELD_RESPONSE_BODY_BYTES: FieldSchema = FieldSchema::new("bodyBytes", SchemaType::Bytes)
-    .documented("Complete bounded response representation bytes.");
-const FIELD_RESPONSE_DURATION: FieldSchema = FieldSchema::new("duration", SchemaType::Duration)
-    .documented("Elapsed duration of the complete request.");
-const FIELD_RESPONSE_HEADERS: FieldSchema = FieldSchema::new("headers", SchemaType::StringMap)
-    .documented("Response headers; credential-bearing values retain sensitivity.");
-const FIELD_RESPONSE_JSON: FieldSchema = FieldSchema::new("json", SchemaType::Json).documented(
-    "Parsed JSON value, or null when unavailable. Malformed nonempty declared JSON fails.",
-);
-const FIELD_RESPONSE_METHOD: FieldSchema =
-    FieldSchema::new("method", SchemaType::String).documented("HTTP method used for this request.");
-const FIELD_RESPONSE_STATUS: FieldSchema = FieldSchema::new("status", SchemaType::Integer).documented("Numeric HTTP response status; error statuses are returned rather than thrown automatically.");
-const FIELD_RESPONSE_URL: FieldSchema = FieldSchema::new("url", SchemaType::String)
-    .documented("Resolved request URL; sensitive input remains redacted.");
-
+mettle_capability::result_object! {
+    pub(crate) struct ResponseValue {
+        body => ("body", SchemaType::Value, "Complete decoded response value. JSON/+json produces native values; text/* produces a UTF-8 string; missing/unknown content types produce bytes. HEAD/204/205/304 have null bodies. A media type does not prove application fields exist."),
+        body_bytes => ("bodyBytes", SchemaType::Bytes, "Complete bounded response representation bytes."),
+        duration => ("duration", SchemaType::Duration, "Elapsed duration of the complete request."),
+        headers => ("headers", SchemaType::StringMap, "Response headers; credential-bearing values retain sensitivity."),
+        media_type => ("mediaType", SchemaType::NullableString, "Normalized Content-Type string, preserving explicit parameters, or null when absent. No content sniffing, inferred type, or implicit charset parameter is added. The original header remains in headers."),
+        method => ("method", SchemaType::String, "HTTP method used for this request."),
+        status => ("status", SchemaType::Integer, "Numeric HTTP response status; error statuses are returned rather than thrown automatically."),
+        url => ("url", SchemaType::String, "Resolved request URL; sensitive input remains redacted."),
+    }
+}
 const TLS_FIELDS: &[FieldSchema] = &[FIELD_VERIFY_CERTIFICATES];
 
 const COMMON_OPTIONS: &[FieldSchema] = &[
@@ -76,16 +72,7 @@ const BODY_OPTIONS: &[FieldSchema] = &[
 const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
 const NO_CONFLICTS: &[&[&str]] = &[];
 
-const RESPONSE_FIELDS: &[FieldSchema] = &[
-    FIELD_RESPONSE_BODY,
-    FIELD_RESPONSE_BODY_BYTES,
-    FIELD_RESPONSE_DURATION,
-    FIELD_RESPONSE_HEADERS,
-    FIELD_RESPONSE_JSON,
-    FIELD_RESPONSE_METHOD,
-    FIELD_RESPONSE_STATUS,
-    FIELD_RESPONSE_URL,
-];
+const RESPONSE_FIELDS: &[FieldSchema] = ResponseValue::FIELDS;
 
 const RESPONSE_BEHAVIOR: &str = "HTTP error statuses are returned normally; use assertions to check success. Network, TLS, timeout, and body-limit errors fail the call.";
 const RESPONSE_NOTES: &[&str] = &[RESPONSE_BEHAVIOR];
@@ -200,6 +187,10 @@ const OPERATIONS: &[OperationSchema] = &[
 ];
 
 pub const DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+    removed_result_fields: &[mettle_capability::RemovedResultField {
+        name: "json",
+        message: "HTTP response field `json` was removed; use `body` for decoded content, or `bodyBytes` for representation bytes",
+    }],
     name: "http",
     description: "HTTP/1.1 client requests over HTTP or HTTPS with bounded bodies, shared connections, and TLS validation.",
     constants: &[],

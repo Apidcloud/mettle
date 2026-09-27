@@ -20,15 +20,15 @@ flow createUserFromSeed {
     created = http.post(
         "/posts",
         body: {
-            sourceId: seed.json.id
-            name: seed.json.name
+            sourceId: seed.body.id
+            name: seed.body.name
             active: true
             roles: ["tester"]
         },
     )
 
     assert(created.status == 201)
-    created.json
+    created.body
 }
 
 flow main {

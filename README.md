@@ -16,13 +16,13 @@ flow createUser {
     seed = http.get("https://jsonplaceholder.typicode.com/users/1")
 
     created = http.post("https://jsonplaceholder.typicode.com/posts", body: {
-            name: seed.json.name
+            name: seed.body.name
             active: true
             roles: ["tester"]
         })
 
     assert(created.status == 201)
-    created.json
+    created.body
 }
 ```
 
@@ -222,7 +222,7 @@ flow getPost(id) = http.get("https://jsonplaceholder.typicode.com/posts/${id}")
 test "post 1 is available" {
     response = getPost(1)
     assert(response.status == 200, "post 1 should return 200")
-    assert(response.json.id == 1, "post 1 should have ID 1")
+    assert(response.body.id == 1, "post 1 should have ID 1")
 }
 ```
 
@@ -250,14 +250,14 @@ flow createUserFromSeed {
     seed = http.get("/users/1")
 
     created = http.post("/posts", body: {
-            sourceId: seed.json.id
-            name: seed.json.name
+            sourceId: seed.body.id
+            name: seed.body.name
             active: true
             roles: ["tester"]
         })
 
     assert(created.status == 201)
-    created.json
+    created.body
 }
 ```
 
@@ -267,7 +267,27 @@ This is the complete shape used by the [HTTP workflow example](examples/http/wor
 mettle run examples/http/workflow.mettle
 ```
 
-An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `json`, `method`, `url`, and `duration`. A non-JSON response has `json: null`. HTTP status codes are ordinary values, so assertions make the expected condition obvious. Header names containing punctuation use string-key access, such as `response.headers["content-type"]`.
+An HTTP response exposes `status`, `headers`, `body`, `bodyBytes`, `mediaType`, `method`, `url`, and `duration`. `body` is the decoded native value, not necessarily an object. `mediaType` is the normalized Content-Type string with explicit parameters, or `null` when absent. HTTP status codes are ordinary values, so assertions make the expected condition obvious. Header names containing punctuation use string-key access, such as `response.headers["content-type"]`.
+
+Incoming JSON and `+json` decode into native objects, arrays, strings, numbers,
+booleans, or null. `text/*` decodes into a strict UTF-8 string. Missing or unknown
+content types remain bytes, without content sniffing. `bodyBytes` always retains
+the bounded representation bytes; the original Content-Type stays in `headers`.
+JSON is a representation, not a language value kind or a guarantee that fields exist.
+
+HEAD and statuses 204/205/304 have `body: null`. Other empty text/binary bodies
+remain `""`/empty bytes; empty declared JSON fails. Malformed or duplicate
+Content-Type, invalid JSON/UTF-8, unsupported JSON/text charsets, excessive
+nesting/numbers, and response limits fail with useful source locations. Non-identity
+Content-Encoding is rejected for responses with a body; compression is separate
+future work. HTTP error statuses are returned when their content is valid.
+
+**Breaking response migration:** `.json` has been removed; replace
+`response.json.name` with `response.body.name`. To obtain text independently of
+the declared type, use `text.decode(response.bodyBytes)`; to explicitly decode JSON,
+use `json.decode(response.bodyBytes)`. Known HTTP-result `.json` accesses get a
+compiler migration diagnostic, including aliases and simple helper-flow results.
+This does not reserve `json` as an ordinary object field.
 
 ## Make decisions and select values
 
@@ -575,7 +595,8 @@ outputs it with the normal sensitivity/redaction rules.
 
 Try the [filesystem project](examples/language/filesystem/main.mettle) and
 [local upload example](examples/http/file-upload.mettle). Progressive response
-consumption, custom codecs, and decoded `.body` changes remain future phases.
+consumption and custom codecs remain future phases. Ordinary HTTP responses are
+complete and bounded, with decoded `.body` values.
 
 ### Content codecs and value kinds
 
@@ -595,7 +616,7 @@ response = http.post("/temperature", body: value, mediaType: json.mediaType)
 ```
 
 `json.encode` returns bytes; `json.decode` accepts complete bytes or a string and
-returns a JSON value (object, array, scalar, or null). `text.encode` converts a
+returns a native value (object, array, scalar, or null). `text.encode` converts a
 string into UTF-8 bytes without quotes. Numbers, booleans, null, arrays, and
 objects can also be explicitly formatted with `text.encode`: these use compact
 JSON spelling. `text.decode` returns a strict UTF-8 string. `bytes.encode` and
@@ -637,11 +658,13 @@ embedding the supplied value; normal source-location excerpts still appear.
 Codec reports show value kinds instead of capturing payloads. Return or echo an
 ordinary result explicitly when it should be displayed. Try the
 [network-free content example](examples/language/content.mettle) and
-[local HTTP representation example](examples/http/content.mettle).
+[local HTTP representation example](examples/http/content.mettle). The
+[incoming content example](examples/http/incoming-content.mettle) shows native
+body kinds, metadata, bodyless responses, and explicit raw-byte decoding.
 
-User-defined codecs, compression, scoped exchanges, and normalized incoming
-`.body` are later work. HTTP responses still expose text `.body`, parsed `.json`,
-and raw `.bodyBytes`; this phase does not change that response contract.
+Incoming `.body` values use the built-in decoders today. User-defined codecs,
+compression, scoped exchanges, and live response iteration are later work;
+raw `.bodyBytes` remain explicitly available.
 
 ### Capability interfaces
 
@@ -703,7 +726,7 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `body` | JSON-compatible value, string, bytes, or byte source | Request payload for `post`, `put`, `patch`, or `delete` |
 | `mediaType` | String or codec media-type constant | Select representation encoding and generate `Content-Type` |
 | `maxBodyBytes` | Positive integer | Total outgoing payload bound; default 10 MiB buffered, 1 GiB streamed |
-| `json` | JSON value | Legacy payload option; prefer `body` in new files |
+| `json` | JSON-compatible native value | Legacy payload option; prefer `body` in new files |
 
 The URL is HTTP's only positional parameter and may instead be written as `url: "/users"`. Named arguments can follow positional ones, in any order; after the first named argument, no positional argument is allowed. User-defined flows follow the same positional-then-named rule. Duplicate or unknown names fail during `mettle check`, and argument expressions run once in their written order.
 
@@ -750,8 +773,8 @@ External data does not have to use Mettle identifier names. Use a quoted or comp
 
 ```mettle
 requestId = response.headers["x-request-id"]
-displayName = response.json["display-name"]
-firstRole = response.json.roles[0]
+displayName = response.body["display-name"]
+firstRole = response.body.roles[0]
 ```
 
 HTTPS certificate and hostname validation is enabled by default. A controlled test system with an intentionally untrusted certificate can opt out explicitly:
@@ -827,6 +850,9 @@ dumping duplicate raw body bytes. `--quiet` prints only the final flow status,
 `--raw` prints only the returned value, and `--output json` produces a stable
 execution envelope for automation. `--no-color` disables ANSI colors.
 
+Binary bodies use a bounded 64-byte hexadecimal preview even with `--verbose`;
+`--raw` and `--output json` retain the complete byte representation.
+
 ```bash
 mettle run examples/http/requests.mettle inspectRequest --arg baseUrl=https://jsonplaceholder.typicode.com --arg requestId=1 --verbose
 mettle run examples/http/requests.mettle inspectRequest --arg baseUrl=https://jsonplaceholder.typicode.com --arg requestId=1 --output json
@@ -874,6 +900,8 @@ Signatures, option types, conflicts, and result fields come from the same
 capability schemas used by the compiler. Default values use shared runtime
 constants; descriptions and examples are authored beside the implementation.
 There is no separate editor API catalogue to maintain.
+Capability result records own both object construction and documented field
+schemas, so field names are not copied into a second result catalogue.
 Operation hovers use a compact signature (`…` stands for optional named options),
 behavior notes, and a small example. Signature help and the full reference keep
 the exhaustive option list, defaults, and result fields.
@@ -901,6 +929,17 @@ named arguments, cross-file references, and unsaved edits. Unknown or duplicate
 `@param` names produce editor warnings, not runtime failures. Blank physical lines
 or ordinary comments detach the documentation block; `///` can separate paragraphs.
 See the [runnable documentation example](examples/language/documentation.mettle).
+
+Binding and field hovers show compiler-inferred native kinds and known shapes,
+including aliases, context values, reusable flow results, and HTTP response
+envelopes. `response.status` is an integer; `response.body` is runtime-dependent,
+not a JSON type or a guaranteed object. Parameter kinds remain caller-dependent.
+No runtime I/O or environment values are inspected, and bound contents are never
+shown. Statically sensitive values are marked; unknown sensitivity stays unknown.
+Inference is bounded and conservative: branch results retain common fields,
+large shapes get a limited preview, and complex/invalid expressions may remain
+unknown. Finished statements can still have useful hovers during incomplete edits.
+See the [offline variable example](examples/language/variable-intelligence.mettle).
 
 ## VS Code extension
 

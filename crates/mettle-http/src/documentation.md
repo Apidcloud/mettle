@@ -21,7 +21,21 @@ Cancellation stops owned work; sources are never automatically replayed. An
 explicit retry must create a new source on each attempt, and can duplicate remote
 side effects.
 
-Incoming `.body` is still text, `.json` is parsed JSON, and `.bodyBytes` is raw
-representation bytes. Empty bodies and unavailable JSON expose `.json` as null;
-malformed nonempty declared JSON fails. Incoming body normalization, HTTP/2,
-compression, live response iteration, and user codecs remain future work.
+Incoming `.body` is decoded into native values: JSON/`+json` produces an object,
+array, scalar, or null; `text/*` produces a strict UTF-8 string; missing/unknown
+content types produce bytes, without sniffing. `.bodyBytes` retains bounded
+representation bytes. `.mediaType` is the normalized Content-Type string with
+explicit parameters, or null when absent; the original header remains available.
+JSON is a representation, not a native kind or proof of application fields.
+
+HEAD and statuses 204/205/304 have null bodies. Other empty text and binary
+representations remain an empty string or bytes; empty declared JSON is invalid.
+Malformed or duplicate Content-Type, invalid JSON/UTF-8, unsupported JSON/text
+charsets, numeric overflow, and body limits fail with source-aware errors.
+Non-identity Content-Encoding is rejected for responses with a body; automatic
+decompression is not implemented. Error HTTP statuses still return normally
+when their metadata/content are valid.
+
+Response `.json` is removed: use `.body` for decoded values or explicitly decode
+`.bodyBytes`. HTTP/2, compression, live response iteration, and user codecs remain
+future work. Variable/field inference and richer hovers are the separate phase 3.5.

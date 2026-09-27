@@ -66,6 +66,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
             return
+        if self.path.startswith("/content/"):
+            self._content_response(self.path.removeprefix("/content/"))
+            return
         if self.path == "/seed":
             self._json(
                 200,
@@ -207,6 +210,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
             return
+        if self.path.startswith("/content/"):
+            self._content_response(self.path.removeprefix("/content/"))
+            return
         if self.path != "/method":
             self.send_error(404)
             return
@@ -228,6 +234,51 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _content_response(self, case: str) -> None:
+        cases = {
+            "object": (200, b'{"name":"Ada","json":"ordinary field"}', ["application/json"]),
+            "array": (200, b'[1,true,null]', ["application/json"]),
+            "number": (200, b'23', ["application/json"]),
+            "boolean": (200, b'true', ["application/json"]),
+            "null": (200, b'null', ["application/json"]),
+            "string": (200, b'"hello"', ["application/json"]),
+            "suffix": (200, b'{"celsius":23}', ['Application/Vnd.Example+JSON; Version=One; Charset="UTF-8"']),
+            "text": (200, b'{"not":"decoded as JSON"}', ["text/plain; charset=utf-8"]),
+            "binary": (200, b'\x00\xff\x01', ["application/octet-stream"]),
+            "unknown": (200, b'{"not":"sniffed"}', ["application/x-unknown"]),
+            "missing": (200, b'{"not":"sniffed"}', []),
+            "empty-text": (200, b'', ["text/plain"]),
+            "empty-bytes": (200, b'', ["application/octet-stream"]),
+            "empty-json": (200, b'', ["application/json"]),
+            "no-content": (204, b'', ["application/json"]),
+            "reset-content": (205, b'', ["application/json"]),
+            "not-modified": (304, b'', ["application/json"]),
+            "error": (422, b'{"error":"invalid input"}', ["application/json"]),
+            "invalid-json": (200, b'{', ["application/json"]),
+            "invalid-text": (200, b'\xff', ["text/plain"]),
+            "invalid-type": (200, b'{}', ['application/json; charset="unfinished']),
+            "duplicate-type": (200, b'{}', ["application/json", "text/plain"]),
+            "unsupported-charset": (200, b'hello', ["text/plain; charset=latin1"]),
+            "compressed": (200, b'{}', ["application/json"]),
+            "overflow": (200, b'9223372036854775808', ["application/json"]),
+            "secret": (200, b'{"ok":true}', ["application/json"]),
+        }
+        if case not in cases:
+            self._json(404, {"error": "unknown content case"})
+            return
+        status, body, media_types = cases[case]
+        self.send_response(status)
+        for media_type in media_types:
+            self.send_header("Content-Type", media_type)
+        if case == "compressed":
+            self.send_header("Content-Encoding", "gzip")
+        if case == "secret":
+            self.send_header("Set-Cookie", "local-test-token")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _authorized(self) -> bool:
         if self.headers.get("Authorization") == "Bearer local-test-token":

@@ -20,15 +20,15 @@ flow createUserFromSeed() {
 
     created = http.post("/users") {
         json: {
-            sourceId: seed.json.id
-            name: seed.json.name
+            sourceId: seed.body.id
+            name: seed.body.name
             active: true
             roles: ["tester"]
-            seedConnection: seed.json.connectionId
+            seedConnection: seed.body.connectionId
         }
     }
 
-    return created.json
+    return created.body
 }
 
 flow main() {

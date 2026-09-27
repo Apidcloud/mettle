@@ -1,0 +1,52 @@
+// Run the main flow and tests without network access:
+//   mettle run examples/language/variable-intelligence.mettle
+//   mettle test examples/language/variable-intelligence.mettle
+// Hover bindings and their uses, including settings, alias.retries,
+// greeting, encoded, tasks.first, item.name, and credential.
+// Hovers show native kinds/known fields, never values or credentials.
+
+/// Public, deterministic settings used throughout this file.
+use context settings {
+    retries: 3
+    names: [{ name: "Ada" }, { name: "Lin" }]
+}
+
+/// Format a greeting using a caller-supplied value.
+/// @param name The name to greet. Its kind is not inferred from one caller.
+/// @returns A string, known from the interpolation rather than this description.
+flow greet(name) = "Hello, ${name}!"
+
+/// A request example for inspecting HTTP envelope hovers, not run by main.
+/// @param url An HTTP URL; use your own local fixture when executing this flow.
+/// @returns A complete response with a runtime-decoded body.
+flow inspectResponse(url) {
+    response = http.get(url)
+    alias = response
+    status = alias.status
+    payload = alias.body
+    // payload's kind depends on the response; application fields aren't known.
+    assert(status == 200)
+    response
+}
+
+/// Show aliases, native kinds, finite iteration, and statically sensitive values.
+flow main {
+    settingsCopy = { retries: retries, names: names }
+    alias = settingsCopy
+    greeting = greet("Mettle")
+    encoded = text.encode(greeting)
+    tasks = parallel {
+        first: text.decode(encoded)
+        second: alias.retries
+    }
+    greetings = for item in names { greet(item.name) }
+    // Deliberately fake data: the editor marks it sensitive without showing it.
+    credential = secret("dummy-local-token")
+    return { greeting: tasks.first, retries: tasks.second, greetings: greetings, credential: credential }
+}
+
+test "editor metadata does not change execution" {
+    result = main()
+    assert(result.retries == 3)
+    assert(result.greetings == ["Hello, Ada!", "Hello, Lin!"])
+}

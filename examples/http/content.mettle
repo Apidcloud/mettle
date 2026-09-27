@@ -2,7 +2,9 @@
 // From the repository root: mettle run examples/http/content.mettle main \
 //   --arg baseUrl=http://127.0.0.1:8080
 // Save just the result: append --raw > result.json (or --raw for the terminal).
-// response.body remains text; response.json is parsed JSON until phase 3.
+// response.body is the decoded native value; response.bodyBytes retains bytes.
+// The fixture echoes request details as JSON, including its own ordinary `json`
+// field: response.body.json below is fixture data, NOT the removed response.json.
 
 use context {
     defaults http {
@@ -18,27 +20,27 @@ flow main(baseUrl) {
     // This illustrative media-type name is not a temperature-specific codec.
     // Its +json suffix selects generic JSON encoding; no domain validation runs.
     typed = http.post(url, body: record, mediaType: "application/vnd.example.temperature+json")
-    assert(inferred.json.json == typed.json.json)
+    assert(inferred.body.json == typed.body.json)
 
     // An explicit representation can encode a string as JSON instead of text.
     jsonString = http.post(url, body: "Hello!", mediaType: json.mediaType)
-    assert(jsonString.json.json == "Hello!")
+    assert(jsonString.body.json == "Hello!")
 
     // Codec output is already encoded: it is transmitted unchanged, not quoted again.
     encoded = json.encode(record)
     raw = http.post(url, body: encoded, mediaType: json.mediaType)
-    assert(raw.json.json == record)
+    assert(raw.body.json == record)
 
     // Scalars infer JSON; text representation is an explicit alternative.
     scalar = http.post(url, body: 23)
     plain = http.post(url, body: 23, mediaType: text.mediaType)
-    assert(scalar.json.json == 23)
-    assert(plain.json.body == "23")
+    assert(scalar.body.json == 23)
+    assert(plain.body.body == "23")
 
     return {
-        inferred: inferred.json.contentType
-        custom: typed.json.contentType
-        raw: raw.json.json
-        text: plain.json.body
+        inferred: inferred.body.contentType
+        custom: typed.body.contentType
+        raw: raw.body.json
+        text: plain.body.body
     }
 }

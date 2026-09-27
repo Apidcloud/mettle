@@ -35,8 +35,11 @@ const WRITE_OPTIONS: &[FieldSchema] = &[
         )
         .with_default(DefaultValue::Boolean(crate::DEFAULT_OVERWRITE)),
 ];
-const WRITE_RESULT: &[FieldSchema] = &[FieldSchema::new("bytesWritten", SchemaType::Integer)
-    .documented("Number of representation bytes published to the destination.")];
+mettle_capability::result_object! {
+    pub(crate) struct WriteResult {
+        bytes_written => ("bytesWritten", SchemaType::Integer, "Number of representation bytes published to the destination."),
+    }
+}
 const OPERATIONS: &[OperationSchema] = &[
     OperationSchema {
         name: "read",
@@ -101,11 +104,12 @@ const OPERATIONS: &[OperationSchema] = &[
         parameter_names: &["path", "content"],
         options: WRITE_OPTIONS,
         mutually_exclusive: &[],
-        result: SchemaType::Object(WRITE_RESULT),
+        result: SchemaType::Object(WriteResult::FIELDS),
     },
 ];
 
 pub const DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
+    removed_result_fields: &[],
     name: "fs",
     description: "Bounded complete file I/O and owned file sources, with deliberate working-directory and publication rules.",
     constants: &[],

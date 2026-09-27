@@ -27,6 +27,8 @@ Basic language support for `.mettle` source files.
 - hover descriptions for keywords, core helpers, primitive kinds, built-in
   capabilities, operations, named/nested options, constants, and documented
   user flows/parameters/contexts;
+- inferred native kinds and known fields for bindings, aliases, context values,
+  parameters, reusable flow results, and field accesses;
 - signature help while typing positional or named arguments, including incomplete calls;
 - read-only offline references through F12 or the hover's **Open full reference** link.
 
@@ -60,6 +62,27 @@ example. The `…` in a hover signature stands for optional named options; signa
 help and the full reference retain the complete option list. HTTP descriptions
 explain request-body encoding and distinguish error status codes from call failures;
 filesystem and codec descriptions explain buffering, consumption, and decoding rules.
+
+HTTP response references describe decoded native `.body` values and normalized
+`.mediaType`; `.bodyBytes` retains the representation bytes. The old response
+`.json` field is removed. Proven HTTP-result accesses receive compiler migration
+diagnostics directing callers to `.body`. Hover a binding such as
+`created = http.post(...)`, an alias, or `created.status` for its inferred native
+kind and known response fields. Shapes and field descriptions come from the
+compiler and the same result records used by the runtime, not an editor catalogue.
+JSON is not a native value kind: `.body` remains runtime-dependent, and arbitrary
+payload fields are not guessed. Flow parameters are caller-dependent; a reusable
+helper's result is inferred without specializing it for one caller.
+
+Ordinary object literals, finite array elements, named parallel branches, and
+policy-block results also retain known information where sound. Branch results
+keep only common fields. Analysis is bounded; large shapes are previewed and
+complex or invalid expressions may remain unknown. Complete statements can
+retain hovers while a later statement is unfinished. No requests are executed,
+files opened as runtime sources, or environment values read to answer a hover.
+Statically sensitive values are marked without displaying contents; other
+runtime sensitivity is not guessed. Try the offline
+[variable intelligence example](../../../examples/language/variable-intelligence.mettle).
 
 F12, Ctrl+Click, or **Open full reference** in a built-in hover opens a read-only
 Markdown document with the signature, arguments, options, defaults, result

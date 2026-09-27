@@ -628,6 +628,7 @@ mod tests {
         result: mettle_capability::SchemaType::Json,
     }];
     const PROBE: CapabilityDescriptor = CapabilityDescriptor {
+        removed_result_fields: &[],
         name: "probe",
         description: "",
         constants: &[],

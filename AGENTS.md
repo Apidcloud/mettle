@@ -115,6 +115,20 @@ README, and executable examples in the same changeset.
   cross-file lookup when applicable. Verify examples still parse and compile.
   Inspect actual output before declaring presentation work complete; distinguish
   automated checks from any editor UI checks actually performed.
+- For removed capability-result fields, put migration messages in the capability
+  descriptor's `removed_result_fields`. Compiler diagnostics and generated
+  references reuse this metadata. Do not hard-code protocol names in the compiler
+  or reject ordinary payload fields when their result provenance is unknown.
+- Declare capability result objects with `mettle_capability::result_object!`,
+  which generates runtime field keys and documented schemas from one record.
+  Supply every record field when constructing a result; update descriptions and
+  regression tests alongside behavior changes instead of adding a hover catalogue.
+- Keep variable/field intelligence in `mettle_compiler::semantics`, over resolved
+  compiler plans and lexer spans. Do not add protocol-specific inference to LSP
+  or JavaScript. Preserve native kinds, conservative unknowns, bounded shape
+  analysis, caller-independent helper results, scopes, and unsaved project input.
+  Never evaluate I/O, read environment values, or include bound contents in hovers.
+  Distinguish sensitive wrappers from objects merely containing sensitive fields.
 
 After Rust changes, rebuild the CLI. For the local installed-binary workflow,
 reinstall with `cargo install --path crates/mettle-cli --locked` so CLI/editor

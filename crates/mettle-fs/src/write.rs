@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mettle_capability::{CHUNK_BYTES, CapabilityError, IoContext, Object, Span, Value};
+use mettle_capability::{CHUNK_BYTES, CapabilityError, IoContext, Span, Value};
 
 use crate::file_error;
 
@@ -88,12 +88,12 @@ pub(crate) async fn write(
         })
         .await?;
     publish(context, temporary, path, overwrite, sensitive, span).await?;
-    Ok(Value::Object(Object::from([(
-        "bytesWritten".to_owned(),
-        Value::Integer(
+    Ok(crate::schema::WriteResult {
+        bytes_written: Value::Integer(
             i64::try_from(count).map_err(|_| CapabilityError::new("write size overflow", span))?,
         ),
-    )])))
+    }
+    .into_value())
 }
 
 async fn create_temporary(

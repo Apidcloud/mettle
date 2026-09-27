@@ -26,6 +26,58 @@ fn source_file(contents: &str) -> std::path::PathBuf {
     path
 }
 
+#[test]
+fn removed_http_json_members_get_offline_migration_diagnostics_without_reserving_json() {
+    for source in [
+        "flow main = http.get(\"http://127.0.0.1:1\").json",
+        "flow main { response = http.get(\"http://127.0.0.1:1\")\n alias = response\n alias.json }",
+        "flow main = fetch().json\nflow fetch = http.get(\"http://127.0.0.1:1\")",
+        "flow main = fetch()[\"json\"]\nflow fetch { response = http.get(\"http://127.0.0.1:1\")\n response }",
+        "flow main { response = retry(attempts: 2) { http.get(\"http://127.0.0.1:1\") }\n response.json }",
+        "flow main { response = http.get(\"http://127.0.0.1:1\")\n echo(\"${response.json}\")\n 1 }",
+    ] {
+        let path = source_file(source);
+        let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(!output.status.success(), "{source}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("HTTP response field `json` was removed; use `body`"),
+            "{source}: {error}"
+        );
+        assert!(!error.contains("connection refused"));
+    }
+    for source in [
+        "flow main = { json: 42 }.json",
+        "flow main { response = http.get(\"http://127.0.0.1:1\")\n response.body.json }",
+        "flow identity(value) = value.json\nflow main = identity({ json: 42 })",
+        "flow main { response = http.get(\"http://127.0.0.1:1\")\n if (true) { value = response.body\n value.json }\n response.body }",
+        "flow main = choose(true).json\nflow choose(flag) { if (flag) { return { json: 1 } }\n http.get(\"http://127.0.0.1:1\") }",
+    ] {
+        let path = source_file(source);
+        let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .arg("check")
+            .arg(&path)
+            .output()
+            .unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(output.status.success(), "{source}: {output:?}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["docs", "http.get"])
+        .output()
+        .unwrap();
+    let reference = String::from_utf8_lossy(&output.stdout);
+    assert!(reference.contains("native kind determined at runtime"));
+    assert!(reference.contains("mediaType"));
+    assert!(reference.contains("HTTP response field `json` was removed"));
+    assert!(!reference.contains("Incoming decoded-body normalization is not implemented"));
+}
+
 fn project_directory() -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
         "mettle-cli-project-test-{}",

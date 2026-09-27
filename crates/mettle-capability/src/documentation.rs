@@ -192,6 +192,12 @@ pub fn operation_reference(
     output.push_str("\n## Result\n");
     let _ = writeln!(output, "\n{}", operation.result.name());
     append_fields(&mut output, operation.result, "");
+    if !capability.removed_result_fields.is_empty() {
+        output.push_str("\n## Migration\n");
+        for field in capability.removed_result_fields {
+            let _ = writeln!(output, "\n{}.", field.message);
+        }
+    }
     if !operation.documentation.details.is_empty() {
         let _ = write!(
             output,
