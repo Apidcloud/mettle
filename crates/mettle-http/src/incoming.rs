@@ -103,6 +103,36 @@ mod tests {
         )
     }
 
+    fn decoded_content_encoding(content_encoding: Option<&str>) -> Result<Value, CapabilityError> {
+        let mut headers = HeaderMap::new();
+        if let Some(content_encoding) = content_encoding {
+            headers.insert(
+                CONTENT_ENCODING,
+                HeaderValue::from_str(content_encoding).unwrap(),
+            );
+        }
+        let span = Span::new(10, 20);
+        decode(
+            &Value::Bytes(Arc::from(b"hello".as_slice())),
+            representation(&headers, span)?.as_ref(),
+            &headers,
+            false,
+            1024,
+            span,
+        )
+    }
+
+    #[test]
+    fn content_encoding_verification() {
+        assert!(decoded_content_encoding(None).is_ok());
+        assert!(decoded_content_encoding(Some("identity")).is_ok());
+        assert!(decoded_content_encoding(Some("Identity")).is_ok());
+        assert!(decoded_content_encoding(Some("gzip")).is_err());
+        assert!(decoded_content_encoding(Some("br")).is_err());
+        assert!(decoded_content_encoding(Some("identity, gzip")).is_err());
+        assert!(decoded_content_encoding(Some("identity, identity")).is_ok());
+    }
+
     #[test]
     fn decoding_uses_native_kinds_and_never_sniffs_unknown_content() {
         for (input, expected) in [
@@ -161,19 +191,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(
-            representation(&headers, Span::default())
-                .unwrap_err()
-                .message
-                .contains("duplicate")
-        );
+        assert!(representation(&headers, Span::default())
+            .unwrap_err()
+            .message
+            .contains("duplicate"));
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        assert!(
-            decode(&bytes, None, &headers, false, 10, Span::default())
-                .unwrap_err()
-                .message
-                .contains("Content-Encoding")
-        );
+        assert!(decode(&bytes, None, &headers, false, 10, Span::default())
+            .unwrap_err()
+            .message
+            .contains("Content-Encoding"));
     }
 
     #[test]
