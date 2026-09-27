@@ -723,6 +723,9 @@ It builds the release binary, starts an isolated fixture, executes 5,000 schedul
 
 ## Repository map
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, validation, and commit conventions.
+Instructions for coding agents are in [AGENTS.md](AGENTS.md).
+
 ```text
 crates/mettle-syntax              Lexer, parser, AST, and source spans
 crates/mettle-capability          Capability schemas, values, and runtime interface
@@ -737,10 +740,15 @@ util/plugin/vscode/               Installable VS Code extension
 util/plugin/neovim/               Neovim Tree-sitter setup and vim-test adapter
 util/plugin/tree-sitter/          Tree-sitter editor parser, queries, and grammar tests
 util/test-server/                 Local HTTP and HTTPS acceptance fixture
-docs/                             Language, runtime, and dependency documentation
+docs/                             Temporary design notes and supporting reports
 ```
 
-The [language proposal](docs/language-proposal.md) describes the language direction. The [technical strategy](docs/mettle-technical.md) explains the runtime and compiler approach. Third-party Rust dependencies and licences are documented in [docs/dependencies.md](docs/dependencies.md) and [docs/third-party-licenses.md](docs/third-party-licenses.md).
+The files under `docs/`, including the [language proposal](docs/language-proposal.md)
+and [technical strategy](docs/mettle-technical.md), are temporary supporting notes
+and may be stale. Current behavior is reflected in the implementation, tests,
+examples, and this README. Maintained documentation on GitHub, potentially a wiki,
+is planned for beta. The generated [licence report](docs/third-party-licenses.md)
+records the locked third-party Rust packages.
 
 The larger Rust crates keep their public API in `lib.rs` and separate parsing,
 declaration navigation, semantic lowering, execution, and HTTP schemas into
