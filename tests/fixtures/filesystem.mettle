@@ -20,6 +20,7 @@ flow bufferedUpload = http.post("/upload", body: fs.read("payload.bin")).json
 flow rejectedUpload {
     response = http.post("/reject-upload", body: fs.stream("payload.bin"))
     assert(response.status == 413)
+    assert(response.json.error == "upload rejected before consumption")
     response.status
 }
 

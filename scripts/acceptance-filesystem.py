@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -43,6 +45,21 @@ def main() -> None:
     environment = os.environ.copy()
     environment["METTLE_BASE_URL"] = f"http://127.0.0.1:{server.server_address[1]}"
     try:
+        # Pending inbound bytes must not reset and truncate the early 413.
+        # Deliberately leave the declared upload unfinished, with no sleeps.
+        with socket.create_connection(server.server_address, timeout=5) as connection:
+            headers = (
+                "POST /reject-upload HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                "Authorization: Bearer local-test-token\r\n"
+                "Content-Length: 1048576\r\n\r\n"
+            ).encode("ascii")
+            connection.sendall(headers + b"x" * 262144)
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+            assert response.status == 413
+            assert json.loads(response.read()) == {"error": "upload rejected before consumption"}
+            connection.shutdown(socket.SHUT_WR)
         with tempfile.TemporaryDirectory(prefix="mettle-fs-") as temporary:
             directory = Path(temporary)
             data = bytes(range(256)) * 1024 + b"last chunk"

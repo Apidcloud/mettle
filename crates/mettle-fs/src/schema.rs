@@ -65,6 +65,7 @@ const OPERATIONS: &[OperationSchema] = &[
 
 pub const DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     name: "fs",
+    constants: &[],
     defaults: OPTIONS,
     operations: OPERATIONS,
 };

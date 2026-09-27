@@ -982,6 +982,37 @@ impl<'a> Compiler<'a> {
                 }
                 (PlanExpressionKind::Not(Box::new(value)), ValueType::Boolean)
             }
+            ExpressionKind::TypeOperation {
+                value,
+                target,
+                cast,
+            } => {
+                let value = self.compile_expression(current_flow, value, locals, context)?;
+                let value_type = if *cast {
+                    match target.value {
+                        super::ValueKind::Null => ValueType::Null,
+                        super::ValueKind::Boolean => ValueType::Boolean,
+                        super::ValueKind::Integer => ValueType::Integer,
+                        super::ValueKind::Number => ValueType::Inferred,
+                        super::ValueKind::String => ValueType::String,
+                        super::ValueKind::Bytes => ValueType::Bytes,
+                        super::ValueKind::Duration => ValueType::Duration,
+                        super::ValueKind::Array => ValueType::Array,
+                        super::ValueKind::Object => ValueType::Object,
+                        super::ValueKind::Source => ValueType::Source,
+                    }
+                } else {
+                    ValueType::Boolean
+                };
+                (
+                    PlanExpressionKind::TypeOperation {
+                        value: Box::new(value),
+                        target: target.value,
+                        cast: *cast,
+                    },
+                    value_type,
+                )
+            }
             ExpressionKind::Negate(value) => {
                 let value = self.compile_expression(current_flow, value, locals, context)?;
                 if !matches!(
@@ -1670,10 +1701,12 @@ impl<'a> Compiler<'a> {
         let valid = match expected {
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
             SchemaType::Body => value.value_type != ValueType::Duration,
-            SchemaType::Json => {
-                !matches!(value.value_type, ValueType::Duration | ValueType::Source)
-            }
+            SchemaType::Json => !matches!(
+                value.value_type,
+                ValueType::Duration | ValueType::Source | ValueType::Bytes
+            ),
             SchemaType::Bytes => value.value_type == ValueType::Bytes,
+            SchemaType::Encoded => matches!(value.value_type, ValueType::String | ValueType::Bytes),
             SchemaType::Source => value.value_type == ValueType::Source,
             SchemaType::Writable => matches!(
                 value.value_type,
@@ -1830,7 +1863,20 @@ impl<'a> Compiler<'a> {
                 span,
             }
         } else {
-            return None;
+            let capability = self
+                .capabilities
+                .iter()
+                .find(|capability| capability.name == root)?;
+            let member = parts.next()?;
+            let constant = capability
+                .constants
+                .iter()
+                .find(|constant| constant.name == member)?;
+            PlanExpression {
+                kind: PlanExpressionKind::Constant(Constant::String(constant.value.to_owned())),
+                value_type: ValueType::String,
+                span,
+            }
         };
         for member in parts {
             expression = PlanExpression {

@@ -9,7 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use mettle_syntax::Span;
+mod conversion;
+pub use conversion::{cast_value, matches_kind};
+pub mod codecs;
+pub mod content;
 mod io;
+pub mod media_type;
 pub use io::{
     ByteReader, ByteSource, CHUNK_BYTES, ChunkFuture, DEFAULT_READ_BYTES, DEFAULT_TRANSFER_BYTES,
     IoCancellation, IoContext, ReaderFuture, SourceFactory,
@@ -22,6 +27,7 @@ pub enum SchemaType {
     Bytes,
     Source,
     Writable,
+    Encoded,
     Duration,
     Integer,
     Json,
@@ -39,6 +45,7 @@ impl SchemaType {
             Self::Bytes => "bytes",
             Self::Source => "byte source",
             Self::Writable => "string, bytes, or byte source",
+            Self::Encoded => "complete string or bytes",
             Self::Duration => "duration",
             Self::Integer => "integer",
             Self::Json => "JSON value",
@@ -68,8 +75,15 @@ pub struct OperationSchema {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapabilityDescriptor {
     pub name: &'static str,
+    pub constants: &'static [CapabilityConstant],
     pub defaults: &'static [FieldSchema],
     pub operations: &'static [OperationSchema],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityConstant {
+    pub name: &'static str,
+    pub value: &'static str,
 }
 
 pub type Object = BTreeMap<String, Value>;

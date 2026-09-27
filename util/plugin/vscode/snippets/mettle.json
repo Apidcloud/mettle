@@ -219,5 +219,20 @@
       "    ${3:second}: ${4:http.get(\"/second\")}",
       "}"
     ]
+  },
+  "JSON codec round trip": {
+    "prefix": "jsoncodec",
+    "description": "Encode a value as bytes and decode it explicitly",
+    "body": ["encoded = json.encode(${1:value})", "decoded = json.decode(encoded)"]
+  },
+  "Built-in value kind check": {
+    "prefix": "iskind",
+    "description": "Check an actual built-in value kind",
+    "body": ["${1:value} is ${2|number,integer,string,boolean,null,bytes,duration,array,object,source|}"]
+  },
+  "HTTP explicit media type": {
+    "prefix": "httpmedia",
+    "description": "Select the content representation through a codec constant",
+    "body": ["http.post(\"${1:/path}\", body: ${2:value}, mediaType: ${3|json,text,bytes|}.mediaType)"]
   }
 }

@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 mettle-syntax = { path = "../mettle-syntax" }
+serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [lints]

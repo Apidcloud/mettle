@@ -94,6 +94,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 python3 scripts/check-licenses.py
 python3 scripts/acceptance-portable.py
 python3 scripts/acceptance-filesystem.py
+python3 scripts/acceptance-content.py
 ```
 
 GitHub Actions runs workspace tests, Clippy, and portable HTTP/load acceptance on

@@ -7,6 +7,8 @@ structured and load policies, `for` expressions, `fail()`, named arguments and
 parallel branches, values, member/index access, and interpolation. It supports
 optional declaration parentheses, trailing commas in arrays/calls/policy options,
 signed and base-prefixed numbers, exponents, and fractional durations.
+Built-in `is`/`as` kind operations have matching Rust precedence, including
+continuations across comments/newlines and use inside loop iterables.
 The compiler remains responsible for name resolution, valid call targets,
 numeric limits, required/duplicate policy options, and semantic validation.
 VS Code continues using its TextMate grammar and the Mettle language server.

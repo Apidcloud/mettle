@@ -1,5 +1,5 @@
 // Keep these rules aligned with crates/mettle-syntax/src/{lib,parser}.rs.
-const PREC = { or: 1, and: 2, compare: 3, unary: 4, member: 5, call: 6 };
+const PREC = { or: 1, and: 2, compare: 3, unary: 4, kind: 5, member: 6, call: 7 };
 const commaSep = rule => optional(seq(rule, repeat(seq(",", rule))));
 const commaSepTrailing = rule => optional(seq(rule, repeat(seq(",", rule)), optional(",")));
 const block = ($, rule, commas = false) => seq(
@@ -20,6 +20,7 @@ const definition = {
     $._newline, $._call_continuation, $._member_continuation, $._index_continuation,
     $._or_continuation, $._and_continuation,
     $._comparison_continuation, $._call_options_start, $._else_start, $._error_sentinel,
+    $._type_continuation,
   ],
   word: $ => $.identifier,
   conflicts: $ => [
@@ -33,6 +34,7 @@ const definition = {
       "flow", "test", "context", "namespace", "defaults", "use", "return", "assert",
       "if", "else", "and", "or", "not", "within", "retry", "parallel", "rate",
       "concurrency", "true", "false", "null", "for", "in", "fail",
+      "is", "as",
     ],
   },
 
@@ -88,10 +90,16 @@ const definition = {
       $.identifier, $.string, $.integer, $.float, $.duration, $.boolean, $.null,
       $.array, $.object, $.parenthesized_expression, $.call_expression,
       $.member_expression, $.index_expression,
+      $.type_operation,
       $.within_expression, $.retry_expression, $.parallel_expression,
       $.rate_expression, $.concurrency_expression, $.for_expression, $.fail_expression,
     ),
     parenthesized_expression: $ => seq("(", $._expression, ")"),
+    type_operation: $ => prec.left(PREC.kind, seq(
+      field("value", $._primary_expression), $._type_continuation,
+      field("operator", choice("is", "as")), field("kind", $.value_kind),
+    )),
+    value_kind: _ => choice("null", "boolean", "integer", "number", "string", "bytes", "duration", "array", "object", "source"),
     call_expression: $ => call($, true),
     _call_target: $ => choice($.identifier, $.member_expression,
       alias($._parenthesized_callee, $.parenthesized_expression)),
@@ -157,6 +165,7 @@ const definition = {
 const iterableRules = new Set([
   "_expression", "binary_expression", "_comparison_operand", "unary_expression",
   "_primary_expression", "parenthesized_expression", "call_expression", "_call_target",
+  "type_operation",
   "_parenthesized_callee", "argument_list", "_positional_arguments", "_named_arguments",
   "named_argument", "member_expression", "index_expression", "array", "object", "object_field",
   "within_expression", "retry_expression", "parallel_expression", "rate_expression",

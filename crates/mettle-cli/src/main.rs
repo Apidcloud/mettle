@@ -12,6 +12,10 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use mettle_capability::IoContext;
+use mettle_capability::codecs::{
+    BYTES_DESCRIPTOR, CodecCapability, JSON_DESCRIPTOR, TEXT_DESCRIPTOR,
+};
+use mettle_capability::content::BuiltinCodec;
 use mettle_capability::{CapabilityDescriptor, Object, Value};
 use mettle_compiler::{
     CompileError, DeclarationKind, ExecutionPlan, MettlePlan, compile_with_capabilities,
@@ -60,7 +64,13 @@ use report::{
     CapturedEvents, CliObserver, ExecutionReport, display_duration, failure_summary, raw_value,
 };
 
-const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR, FS_DESCRIPTOR];
+const CAPABILITIES: &[CapabilityDescriptor] = &[
+    HTTP_DESCRIPTOR,
+    FS_DESCRIPTOR,
+    JSON_DESCRIPTOR,
+    TEXT_DESCRIPTOR,
+    BYTES_DESCRIPTOR,
+];
 
 #[derive(Debug)]
 struct RunOptions {
@@ -765,6 +775,9 @@ fn spawn_entry(
         let mettle_runtime = Runtime::new(vec![
             Arc::new(HttpCapability::new()),
             Arc::new(FsCapability),
+            Arc::new(CodecCapability(BuiltinCodec::Json)),
+            Arc::new(CodecCapability(BuiltinCodec::Text)),
+            Arc::new(CodecCapability(BuiltinCodec::Bytes)),
         ])
         .with_observer(observer.clone())
         .with_environment(environment)
@@ -1579,6 +1592,7 @@ fn value_from_expression(expression: &Expression) -> Result<Value, &'static str>
         | ExpressionKind::Member { .. }
         | ExpressionKind::Index { .. }
         | ExpressionKind::Not(_)
+        | ExpressionKind::TypeOperation { .. }
         | ExpressionKind::Binary { .. }
         | ExpressionKind::Within { .. }
         | ExpressionKind::Retry { .. }

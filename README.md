@@ -562,7 +562,8 @@ HTTP `body: fs.stream(path)` sends representation bytes through ordinary calls,
 using automatic HTTP/1.1 framing. Do not supply `Content-Length` or
 `Transfer-Encoding` for a streamed body. Bytes/sources infer
 `application/octet-stream`; an explicit `Content-Type` can describe an already
-encoded file. Sources cannot be serialized as JSON or text via `bodyFormat`.
+encoded file. Sources transmit existing bytes; selecting a media type does not
+serialize them again as JSON or text.
 If an endpoint replies early, production stops and the normal call returns its
 actual bounded response. Source failures retain their original diagnostics.
 Streams are not automatically replayed; explicit retry must construct a new
@@ -576,13 +577,79 @@ Try the [filesystem project](examples/language/filesystem/main.mettle) and
 [local upload example](examples/http/file-upload.mettle). Progressive response
 consumption, custom codecs, and decoded `.body` changes remain future phases.
 
+### Content codecs and value kinds
+
+Codecs describe representation bytes across I/O capabilities, not HTTP-only
+classes. Built-ins expose ordinary strings as `json.mediaType`
+(`application/json`), `text.mediaType` (`text/plain; charset=utf-8`), and
+`bytes.mediaType` (`application/octet-stream`). Media-type strings also work.
+
+```mettle
+encoded = json.encode({ celsius: 23 })
+value = json.decode(encoded)
+assert(value is object)
+temperature = "23" as number
+assert(temperature is number)
+message = text.decode(text.encode(temperature))
+response = http.post("/temperature", body: value, mediaType: json.mediaType)
+```
+
+`json.encode` returns bytes; `json.decode` accepts complete bytes or a string and
+returns a JSON value (object, array, scalar, or null). `text.encode` converts a
+string into UTF-8 bytes without quotes. Numbers, booleans, null, arrays, and
+objects can also be explicitly formatted with `text.encode`: these use compact
+JSON spelling. `text.decode` returns a strict UTF-8 string. `bytes.encode` and
+`bytes.decode` are identity operations on complete bytes. Values are reusable;
+these operations never consume a live source implicitly. Each accepts positive
+`maxBytes` (default 10 MiB); serialization stops at the output bound rather than
+first building an unlimited buffer. JSON encoding/decoding permits at most 127
+nested containers. Excessive nesting, invalid UTF-8,
+non-finite numbers, and integers outside the signed 64-bit range fail clearly.
+`defaults json`, `defaults text`, and `defaults bytes` can set `maxBytes`.
+
+`is` checks the actual built-in kind without conversion; `as` converts explicitly.
+Kinds are `null`, `boolean`, `integer`, `number`, `string`, `bytes`, `duration`,
+`array`, `object`, and `source`. Both integers and decimals are `number`; an
+integral decimal is not automatically `integer`.
+
+| Conversion | Rule |
+| --- | --- |
+| Same kind | Preserve the value; source aliases still share one consumer |
+| String → number | Trim outer whitespace and parse Mettle's decimal, exponent, hex, or binary literal syntax |
+| String → integer | Parse integer literal syntax directly; no floating-point rounding |
+| Decimal → integer | Require an integral value in signed 64-bit range; never truncate |
+| String → boolean | Only `true` or `false`, with optional outer whitespace |
+| String → duration | Parse a duration literal, such as `"1.5s"` |
+| Null, boolean, number, duration → string | Deterministic spelling; duration uses nanoseconds |
+| Other cross-kind conversions | Error; use explicit codecs for JSON or UTF-8 content |
+
+Conversions parse at most 4096 bytes. No truthiness, object-to-string cast,
+byte-to-string cast, user classes, or overloaded encoders are introduced.
+`as number` preserves an integer rather than rounding it to floating point.
+Kind operations associate left-to-right and bind before unary `not`/`-`,
+comparisons, `and`, and `or`; member/index access binds first. For example,
+`not value is number` means `not (value is number)`. Parenthesize unary expressions
+when converting their result: `(-value) as string`.
+Checks, conversions, codecs, and subsequent boolean/numeric operations preserve
+secret metadata. Conversion and codec error messages describe failures without
+embedding the supplied value; normal source-location excerpts still appear.
+
+Codec reports show value kinds instead of capturing payloads. Return or echo an
+ordinary result explicitly when it should be displayed. Try the
+[network-free content example](examples/language/content.mettle) and
+[local HTTP representation example](examples/http/content.mettle).
+
+User-defined codecs, compression, scoped exchanges, and normalized incoming
+`.body` are later work. HTTP responses still expose text `.body`, parsed `.json`,
+and raw `.bodyBytes`; this phase does not change that response contract.
+
 ### Capability interfaces
 
 The core parser understands calls, values, flows, contexts, and execution policies. It does not need a special grammar rule for each protocol verb. The compiler resolves a qualified call such as `http.get()`, `sip.options()`, `grpc.call()`, or `kafka.publish()` through a registered capability.
 
 A capability contributes:
 
-- named operations and their signatures;
+- named operations, constants, and their signatures;
 - schemas for defaults, options, payloads, and results;
 - compile-time validation;
 - runtime execution and resource management;
@@ -633,13 +700,51 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `headers` | Object of strings | Request headers |
 | `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
 | `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
-| `body` | Object, array, string, bytes, byte source, or explicitly formatted scalar | Request payload for `post`, `put`, `patch`, or `delete` |
-| `bodyFormat` | `"json"`, `"text"`, or `"bytes"` | Overrides body-format inference when needed |
+| `body` | JSON-compatible value, string, bytes, or byte source | Request payload for `post`, `put`, `patch`, or `delete` |
+| `mediaType` | String or codec media-type constant | Select representation encoding and generate `Content-Type` |
+| `maxBodyBytes` | Positive integer | Total outgoing payload bound; default 10 MiB buffered, 1 GiB streamed |
 | `json` | JSON value | Legacy payload option; prefer `body` in new files |
 
 The URL is HTTP's only positional parameter and may instead be written as `url: "/users"`. Named arguments can follow positional ones, in any order; after the first named argument, no positional argument is allowed. User-defined flows follow the same positional-then-named rule. Duplicate or unknown names fail during `mettle check`, and argument expressions run once in their written order.
 
-Objects and arrays in `body` default to JSON; strings default to UTF-8 text; bytes values default to raw bytes. The default `Content-Type` follows that format (`application/json`, UTF-8 `text/plain`, or `application/octet-stream`). To send a JSON string rather than plain text, write `body: "Ada", bodyFormat: "json"`. Scalars such as numbers require an explicit `bodyFormat`. An explicitly supplied `Content-Type` describes the payload but does not change its serialization; JSON bodies require a JSON-compatible media type. An HTTP call can still use its legacy option-block form, including `json:`, while files migrate. `json` and `body` are mutually exclusive, as are `json` and `bodyFormat`. A response that declares a JSON media type but contains malformed JSON fails with a clear protocol error. The response size limit is enforced from `Content-Length` when available and while streaming the body.
+Objects, arrays, numbers, booleans, and an explicitly supplied null in `body`
+default to JSON; strings default to UTF-8 text; bytes/sources default to raw bytes.
+An omitted body does not imply JSON null or a default content type.
+To send a JSON string instead of plain text, write
+`body: "Ada", mediaType: json.mediaType`. A header-only `Content-Type` now selects
+the encoder too, when no legacy `json:` payload override is present.
+JSON-compatible `+json` types reuse the JSON codec; `text/*` uses UTF-8 text.
+An illustrative name such as `application/vnd.example.temperature+json` labels
+generic JSON; it does not register a temperature codec or validate domain fields.
+Unknown representations require pre-encoded bytes or a source, not a guessed
+encoder. Built-in encoding supports UTF-8 only; send explicitly encoded bytes
+for other charsets. There is no filename-based inference or automatic compression.
+
+Bytes and sources are already encoded and are **never encoded again**, even when
+`mediaType` is JSON. For example,
+`http.post("/users", body: json.encode(user), mediaType: json.mediaType)` sends
+the encoded JSON unchanged. Stream bounds are checked during production; file
+source bounds and deadlines apply as well.
+
+Supplying both `mediaType` and `Content-Type` requires equivalent parsed media
+types. Type/subtype and parameter names are case-insensitive; quoting and
+parameter order do not cause conflicts; UTF-8 is the built-in default charset.
+Other parameter values retain their case. Duplicate parameters, wildcard types,
+malformed metadata, duplicate `Content-Type` headers, or conflicting selectors
+fail before a source is consumed. Metadata is limited to 8 KiB and 32 unique
+parameters, with ASCII parameter syntax in this initial implementation.
+
+`bodyFormat` has been removed: use `body` with optional `mediaType` instead.
+For example, replace `body: "Hello!", bodyFormat: "json"` with
+`body: "Hello!", mediaType: json.mediaType`. For another representation, encode
+explicitly first and send the resulting bytes with their media type.
+Legacy `json:` payloads remain supported and cannot be combined with `body`;
+their declared media type must be JSON-compatible.
+Compared with earlier versions, scalar bodies now infer JSON, header-only
+content types can select encoding, and buffered outgoing payloads have a bound.
+Check calls that previously used a deliberately mismatched header.
+A response declaring malformed JSON still fails clearly. Its size limit is
+enforced from `Content-Length` when available and during body acquisition.
 
 External data does not have to use Mettle identifier names. Use a quoted or computed string key after brackets for HTTP headers or JSON properties containing punctuation:
 

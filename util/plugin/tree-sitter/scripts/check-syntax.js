@@ -31,6 +31,10 @@ const invalid = [
   'flow main = for x in f(g() {}) {}',
   'flow main = for x in [f() {}] {}',
   'flow main(return) = return',
+  'flow main = 1 as Missing',
+  'flow main = 1 is text',
+  'flow main = 1 is',
+  'flow as = 1',
 ];
 
 function parse(source, options = []) {

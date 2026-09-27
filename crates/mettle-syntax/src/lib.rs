@@ -232,6 +232,10 @@ fn set_expression_source(expression: &mut Expression, source: usize) {
         ExpressionKind::Not(value) | ExpressionKind::Negate(value) => {
             set_expression_source(value, source);
         }
+        ExpressionKind::TypeOperation { value, target, .. } => {
+            set_expression_source(value, source);
+            target.span = target.span.with_source(source);
+        }
         ExpressionKind::Within { timeout, body } => {
             set_expression_source(timeout, source);
             set_expression_source(body, source);
@@ -451,6 +455,11 @@ pub enum ExpressionKind {
     },
     Not(Box<Expression>),
     Negate(Box<Expression>),
+    TypeOperation {
+        value: Box<Expression>,
+        target: Spanned<ValueKind>,
+        cast: bool,
+    },
     Binary {
         left: Box<Expression>,
         operator: BinaryOperator,
@@ -495,6 +504,56 @@ pub enum BinaryOperator {
     GreaterEqual,
 }
 
+/// Built-in value kinds, not user classes or media types.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueKind {
+    Null,
+    Boolean,
+    Integer,
+    Number,
+    String,
+    Bytes,
+    Duration,
+    Array,
+    Object,
+    Source,
+}
+
+impl ValueKind {
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "null" => Self::Null,
+            "boolean" => Self::Boolean,
+            "integer" => Self::Integer,
+            "number" => Self::Number,
+            "string" => Self::String,
+            "bytes" => Self::Bytes,
+            "duration" => Self::Duration,
+            "array" => Self::Array,
+            "object" => Self::Object,
+            "source" => Self::Source,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Boolean => "boolean",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::String => "string",
+            Self::Bytes => "bytes",
+            Self::Duration => "duration",
+            Self::Array => "array",
+            Self::Object => "object",
+            Self::Source => "source",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxError {
     pub message: String,
@@ -533,6 +592,8 @@ enum TokenKind {
     And,
     Or,
     Not,
+    Is,
+    As,
     Mettle,
     Test,
     Context,
@@ -676,6 +737,8 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
         "and" => TokenKind::And,
         "or" => TokenKind::Or,
         "not" => TokenKind::Not,
+        "is" => TokenKind::Is,
+        "as" => TokenKind::As,
         "flow" => TokenKind::Mettle,
         "test" => TokenKind::Test,
         "context" => TokenKind::Context,
@@ -1364,5 +1427,40 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn kind_operators_bind_before_comparisons_and_booleans_and_keep_spans() {
+        let expression = parse_value("not \"23\" as number is integer and true").unwrap();
+        let ExpressionKind::Binary {
+            left,
+            operator: super::BinaryOperator::And,
+            ..
+        } = expression.kind
+        else {
+            panic!("expected and");
+        };
+        let ExpressionKind::Not(value) = left.kind else {
+            panic!("expected not");
+        };
+        assert!(matches!(
+            value.kind,
+            ExpressionKind::TypeOperation { cast: false, .. }
+        ));
+        for bad in ["1 is Widget", "1 as", "1 is text", "1 is number + 2"] {
+            assert!(parse_value(bad).is_err(), "{bad}");
+        }
+        assert!(super::parse("flow as = 1").is_err());
+        assert!(parse_value("null is null").is_ok());
+        let mut program = super::parse("flow main = 1 is number").unwrap();
+        program.set_source(7);
+        let Statement::Return { expression, .. } = &program.flows[0].body[0] else {
+            panic!("expected return");
+        };
+        let ExpressionKind::TypeOperation { target, value, .. } = &expression.kind else {
+            panic!("expected check");
+        };
+        assert_eq!(target.span.source, 7);
+        assert_eq!(value.span.source, 7);
     }
 }

@@ -834,7 +834,11 @@ impl Executor<'_> {
                 PlanExpressionKind::Not(value) => {
                     let value = self.evaluate(value, locals, context).await?;
                     match value.revealed() {
-                        Value::Boolean(value) => Ok(Value::Boolean(!value)),
+                        Value::Boolean(boolean) => Ok(if value.contains_sensitive() {
+                            Value::Boolean(!boolean).sensitive()
+                        } else {
+                            Value::Boolean(!boolean)
+                        }),
                         _ => Err(self.error(
                             format!("`not` requires boolean, found {}", value.type_name()),
                             expression.span,
@@ -843,7 +847,7 @@ impl Executor<'_> {
                 }
                 PlanExpressionKind::Negate(value) => {
                     let value = self.evaluate(value, locals, context).await?;
-                    match value.revealed() {
+                    let result = match value.revealed() {
                         Value::Integer(number) => {
                             number.checked_neg().map(Value::Integer).ok_or_else(|| {
                                 self.error("integer negation overflowed", expression.span)
@@ -851,6 +855,30 @@ impl Executor<'_> {
                         }
                         Value::Float(number) => Ok(Value::Float(-number)),
                         _ => Err(self.error("unary `-` requires a number", expression.span)),
+                    }?;
+                    Ok(if value.contains_sensitive() {
+                        result.sensitive()
+                    } else {
+                        result
+                    })
+                }
+                PlanExpressionKind::TypeOperation {
+                    value,
+                    target,
+                    cast,
+                } => {
+                    let value = self.evaluate(value, locals, context).await?;
+                    if *cast {
+                        mettle_capability::cast_value(&value, *target, expression.span)
+                            .map_err(|error| self.error(error.message, error.span))
+                    } else {
+                        let result =
+                            Value::Boolean(mettle_capability::matches_kind(&value, *target));
+                        Ok(if value.contains_sensitive() {
+                            result.sensitive()
+                        } else {
+                            result
+                        })
                     }
                 }
                 PlanExpressionKind::Binary {
@@ -875,7 +903,11 @@ impl Executor<'_> {
                         if (*operator == super::BinaryOperator::And && !left_value)
                             || (*operator == super::BinaryOperator::Or && *left_value)
                         {
-                            return Ok(Value::Boolean(*left_value));
+                            return Ok(if left.contains_sensitive() {
+                                Value::Boolean(*left_value).sensitive()
+                            } else {
+                                Value::Boolean(*left_value)
+                            });
                         }
                         let right = self.evaluate(right, locals, context).await?;
                         let Value::Boolean(right_value) = right.revealed() else {
@@ -887,11 +919,22 @@ impl Executor<'_> {
                                 expression.span,
                             ));
                         };
-                        return Ok(Value::Boolean(*right_value));
+                        return Ok(if left.contains_sensitive() || right.contains_sensitive() {
+                            Value::Boolean(*right_value).sensitive()
+                        } else {
+                            Value::Boolean(*right_value)
+                        });
                     }
                     let right = self.evaluate(right, locals, context).await?;
                     evaluate_binary(&left, *operator, &right)
-                        .map(Value::Boolean)
+                        .map(|boolean| {
+                            let value = Value::Boolean(boolean);
+                            if left.contains_sensitive() || right.contains_sensitive() {
+                                value.sensitive()
+                            } else {
+                                value
+                            }
+                        })
                         .map_err(|message| self.error(message, expression.span))
                 }
                 PlanExpressionKind::InterpolatedString(parts) => {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import socket
 import ssl
 import threading
 import time
@@ -53,6 +54,14 @@ class FixtureServer(ThreadingHTTPServer):
 class FixtureHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server: FixtureServer
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (ValueError, BrokenPipeError, ConnectionResetError):
+            # A bounded/failed upload can close its request before the fixture
+            # receives the final chunk. Do not emit unrelated server tracebacks.
+            self.close_connection = True
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
@@ -133,6 +142,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if self.path == "/reject-upload":
             self.close_connection = True
             self._json(413, {"error": "upload rejected before consumption"})
+            # Closing with unread upload bytes can reset TCP and discard the
+            # response. Send a FIN, then discard a bounded amount of transport
+            # data without parsing/processing the rejected application body.
+            self.wfile.flush()
+            deadline = time.monotonic() + 1.0
+            remaining = 10 * 1024 * 1024
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+                while remaining > 0:
+                    timeout = deadline - time.monotonic()
+                    if timeout <= 0:
+                        break
+                    self.connection.settimeout(timeout)
+                    chunk = self.connection.recv(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass  # EOF, peer reset, or the bounded drain deadline.
             return
         if self.path == "/upload":
             body = self._read_body()
@@ -264,6 +292,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         try:
             self.wfile.write(body)

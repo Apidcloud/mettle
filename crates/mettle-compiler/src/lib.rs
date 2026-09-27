@@ -7,6 +7,7 @@ use std::time::Duration;
 use mettle_capability::{CapabilityDescriptor, FieldSchema, SchemaType};
 pub use mettle_syntax::BinaryOperator;
 pub use mettle_syntax::DeclarationKind;
+pub use mettle_syntax::ValueKind;
 use mettle_syntax::{
     ContextMember, Expression, ExpressionKind, FileContextUse, MettleDecl, ObjectField, Program,
     Span, Statement,
@@ -129,6 +130,11 @@ pub enum PlanExpressionKind {
     },
     Not(Box<PlanExpression>),
     Negate(Box<PlanExpression>),
+    TypeOperation {
+        value: Box<PlanExpression>,
+        target: ValueKind,
+        cast: bool,
+    },
     Binary {
         left: Box<PlanExpression>,
         operator: BinaryOperator,
@@ -227,7 +233,9 @@ impl ValueType {
 const fn schema_value_type(schema: SchemaType) -> ValueType {
     match schema {
         SchemaType::Boolean => ValueType::Boolean,
-        SchemaType::Body | SchemaType::Json | SchemaType::Writable => ValueType::Inferred,
+        SchemaType::Body | SchemaType::Json | SchemaType::Writable | SchemaType::Encoded => {
+            ValueType::Inferred
+        }
         SchemaType::Bytes => ValueType::Bytes,
         SchemaType::Source => ValueType::Source,
         SchemaType::Duration => ValueType::Duration,
@@ -466,6 +474,7 @@ mod tests {
     ];
     const HTTP: CapabilityDescriptor = CapabilityDescriptor {
         name: "http",
+        constants: &[],
         defaults: HTTP_OPTIONS,
         operations: HTTP_OPERATIONS,
     };
@@ -947,5 +956,31 @@ mod tests {
 
         let messages = errors("flow main() = rate(target: 1, period: 1s, duration: 1ms) { true }");
         assert!(messages.iter().any(|message| message.contains("between 1")));
+    }
+
+    #[test]
+    fn codec_constants_and_operations_are_descriptor_owned_and_shadowable() {
+        use mettle_capability::codecs::JSON_DESCRIPTOR;
+        let source =
+            parse(r"flow main = { media: json.mediaType, encoded: json.encode({ ok: true }) }")
+                .unwrap();
+        assert!(compile_with_capabilities(&source, &[JSON_DESCRIPTOR]).is_ok());
+        assert!(compile(&source).is_err());
+        let source = parse(
+            r#"flow main { json = { mediaType: "local" }
+            json.mediaType
+        }"#,
+        )
+        .unwrap();
+        let plan = compile_with_capabilities(&source, &[JSON_DESCRIPTOR]).unwrap();
+        assert!(matches!(
+            plan.flows[0].instructions.last(),
+            Some(Instruction::Return(super::PlanExpression {
+                kind: PlanExpressionKind::Member { .. },
+                ..
+            }))
+        ));
+        let source = parse("flow main = json.unknown").unwrap();
+        assert!(compile_with_capabilities(&source, &[JSON_DESCRIPTOR]).is_err());
     }
 }

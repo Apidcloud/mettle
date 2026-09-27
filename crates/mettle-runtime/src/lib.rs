@@ -628,6 +628,7 @@ mod tests {
     }];
     const PROBE: CapabilityDescriptor = CapabilityDescriptor {
         name: "probe",
+        constants: &[],
         defaults: &[],
         operations: PROBE_OPERATIONS,
     };
@@ -1592,5 +1593,39 @@ mod tests {
         );
         let snapshots = observer.workloads.lock().expect("observer lock");
         assert!(calls.iter().all(|call| call.workload_id == snapshots[0].id));
+    }
+
+    #[test]
+    fn kind_checks_casts_precedence_and_derived_sensitivity() {
+        let source = parse(r#"flow main {
+            assert(23 is number and 23 is integer)
+            assert(not "23" is number)
+            assert("-0x2a" as number == -42)
+            assert("1.5s" as duration == 1500ms)
+            assert(23 as string == "23")
+            assert("true" as boolean)
+            assert(null is null)
+            assert([1] is array and { ok: true } is object)
+            assert("invalid" is number and "invalid" as number == 1 or true)
+            checked = secret(23) is number
+            casted = secret("23") as number
+            return { checked: checked, casted: casted, comparison: casted == 23, negative: -casted, inverted: not checked, logical: checked and true }
+        }"#).unwrap();
+        let plan = compile(&source).unwrap();
+        let result = block_on(Runtime::default().execute(&plan)).unwrap();
+        let Value::Object(values) = result else {
+            panic!("expected object");
+        };
+        assert!(values.values().all(Value::contains_sensitive));
+        let source = parse("flow main = \"confidential-invalid\" as number").unwrap();
+        let error = block_on(Runtime::default().execute(&compile(&source).unwrap())).unwrap_err();
+        assert!(!error.message.contains("confidential"));
+        assert_eq!(
+            error.span,
+            match &source.flows[0].body[0] {
+                mettle_syntax::Statement::Return { expression, .. } => expression.span,
+                _ => unreachable!(),
+            }
+        );
     }
 }

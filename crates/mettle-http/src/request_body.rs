@@ -9,7 +9,7 @@ use std::task::{Context, Poll, Waker};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::{Body, Frame, SizeHint};
-use mettle_capability::{ByteReader, CapabilityError};
+use mettle_capability::{ByteReader, CapabilityError, Span};
 
 #[derive(Default)]
 pub(crate) struct UploadControl {
@@ -53,16 +53,27 @@ pub(crate) enum RequestBody {
         pending: Option<PendingRead>,
         control: Arc<UploadControl>,
         finished: bool,
+        max_bytes: usize,
+        sent: usize,
+        span: Span,
     },
 }
 
 impl RequestBody {
-    pub fn source(reader: Box<dyn ByteReader>, control: Arc<UploadControl>) -> Self {
+    pub fn source(
+        reader: Box<dyn ByteReader>,
+        control: Arc<UploadControl>,
+        max_bytes: usize,
+        span: Span,
+    ) -> Self {
         Self::Source {
             reader: Some(reader),
             pending: None,
             control,
             finished: false,
+            max_bytes,
+            sent: 0,
+            span,
         }
     }
 }
@@ -84,6 +95,9 @@ impl Body for RequestBody {
                 pending,
                 control,
                 finished,
+                max_bytes,
+                sent,
+                span,
             } => {
                 *control.waker.lock().expect("upload waker lock") = Some(cx.waker().clone());
                 if *finished || control.stopped.load(Ordering::Acquire) {
@@ -107,6 +121,16 @@ impl Body for RequestBody {
                 *pending = None;
                 match result {
                     Ok(Some(bytes)) => {
+                        if bytes.len() > max_bytes.saturating_sub(*sent) {
+                            *finished = true;
+                            let error = CapabilityError::new(
+                                "streamed request exceeds maxBodyBytes",
+                                *span,
+                            );
+                            *control.error.lock().expect("upload error lock") = Some(error.clone());
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                        *sent += bytes.len();
                         *reader = Some(current);
                         Poll::Ready(Some(Ok(Frame::data(Bytes::copy_from_slice(&bytes)))))
                     }

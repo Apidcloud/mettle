@@ -3,7 +3,7 @@
 
 enum TokenType {
   NEWLINE, CALL_CONTINUATION, MEMBER_CONTINUATION, INDEX_CONTINUATION, OR_CONTINUATION, AND_CONTINUATION,
-  COMPARISON_CONTINUATION, CALL_OPTIONS_START, ELSE_START, ERROR_SENTINEL
+  COMPARISON_CONTINUATION, CALL_OPTIONS_START, ELSE_START, ERROR_SENTINEL, TYPE_CONTINUATION
 };
 
 void *tree_sitter_mettle_external_scanner_create(void) { return NULL; }
@@ -72,6 +72,7 @@ bool tree_sitter_mettle_external_scanner_scan(void *payload, TSLexer *lexer, con
       }
       if (boundary && !strcmp(word, "and")) continuation = AND_CONTINUATION;
       if (boundary && !strcmp(word, "or")) continuation = OR_CONTINUATION;
+      if (boundary && (!strcmp(word, "is") || !strcmp(word, "as"))) continuation = TYPE_CONTINUATION;
     }
   }
   if (continuation != ERROR_SENTINEL && valid_symbols[continuation]) {

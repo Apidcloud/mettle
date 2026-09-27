@@ -1,0 +1,44 @@
+// Start the local fixture: python3 util/test-server/http_fixture.py --port 8080
+// From the repository root: mettle run examples/http/content.mettle main \
+//   --arg baseUrl=http://127.0.0.1:8080
+// Save just the result: append --raw > result.json (or --raw for the terminal).
+// response.body remains text; response.json is parsed JSON until phase 3.
+
+use context {
+    defaults http {
+        headers: { Authorization: "Bearer local-test-token" }
+        timeout: 5s
+    }
+}
+
+flow main(baseUrl) {
+    url = "${baseUrl}/method"
+    record = { celsius: 23 }
+    inferred = http.post(url, body: record)
+    // This illustrative media-type name is not a temperature-specific codec.
+    // Its +json suffix selects generic JSON encoding; no domain validation runs.
+    typed = http.post(url, body: record, mediaType: "application/vnd.example.temperature+json")
+    assert(inferred.json.json == typed.json.json)
+
+    // An explicit representation can encode a string as JSON instead of text.
+    jsonString = http.post(url, body: "Hello!", mediaType: json.mediaType)
+    assert(jsonString.json.json == "Hello!")
+
+    // Codec output is already encoded: it is transmitted unchanged, not quoted again.
+    encoded = json.encode(record)
+    raw = http.post(url, body: encoded, mediaType: json.mediaType)
+    assert(raw.json.json == record)
+
+    // Scalars infer JSON; text representation is an explicit alternative.
+    scalar = http.post(url, body: 23)
+    plain = http.post(url, body: 23, mediaType: text.mediaType)
+    assert(scalar.json.json == 23)
+    assert(plain.json.body == "23")
+
+    return {
+        inferred: inferred.json.contentType
+        custom: typed.json.contentType
+        raw: raw.json.json
+        text: plain.json.body
+    }
+}

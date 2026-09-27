@@ -62,12 +62,16 @@ const BODY_OPTIONS: &[FieldSchema] = &[
         value_type: SchemaType::Body,
     },
     FieldSchema {
-        name: "bodyFormat",
+        name: "mediaType",
         value_type: SchemaType::String,
+    },
+    FieldSchema {
+        name: "maxBodyBytes",
+        value_type: SchemaType::Integer,
     },
 ];
 
-const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"], &["json", "bodyFormat"]];
+const BODY_CONFLICTS: &[&[&str]] = &[&["json", "body"]];
 const NO_CONFLICTS: &[&[&str]] = &[];
 
 const RESPONSE_FIELDS: &[FieldSchema] = &[
@@ -166,6 +170,7 @@ const OPERATIONS: &[OperationSchema] = &[
 
 pub const DESCRIPTOR: CapabilityDescriptor = CapabilityDescriptor {
     name: "http",
+    constants: &[],
     defaults: COMMON_OPTIONS,
     operations: OPERATIONS,
 };

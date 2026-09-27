@@ -17,7 +17,8 @@
 ["for" "in"] @keyword.repeat
 ["within" "retry" "parallel" "rate" "concurrency"] @keyword
 ["assert" "fail"] @function.builtin
-["and" "or" "not"] @keyword.operator
+["and" "or" "not" "is" "as"] @keyword.operator
+(value_kind) @type.builtin
 ["=" "==" "!=" "<" "<=" ">" ">=" "-"] @operator
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 ["," ":" "."] @punctuation.delimiter

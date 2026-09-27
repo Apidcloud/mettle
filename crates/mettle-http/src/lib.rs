@@ -6,7 +6,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use hyper::{Method, Request, Uri};
@@ -14,6 +13,8 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use mettle_capability::content::BuiltinCodec;
+use mettle_capability::media_type::MediaType;
 use mettle_capability::{
     Capability, CapabilityError, CapabilityFuture, IoContext, Object, OperationReport,
     ReportOutcome, ReportSection, Span, Value, merge_objects,
@@ -22,6 +23,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
+mod outgoing;
 mod request_body;
 mod schema;
 #[cfg(test)]
@@ -30,13 +32,6 @@ use request_body::{RequestBody, UploadControl, UploadGuard};
 pub use schema::DESCRIPTOR;
 
 type HttpClient = Client<HttpsConnector<HttpConnector>, RequestBody>;
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum BodyFormat {
-    Json,
-    Text,
-    Bytes,
-}
 
 #[derive(Clone)]
 pub struct HttpCapability {
@@ -160,149 +155,40 @@ impl HttpCapability {
                 span,
             ));
         }
-        if options.contains_key("json") && options.contains_key("bodyFormat") {
-            return Err(CapabilityError::new(
-                "legacy `json` cannot be combined with `bodyFormat`",
-                span,
-            ));
-        }
-        let explicit_format = options
-            .get("bodyFormat")
-            .map(|value| expect_string(Some(value), "bodyFormat", span))
-            .transpose()?;
-        if explicit_format.is_some() && !options.contains_key("body") {
-            return Err(CapabilityError::new("`bodyFormat` requires `body`", span));
-        }
-        let payload = options.get("body").or_else(|| options.get("json"));
-        let body_format = if options.contains_key("json") {
-            Some(BodyFormat::Json)
-        } else if let Some(payload) = payload {
-            Some(match explicit_format {
-                Some("json") => BodyFormat::Json,
-                Some("text") => BodyFormat::Text,
-                Some("bytes") => BodyFormat::Bytes,
-                Some(other) => {
-                    return Err(CapabilityError::new(
-                        format!("unknown body format `{other}`; use `json`, `text`, or `bytes`"),
-                        span,
-                    ));
-                }
-                None => match payload.revealed() {
-                    Value::Object(_) | Value::Array(_) => BodyFormat::Json,
-                    Value::String(_) => BodyFormat::Text,
-                    Value::Bytes(_) | Value::Source(_) => BodyFormat::Bytes,
-                    _ => {
-                        return Err(CapabilityError::new(
-                            "this body value requires an explicit `bodyFormat`",
-                            span,
-                        ));
-                    }
-                },
-            })
-        } else {
-            None
-        };
+        let prepared = outgoing::prepare(&options, span)?;
         let upload = Arc::new(UploadControl::default());
         let _upload_guard = UploadGuard(upload.clone());
-        let stream = match payload.map(Value::revealed) {
-            Some(Value::Source(source)) => {
-                if body_format != Some(BodyFormat::Bytes) {
-                    return Err(CapabilityError::new(
-                        "a byte source cannot be encoded as JSON or text",
-                        span,
-                    ));
-                }
-                if options
-                    .get("headers")
-                    .and_then(Value::as_object)
-                    .is_some_and(|headers| {
-                        headers.keys().any(|name| {
-                            name.eq_ignore_ascii_case("content-length")
-                                || name.eq_ignore_ascii_case("transfer-encoding")
-                        })
-                    })
-                {
-                    return Err(CapabilityError::new(
-                        "Content-Length/Transfer-Encoding cannot be supplied for a streamed request; framing is automatic",
-                        span,
-                    ));
-                }
-                Some(source.clone())
-            }
-            _ => None,
-        };
-        let body = match (body_format, payload) {
-            (Some(BodyFormat::Json), Some(value)) => {
-                Bytes::from(serde_json::to_vec(&to_json(value, span)?).map_err(|error| {
-                    CapabilityError::new(format!("could not encode JSON request: {error}"), span)
-                })?)
-            }
-            (Some(BodyFormat::Text), Some(value)) => {
-                Bytes::copy_from_slice(expect_string(Some(value), "body", span)?.as_bytes())
-            }
-            (Some(BodyFormat::Bytes), Some(value)) => match value.revealed() {
-                Value::Bytes(bytes) => Bytes::copy_from_slice(bytes),
-                Value::Source(_) => Bytes::new(),
-                other => return Err(type_error("body", "bytes", other, span)),
-            },
-            _ => Bytes::new(),
-        };
-
         let mut request = Request::builder().method(method.clone()).uri(uri);
         if let Some(headers) = options.get("headers") {
             let headers = headers.as_object().ok_or_else(|| {
                 type_error("headers", "object containing string values", headers, span)
             })?;
             for (name, value) in headers {
-                let name = HeaderName::try_from(name.as_str()).map_err(|error| {
-                    CapabilityError::new(
-                        format!("invalid HTTP header name `{name}`: {error}"),
-                        span,
-                    )
-                })?;
+                let name = HeaderName::try_from(name.as_str())
+                    .map_err(|_| CapabilityError::new("invalid HTTP header name", span))?;
+                if name == CONTENT_TYPE {
+                    continue;
+                }
                 let value = expect_string(Some(value), "HTTP header value", span)?;
-                let value = HeaderValue::try_from(value).map_err(|error| {
-                    CapabilityError::new(format!("invalid HTTP header value: {error}"), span)
-                })?;
+                let value = HeaderValue::try_from(value)
+                    .map_err(|_| CapabilityError::new("invalid HTTP header value", span))?;
                 request = request.header(name, value);
             }
         }
-        let content_type = options
-            .get("headers")
-            .and_then(Value::as_object)
-            .and_then(|headers| {
-                headers.iter().find_map(|(name, value)| {
-                    name.eq_ignore_ascii_case("content-type").then_some(value)
-                })
-            });
-        if body_format == Some(BodyFormat::Json) {
-            if let Some(content_type) = content_type {
-                let content_type = expect_string(Some(content_type), "Content-Type header", span)?;
-                if !is_json_content_type(content_type) {
-                    return Err(CapabilityError::new(
-                        format!(
-                            "JSON request body requires a JSON Content-Type, found `{content_type}`"
-                        ),
-                        span,
-                    ));
-                }
-            } else {
-                request = request.header(CONTENT_TYPE, "application/json");
-            }
-        } else if content_type.is_none() {
-            if body_format == Some(BodyFormat::Text) {
-                request = request.header(CONTENT_TYPE, "text/plain; charset=utf-8");
-            } else if body_format == Some(BodyFormat::Bytes) {
-                request = request.header(CONTENT_TYPE, "application/octet-stream");
-            }
+        if let Some(content_type) = &prepared.content_type {
+            let content_type = HeaderValue::try_from(content_type.as_str())
+                .map_err(|_| CapabilityError::new("invalid Content-Type header", span))?;
+            request = request.header(CONTENT_TYPE, content_type);
         }
+        let stream = prepared.source;
+        let body = prepared.bytes;
         let body = if let Some(source) = stream {
             let reader = tokio::time::timeout_at(deadline, source.open(context))
                 .await
                 .map_err(|_| {
                     CapabilityError::new("opening request source timed out", source.span)
                 })??;
-            RequestBody::source(reader, upload.clone())
+            RequestBody::source(reader, upload.clone(), prepared.max_bytes, source.span)
         } else {
             RequestBody::Full(Full::new(body))
         };
@@ -365,13 +251,11 @@ impl HttpCapability {
                 .collect::<BTreeMap<_, _>>();
             let bytes = read_bounded_body(response.into_body(), max_response_bytes, span).await?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let json = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(value) => match from_json(value, span) {
-                    Ok(value) => value,
-                    Err(_) if !declares_json => Value::Null,
-                    Err(error) => return Err(error),
-                },
-                Err(_) if bytes.is_empty() || !declares_json => Value::Null,
+            let empty_body = bytes.is_empty();
+            let body_bytes = Value::Bytes(Arc::from(bytes));
+            let json = match BuiltinCodec::Json.decode(&body_bytes, max_response_bytes, span) {
+                Ok(value) => value,
+                Err(_) if empty_body || !declares_json => Value::Null,
                 Err(error) => {
                     return Err(CapabilityError::new(
                         format!(
@@ -384,7 +268,7 @@ impl HttpCapability {
 
             Ok(Value::Object(BTreeMap::from([
                 ("body".to_owned(), Value::String(text)),
-                ("bodyBytes".to_owned(), Value::Bytes(Arc::from(bytes))),
+                ("bodyBytes".to_owned(), body_bytes),
                 ("duration".to_owned(), Value::Duration(started.elapsed())),
                 ("headers".to_owned(), Value::Object(headers)),
                 ("json".to_owned(), json),
@@ -439,14 +323,15 @@ impl Capability for HttpCapability {
                 .entry("headers".to_owned())
                 .or_insert_with(|| Value::Object(Object::new()));
             if let Value::Object(current_headers) = current_headers {
-                for (name, value) in incoming_headers {
-                    if let Some(existing) = current_headers
+                // Override previous layers case-insensitively, but retain distinct
+                // spellings within this layer so duplicate Content-Type is rejected
+                // by representation validation instead of silently picking one.
+                current_headers.retain(|existing, _| {
+                    !incoming_headers
                         .keys()
-                        .find(|existing| existing.eq_ignore_ascii_case(&name))
-                        .cloned()
-                    {
-                        current_headers.remove(&existing);
-                    }
+                        .any(|name| existing.eq_ignore_ascii_case(name))
+                });
+                for (name, value) in incoming_headers {
                     current_headers.insert(name, value);
                 }
             }
@@ -632,9 +517,11 @@ fn type_error(name: &str, expected: &str, value: &Value, span: Span) -> Capabili
 }
 
 fn is_json_content_type(value: &str) -> bool {
-    let media_type = value.split(';').next().unwrap_or(value).trim();
-    media_type.eq_ignore_ascii_case("application/json")
-        || media_type.to_ascii_lowercase().ends_with("+json")
+    // Incoming representation detection keeps its existing contract: parameters
+    // must not hide a JSON declaration and silently suppress decoding failures.
+    let essence = value.split(';').next().unwrap_or(value).trim();
+    MediaType::parse(essence, Span::default())
+        .is_ok_and(|media| media.codec() == BuiltinCodec::Json)
 }
 
 fn error_chain(error: &dyn Error) -> String {
@@ -648,84 +535,11 @@ fn error_chain(error: &dyn Error) -> String {
     message
 }
 
-fn to_json(value: &Value, span: Span) -> Result<serde_json::Value, CapabilityError> {
-    match value.revealed() {
-        Value::Null => Ok(serde_json::Value::Null),
-        Value::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
-        Value::Integer(value) => Ok(serde_json::Value::Number((*value).into())),
-        Value::Float(value) => serde_json::Number::from_f64(*value)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| CapabilityError::new("JSON number must be finite", span)),
-        Value::String(value) => Ok(serde_json::Value::String(value.clone())),
-        Value::Bytes(_) | Value::Source(_) => Err(CapabilityError::new(
-            "byte values cannot be encoded as JSON",
-            span,
-        )),
-        Value::Duration(_) => Err(CapabilityError::new(
-            "duration values cannot be encoded as JSON",
-            span,
-        )),
-        Value::Array(values) => values
-            .iter()
-            .map(|value| to_json(value, span))
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array),
-        Value::Object(fields) => fields
-            .iter()
-            .map(|(name, value)| Ok((name.clone(), to_json(value, span)?)))
-            .collect::<Result<serde_json::Map<_, _>, _>>()
-            .map(serde_json::Value::Object),
-        Value::Sensitive(_) => unreachable!("revealed values are not sensitive wrappers"),
-    }
-}
-
 fn sensitive_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key" | "api-key"
     ) || name.to_ascii_lowercase().contains("token")
-}
-
-fn from_json(value: serde_json::Value, span: Span) -> Result<Value, CapabilityError> {
-    Ok(match value {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(value) => Value::Boolean(value),
-        serde_json::Value::Number(value) => {
-            let spelling = value.to_string();
-            if spelling.contains(['.', 'e', 'E']) {
-                let decimal = value
-                    .as_f64()
-                    .filter(|number| number.is_finite())
-                    .ok_or_else(|| {
-                        CapabilityError::new(
-                            "JSON decimal is outside Mettle's finite number range",
-                            span,
-                        )
-                    })?;
-                Value::Float(decimal)
-            } else {
-                Value::Integer(value.as_i64().ok_or_else(|| {
-                    CapabilityError::new(
-                        "JSON integer is outside Mettle's supported 64-bit range",
-                        span,
-                    )
-                })?)
-            }
-        }
-        serde_json::Value::String(value) => Value::String(value),
-        serde_json::Value::Array(values) => Value::Array(
-            values
-                .into_iter()
-                .map(|value| from_json(value, span))
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
-        serde_json::Value::Object(fields) => Value::Object(
-            fields
-                .into_iter()
-                .map(|(name, value)| Ok((name, from_json(value, span)?)))
-                .collect::<Result<BTreeMap<_, _>, CapabilityError>>()?,
-        ),
-    })
 }
 
 #[derive(Debug)]
@@ -774,7 +588,8 @@ mod tests {
 
     use mettle_capability::{Capability, Object, Span, Value};
 
-    use super::{HttpCapability, from_json, is_json_content_type, resolve_url, to_json};
+    use super::{BuiltinCodec, HttpCapability, is_json_content_type, resolve_url};
+    use mettle_capability::content::from_json;
 
     #[test]
     fn resolves_relative_urls_without_double_slashes() {
@@ -794,9 +609,13 @@ mod tests {
             ("active".to_owned(), Value::Boolean(true)),
             ("count".to_owned(), Value::Integer(2)),
         ]));
-        let encoded = to_json(&value, Span::default()).expect("value should encode");
+        let encoded = BuiltinCodec::Json
+            .encode(&value, 1024, Span::default())
+            .expect("value should encode");
         assert_eq!(
-            from_json(encoded, Span::default()).expect("value should decode"),
+            BuiltinCodec::Json
+                .decode(&encoded, 1024, Span::default())
+                .expect("value should decode"),
             value
         );
     }
@@ -856,6 +675,9 @@ mod tests {
         assert!(is_json_content_type("application/json"));
         assert!(is_json_content_type("Application/JSON; charset=utf-8"));
         assert!(is_json_content_type("application/merge-patch+json"));
+        assert!(is_json_content_type(
+            "application/json; charset=\"unfinished"
+        ));
         assert!(!is_json_content_type("text/plain"));
     }
 }

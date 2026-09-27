@@ -442,7 +442,42 @@ impl<'a> Parser<'a> {
                 kind: ExpressionKind::Negate(Box::new(value)),
             });
         }
-        self.parse_primary_expression()
+        self.parse_type_operation()
+    }
+
+    fn parse_type_operation(&mut self) -> Result<Expression, SyntaxError> {
+        let mut expression = self.parse_primary_expression()?;
+        while self.at(&TokenKind::Is) || self.at(&TokenKind::As) {
+            let cast = self.advance().kind == TokenKind::As;
+            let token = self.advance();
+            let name = match &token.kind {
+                TokenKind::Identifier(name) => name.as_str(),
+                TokenKind::Null => "null",
+                _ => {
+                    return Err(SyntaxError::new(
+                        "expected a built-in value kind after `is` or `as`",
+                        token.span,
+                    ));
+                }
+            };
+            let kind = super::ValueKind::parse(name).ok_or_else(|| {
+                SyntaxError::new("unknown value kind; use null, boolean, integer, number, string, bytes, duration, array, object, or source", token.span)
+            })?;
+            let span = expression.span.join(token.span);
+            expression = Expression {
+                kind: ExpressionKind::TypeOperation {
+                    value: Box::new(expression),
+                    target: Spanned {
+                        value: kind,
+                        span: token.span,
+                    },
+                    cast,
+                },
+                span,
+            };
+            expression = self.parse_member_access(expression)?;
+        }
+        Ok(expression)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -967,6 +1002,8 @@ const fn token_description(token: &TokenKind) -> &'static str {
         TokenKind::And => "`and`",
         TokenKind::Or => "`or`",
         TokenKind::Not => "`not`",
+        TokenKind::Is => "`is`",
+        TokenKind::As => "`as`",
         TokenKind::Minus => "`-`",
         TokenKind::Mettle => "`flow`",
         TokenKind::Test => "`test`",

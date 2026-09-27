@@ -1,0 +1,47 @@
+// No network or input files required.
+// mettle run examples/language/content.mettle
+// mettle test examples/language/content.mettle --jobs 2
+// Append --raw to print only the flow result, or --raw > result.json to save it.
+
+flow main {
+    incoming = "{\"id\":\"42\",\"active\":true}"
+    user = json.decode(incoming)
+    assert(user is object)
+    id = user.id as integer
+    assert(id is number and id is integer)
+
+    encoded = json.encode({ id: id, active: user.active })
+    assert(encoded is bytes)
+    assert(json.decode(encoded).id == 42)
+    echo("JSON values, UTF-8 text, and encoded bytes are different things")
+    return {
+        id: id
+        jsonText: text.decode(encoded)
+        mediaType: json.mediaType
+    }
+}
+
+test "checks do not silently convert values" {
+    assert(not "23" is number)
+    assert("23" as number == 23)
+    assert("-0x2a" as integer == -42)
+    assert("0b1010" as integer == 10)
+    assert("1.5s" as duration == 1500ms)
+    assert("true" as boolean)
+}
+
+test "text codecs accept explicit scalar and collection formatting" {
+    assert(text.decode(text.encode(23)) == "23")
+    assert(text.decode(text.encode("Hello!")) == "Hello!")
+    formatted = text.decode(text.encode({ ok: true }))
+    assert(json.decode(formatted).ok == true)
+    assert(json.decode(json.encode(null)) is null)
+    assert(json.decode(json.encode([1, true])) is array)
+}
+
+test "JSON strings are quoted, UTF-8 text is not" {
+    assert(text.decode(json.encode("Hello!")) == "\"Hello!\"")
+    assert(text.decode(text.encode("Hello!")) == "Hello!")
+    raw = text.encode("reusable bytes")
+    assert(bytes.decode(bytes.encode(raw)) == raw)
+}

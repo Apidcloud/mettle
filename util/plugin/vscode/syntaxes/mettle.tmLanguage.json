@@ -116,12 +116,19 @@
     "controlKeywords": {
       "patterns": [
         {
+          "match": "\\b(is|as)(\\s+)(null|boolean|integer|number|string|bytes|duration|array|object|source)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.type.mettle" },
+            "3": { "name": "support.type.builtin.mettle" }
+          }
+        },
+        {
           "name": "keyword.control.mettle",
           "match": "\\b(?:return|assert|fail|if|else|for|in|concurrency|parallel|rate|retry|within)\\b"
         },
         {
           "name": "keyword.operator.logical.mettle",
-          "match": "\\b(?:and|or|not)\\b"
+          "match": "\\b(?:and|or|not|is|as)\\b"
         },
         {
           "name": "storage.type.mettle",

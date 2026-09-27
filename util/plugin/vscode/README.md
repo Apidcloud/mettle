@@ -13,6 +13,7 @@ Basic language support for `.mettle` source files.
   reusable and anonymous file contexts, `senv()`, `echo()`, conditionals, assertion messages, loops, named parallel branches, structured and load execution
   policies, and HTTP requests using named `body`;
 - snippets for complete filesystem reads, incremental copies, and streamed HTTP uploads;
+- highlighting for built-in `is`/`as` kind operations and snippets for codecs/media types;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - **Run Test** play buttons above each test declaration; each runs only that test;
 - parser and compiler diagnostics in the editor, including unsaved project files;

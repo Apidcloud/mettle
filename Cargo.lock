@@ -229,6 +229,8 @@ name = "mettle-capability"
 version = "1.0.0-alpha.1"
 dependencies = [
  "mettle-syntax",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

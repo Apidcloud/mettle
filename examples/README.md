@@ -32,6 +32,7 @@ The standalone language files below require no network access.
 | [Standalone profiles](language/profiles/main.mettle) | Automatic `.env` and `--profile` overlays | `mettle run examples/language/profiles/main.mettle --profile qa` |
 | [Complete file reads](language/files.mettle) | Reusable bytes and explicit UTF-8 text reads | `mettle run examples/language/files.mettle inspectFile --arg path=examples/language/filesystem/data/payload.txt` |
 | [Filesystem project](language/filesystem/main.mettle) | Incremental copy, helper sources, and project `workingDir` | `mettle run examples/language/filesystem/main.mettle` |
+| [Content and kinds](language/content.mettle) | JSON/text/bytes codecs, primitive checks, explicit casts, and media constants | `mettle test examples/language/content.mettle --jobs 2` |
 
 Set `API_TOKEN` to any disposable demo value before running the secrets example.
 
@@ -61,6 +62,17 @@ memory; `fs.stream` supplies one incremental read. Standalone paths use the CLI
 invocation directory; project paths use the root or configured `workingDir`.
 
 ## HTTP — local file uploads
+
+[Content representations](http/content.mettle) uses the same local fixture to
+demonstrate optional media types, custom JSON representations, scalar bodies,
+and sending pre-encoded bytes unchanged:
+
+```bash
+mettle run examples/http/content.mettle main --arg baseUrl=http://127.0.0.1:8080
+```
+
+The fixture startup command is below. No public service or real credential is
+needed. Client responses retain `.json` for parsed JSON in this phase.
 
 [File upload](http/file-upload.mettle) demonstrates both buffered and streamed
 request bodies, plus a server that rejects an upload before reading its body.

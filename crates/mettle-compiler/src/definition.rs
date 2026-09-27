@@ -320,6 +320,7 @@ impl<'a> DefinitionFinder<'a> {
                 }
             }
             ExpressionKind::Member { value, .. }
+            | ExpressionKind::TypeOperation { value, .. }
             | ExpressionKind::Fail(value)
             | ExpressionKind::Not(value)
             | ExpressionKind::Negate(value) => {

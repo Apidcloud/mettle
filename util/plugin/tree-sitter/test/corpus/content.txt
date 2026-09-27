@@ -1,0 +1,53 @@
+================================================================================
+Kind checks casts and precedence
+================================================================================
+
+flow main = not "23" as number is integer and true
+flow nullCheck = null is null
+flow records = for x in rows as array {
+    x is object
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (binary_expression
+      (unary_expression
+        (type_operation
+          (type_operation (string (string_content)) (value_kind))
+          (value_kind)))
+      (boolean)))
+  (flow_declaration (identifier) (type_operation (null) (value_kind)))
+  (flow_declaration
+    (identifier)
+    (for_expression
+      (identifier)
+      (type_operation (identifier) (value_kind))
+      (block (expression_statement (type_operation (identifier) (value_kind)))))))
+
+================================================================================
+Type operators continue across comments and newlines
+================================================================================
+
+flow main {
+    x = "23"
+        // Continue the value, not a new statement.
+        as number
+        is integer
+    x
+}
+
+---
+
+(source_file
+  (flow_declaration
+    (identifier)
+    (block
+      (binding
+        (identifier)
+        (type_operation
+          (type_operation (string (string_content)) (comment) (value_kind))
+          (value_kind)))
+      (expression_statement (identifier)))))

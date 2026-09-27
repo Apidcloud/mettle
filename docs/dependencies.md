@@ -14,7 +14,7 @@ Mettle keeps third-party code concentrated around networking, TLS, byte buffers,
 | Hyper-rustls | Hyper/Rustls connector | Apache-2.0 OR ISC OR MIT | Default features disabled; HTTP/1, ring, TLS 1.2, and WebPKI roots selected |
 | Rustls | TLS configuration | Apache-2.0 OR ISC OR MIT | Default features disabled; ring, standard library, and TLS 1.2 selected |
 | Bytes | HTTP byte buffers | MIT | Shared networking primitive used by Hyper |
-| Serde JSON | JSON parsing and serialization | MIT OR Apache-2.0 | Used at the HTTP/JSON boundary and for machine-readable CLI flow discovery |
+| Serde / Serde JSON | Shared bounded content serialization, JSON parsing, and CLI data | MIT OR Apache-2.0 | Codec policy lives in the capability foundation; HTTP reuses it rather than maintaining a second value decoder |
 
 Default features are disabled for the networking and TLS crates where their feature sets are broad. HTTP/2, native certificate discovery, logging adapters, AWS-LC, proxy discovery, compression, and web-framework features are not enabled.
 
