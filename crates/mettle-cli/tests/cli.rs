@@ -211,6 +211,31 @@ fn lsp_builtin_hover_signature_and_virtual_definition_share_the_offline_referenc
 }
 
 #[test]
+fn language_docs_cover_keywords_helpers_and_primitive_kinds_offline() {
+    for name in ["assert", "use", "parallel", "env", "echo", "string"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .args(["docs", name])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.starts_with(&format!("# {name}\n")));
+        let qualified = Command::new(env!("CARGO_BIN_EXE_mettle"))
+            .args(["docs", &format!("language.{name}")])
+            .output()
+            .unwrap();
+        assert_eq!(qualified.stdout, text.as_bytes());
+    }
+    let index = Command::new(env!("CARGO_BIN_EXE_mettle"))
+        .args(["docs", "language"])
+        .output()
+        .unwrap();
+    let index = String::from_utf8(index.stdout).unwrap();
+    assert!(index.contains("`assert`") && index.contains("`use`") && index.contains("`senv`"));
+}
+
+#[test]
 fn check_validates_a_source_file() {
     let path = source_file("flow main() { return \"valid\" }");
     let output = Command::new(env!("CARGO_BIN_EXE_mettle"))

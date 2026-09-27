@@ -1,11 +1,15 @@
 // Run without network access:
 //   mettle run examples/language/documentation.mettle
 //   mettle test examples/language/documentation.mettle
-// In VS Code, hover greet(), its name parameter, or text.encode().
+// In VS Code, hover greet(), its name parameter, text.encode(), assert, or use.
 // F12 on greet() opens this declaration; F12 on text.encode() opens its
 // read-only, offline reference. Signature help works while typing arguments.
 // Built-in hovers show practical behavior notes and an example; the compact
 // signature's … hides optional named options, not unsupported arguments.
+// Keywords and helpers have their own references, too:
+//   mettle docs assert
+//   mettle docs use
+// Hover integer or number below to see primitive-kind documentation.
 
 /// Shared greeting settings for this file.
 context greetings {
@@ -28,4 +32,10 @@ flow main {
 
 test "documented flows behave like ordinary flows" {
     assert(greet("Mettle") == "Hello, Mettle!")
+}
+
+test "primitive kinds have contextual documentation" {
+    answer = "42" as integer
+    assert(answer is number, "the converted answer should be numeric")
+    assert(answer == 42)
 }

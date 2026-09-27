@@ -112,7 +112,7 @@ struct Frame {
     pending: Option<String>,
 }
 
-fn tokens(source: &str) -> Vec<Token> {
+pub(crate) fn tokens(source: &str) -> Vec<Token> {
     lex(source).unwrap_or_else(|error| lex(&source[..error.span.start]).unwrap_or_default())
 }
 
@@ -135,6 +135,11 @@ fn qualified(tokens: &[Token], end: usize) -> Option<(String, Span)> {
 }
 
 fn call_target(tokens: &[Token], end: usize) -> Option<(String, Span)> {
+    if let Some(name) = crate::language::keyword_name(&tokens.get(end)?.kind)
+        && crate::language::item(name).is_some_and(|item| !item.parameters.is_empty())
+    {
+        return Some((name.to_owned(), tokens[end].span));
+    }
     // Match the callable-name parentheses already supported by the parser.
     let mut left = end;
     let mut right = end;
@@ -167,6 +172,20 @@ fn call_target(tokens: &[Token], end: usize) -> Option<(String, Span)> {
         return None;
     }
     Some((name, span))
+}
+
+/// Whether a symbol is a call target, including parenthesized callable names.
+/// Token-based matching avoids treating punctuation in comments as arguments.
+#[must_use]
+pub fn is_call_target(source: &str, span: Span) -> bool {
+    let tokens = tokens(source);
+    tokens.iter().enumerate().any(|(index, token)| {
+        token.kind == TokenKind::LeftParen
+            && index
+                .checked_sub(1)
+                .and_then(|end| call_target(&tokens, end))
+                .is_some_and(|(_, target)| target == span)
+    })
 }
 
 /// Discover the innermost call without parsing an unfinished body. Strings,

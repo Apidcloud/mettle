@@ -87,6 +87,13 @@ README, and executable examples in the same changeset.
   `crates/mettle-capability/src/documentation.rs`; the CLI's `mettle docs` command
   and LSP consume that metadata. Keep editor adapters presentation-only: do not
   add a separate JavaScript catalogue of signatures, defaults, or descriptions.
+- Core keywords and their lexer spellings share the inventory in
+  `crates/mettle-syntax/src/language.rs`; compiler-owned helpers (`env`, `senv`,
+  `secret`, and `echo`) share intrinsic resolution and documentation in
+  `crates/mettle-compiler/src/documentation.rs`. Primitive-kind references use
+  `ValueKind`, not a second type-name list. Extend the owning inventory and its
+  coverage tests when adding a keyword, primitive kind, or helper. Keyword hovers
+  must use source tokens, never match words inside comments or string literals.
 - Write descriptions that explain behavior rather than merely restating a name
   (for example, "Send a payload with HTTP POST" is insufficient on its own).
   Cover meaningful accepted inputs/representations, returned values, errors and

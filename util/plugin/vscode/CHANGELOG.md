@@ -2,6 +2,8 @@
 
 ## 1.0.0-alpha.1
 
+- Document every reserved word, core helpers, and contextual primitive kinds on
+  hover and in offline references; add argument hints for checks and policies.
 - Keep operation hovers compact, with practical HTTP/filesystem/codec descriptions
   and examples; retain exhaustive options in signature help and full references.
 - Add schema-backed hover, named-argument signature help, and read-only offline

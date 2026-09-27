@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::time::Duration;
+pub mod documentation;
 
 use mettle_capability::{CapabilityDescriptor, FieldSchema, SchemaType};
 pub use mettle_syntax::BinaryOperator;

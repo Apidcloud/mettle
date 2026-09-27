@@ -164,7 +164,9 @@ impl<'a> Compiler<'a> {
                 }
                 continue;
             }
-            if name.value == "echo" {
+            if super::documentation::intrinsic(&name.value)
+                == Some(super::documentation::Intrinsic::Echo)
+            {
                 self.errors.push(CompileError::new(
                     "`echo` is reserved for diagnostic statements",
                     name.span,
@@ -611,7 +613,9 @@ impl<'a> Compiler<'a> {
                             options,
                         },
                     span,
-                }) if callee.value == "echo" => {
+                }) if super::documentation::intrinsic(&callee.value)
+                    == Some(super::documentation::Intrinsic::Echo) =>
+                {
                     if arguments.len() != 1 || !named_arguments.is_empty() || !options.is_empty() {
                         self.errors.push(CompileError::new(
                             "`echo` expects exactly one argument and no option block",
@@ -1328,14 +1332,21 @@ impl<'a> Compiler<'a> {
         locals: &HashMap<String, usize>,
         context: Option<usize>,
     ) -> Option<PlanExpression> {
-        if callee.value == "echo" {
+        let intrinsic_kind = super::documentation::intrinsic(&callee.value);
+        if intrinsic_kind == Some(super::documentation::Intrinsic::Echo) {
             self.errors.push(CompileError::new(
                 "`echo` can only be used as a standalone statement in a flow or test",
                 span,
             ));
             return None;
         }
-        if matches!(callee.value.as_str(), "env" | "senv") {
+        if matches!(
+            intrinsic_kind,
+            Some(
+                super::documentation::Intrinsic::Environment
+                    | super::documentation::Intrinsic::SecretEnvironment
+            )
+        ) {
             if !options.is_empty() || !named_arguments.is_empty() || arguments.len() != 1 {
                 self.errors.push(CompileError::new(
                     format!(
@@ -1358,18 +1369,20 @@ impl<'a> Compiler<'a> {
                 value_type: ValueType::String,
                 span,
             };
-            return Some(if callee.value == "senv" {
-                PlanExpression {
-                    kind: PlanExpressionKind::Sensitive(Box::new(environment)),
-                    value_type: ValueType::String,
-                    span,
-                }
-            } else {
-                environment
-            });
+            return Some(
+                if intrinsic_kind == Some(super::documentation::Intrinsic::SecretEnvironment) {
+                    PlanExpression {
+                        kind: PlanExpressionKind::Sensitive(Box::new(environment)),
+                        value_type: ValueType::String,
+                        span,
+                    }
+                } else {
+                    environment
+                },
+            );
         }
 
-        if callee.value == "secret" {
+        if intrinsic_kind == Some(super::documentation::Intrinsic::Secret) {
             if !options.is_empty() || !named_arguments.is_empty() || arguments.len() != 1 {
                 self.errors.push(CompileError::new(
                     "`secret` expects exactly one argument and no option block",

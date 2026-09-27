@@ -26,3 +26,13 @@ test("signature help retains the active named parameter and its description", ()
   assert.equal(help.signatures[0].parameters[1].documentation.isTrusted, false);
   assert.equal(documentation.signatureHelp(vscode, null), undefined);
 });
+
+test("language keyword references use the same safe hover adapter", () => {
+  for (const name of ["assert", "use", "parallel", "env"]) {
+    const uri = `mettle-doc:/1.0.0-alpha.1/language/${name}.md`;
+    assert.equal(documentation.isDocumentationUri(uri), true);
+    const hover = documentation.hover(vscode, { contents: { value: name }, mettleReference: uri });
+    assert.deepEqual(hover.contents.isTrusted, { enabledCommands: ["mettle.openDocumentation"] });
+    assert.match(hover.contents.value, /Open full reference/);
+  }
+});

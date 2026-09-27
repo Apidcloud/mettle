@@ -3,6 +3,7 @@
 use std::fmt;
 
 pub mod documentation;
+pub mod language;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Span {
@@ -731,35 +732,8 @@ fn lex_identifier(source: &str, cursor: &mut usize) -> Token {
         *cursor += 1;
     }
     let text = &source[start..*cursor];
-    let kind = match text {
-        "if" => TokenKind::If,
-        "for" => TokenKind::For,
-        "in" => TokenKind::In,
-        "else" => TokenKind::Else,
-        "and" => TokenKind::And,
-        "or" => TokenKind::Or,
-        "not" => TokenKind::Not,
-        "is" => TokenKind::Is,
-        "as" => TokenKind::As,
-        "flow" => TokenKind::Mettle,
-        "test" => TokenKind::Test,
-        "context" => TokenKind::Context,
-        "namespace" => TokenKind::Namespace,
-        "defaults" => TokenKind::Defaults,
-        "use" => TokenKind::Use,
-        "return" => TokenKind::Return,
-        "assert" => TokenKind::Assert,
-        "fail" => TokenKind::Fail,
-        "within" => TokenKind::Within,
-        "retry" => TokenKind::Retry,
-        "parallel" => TokenKind::Parallel,
-        "rate" => TokenKind::Rate,
-        "concurrency" => TokenKind::Concurrency,
-        "true" => TokenKind::True,
-        "false" => TokenKind::False,
-        "null" => TokenKind::Null,
-        _ => TokenKind::Identifier(text.to_owned()),
-    };
+    let kind =
+        language::keyword_token(text).unwrap_or_else(|| TokenKind::Identifier(text.to_owned()));
     Token {
         kind,
         span: Span::new(start, *cursor),

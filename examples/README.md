@@ -23,7 +23,7 @@ The standalone language files below require no network access.
 | Example | What it demonstrates | Try it |
 | --- | --- | --- |
 | [Basics](language/basics.mettle) | Reusable flows, implicit final value, and a test | `mettle run examples/language/basics.mettle` |
-| [Code documentation](language/documentation.mettle) | `///` descriptions, `@param`/`@returns`, editor hover, signature help, and offline built-in references | `mettle run examples/language/documentation.mettle` |
+| [Code documentation](language/documentation.mettle) | `///` descriptions, `@param`/`@returns`, keyword/helper and primitive-kind hovers, signature help, and offline references | `mettle run examples/language/documentation.mettle` |
 | [Conditionals](language/conditionals.mettle) | `if`/`else`, boolean logic, indexing, and terminal `fail()` | `mettle test examples/language/conditionals.mettle` |
 | [Contexts](language/contexts.mettle) | Reusable and anonymous file-level contexts | `mettle run examples/language/contexts.mettle` |
 | [Collections and numbers](language/collections-and-numbers.mettle) | Named parallel work, `for` mapping, retries, numeric literals | `mettle test examples/language/collections-and-numbers.mettle` |

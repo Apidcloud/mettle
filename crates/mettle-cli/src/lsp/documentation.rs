@@ -39,6 +39,10 @@ fn operation(name: &str) -> Option<(&'static CapabilityDescriptor, &'static Oper
     ))
 }
 
+fn core_item(name: &str) -> Option<&'static mettle_syntax::language::Item> {
+    mettle_compiler::documentation::item(name).or_else(|| mettle_syntax::language::item(name))
+}
+
 fn uri(name: &str) -> String {
     format!(
         "mettle-doc:/{}/{}.md",
@@ -57,7 +61,8 @@ pub(super) fn reference_query(params: &Value) -> Option<Value> {
             .strip_suffix(".md")?
             .replace('/', ".")
     };
-    let content = reference(CAPABILITIES, &name)?;
+    let content = reference(CAPABILITIES, &name)
+        .or_else(|| mettle_compiler::documentation::reference(&name))?;
     Some(json!({ "uri": uri(&name), "languageId": "markdown", "content": content }))
 }
 
@@ -194,11 +199,12 @@ impl Server {
 
     pub(super) fn builtin_documentation_target(&self, params: &Value) -> Option<Value> {
         let snapshot = self.documentation_snapshot(params)?;
-        let (_, _, reference) = hover(&snapshot)?;
+        let (_, hovered_span, reference) = hover(&snapshot)?;
         let reference = reference?;
         let content = reference_query(&json!({ "uri": reference }))?;
         let text = &snapshot.sources[snapshot.source].text;
-        let (name, span) = symbol(text, snapshot.byte)?;
+        let (name, span) =
+            symbol(text, snapshot.byte).unwrap_or_else(|| (String::new(), hovered_span));
         let nested = call_site(text, span.start)
             .filter(|call| !call.path.is_empty())
             .map(|call| format!("- `{}.{name}`", call.path.join(".")));
@@ -220,11 +226,20 @@ impl Server {
 
 fn hover(snapshot: &Snapshot) -> Option<(String, Span, Option<String>)> {
     let text = &snapshot.sources[snapshot.source].text;
+    if let Some((name, span)) = mettle_syntax::language::at(text, snapshot.byte) {
+        let content = core_item(name)
+            .map(|item| item.hover())
+            .or_else(|| mettle_syntax::language::reference(name))?;
+        return Some((content, span, Some(uri(&format!("language.{name}")))));
+    }
     let (name, range) = symbol(text, snapshot.byte)?;
     let definition = find_definition(&snapshot.program, snapshot.source, snapshot.byte);
     // Locals/context bindings shadow constants, just as in compilation. Operation
     // call targets are always capability-qualified, regardless of such bindings.
-    let is_call = text.get(range.end..)?.trim_start().starts_with('(');
+    let is_call = mettle_syntax::documentation::is_call_target(text, range);
+    if is_call && let Some(item) = mettle_compiler::documentation::item(&name) {
+        return Some((item.hover(), range, Some(uri(&format!("language.{name}")))));
+    }
     if definition.is_none() || is_call {
         if let Some((capability, operation)) = operation(&name) {
             return Some((
@@ -266,6 +281,16 @@ fn hover(snapshot: &Snapshot) -> Option<(String, Span, Option<String>)> {
                     Some(uri(&call.name)),
                 ));
             }
+        } else if let Some(item) = core_item(&call.name) {
+            let (_, description) = item
+                .parameters
+                .iter()
+                .find(|(parameter, _)| *parameter == name)?;
+            return Some((
+                format!("**{name}**\n\n{description}"),
+                range,
+                Some(uri(&format!("language.{}", item.name))),
+            ));
         } else if let Some(id) = resolve_documentation_flow(
             &snapshot.program,
             &call.name,
@@ -359,6 +384,19 @@ fn signature_help(snapshot: &Snapshot) -> Option<Value> {
             names,
             parameters,
         )
+    } else if let Some(item) = core_item(&call.name).filter(|item| !item.parameters.is_empty()) {
+        let names = item
+            .parameters
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect();
+        let parameters = item.parameters.iter().map(|(name, description)| json!({"label": name, "documentation": {"kind": "markdown", "value": description}})).collect();
+        (
+            item.form.to_owned(),
+            item.description.to_owned(),
+            names,
+            parameters,
+        )
     } else {
         let id = resolve_documentation_flow(
             &snapshot.program,
@@ -436,6 +474,132 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.directory).unwrap();
         }
+    }
+
+    #[test]
+    fn all_reserved_words_have_hover_and_virtual_reference_coverage() {
+        for item in mettle_syntax::language::KEYWORDS {
+            let mut fixture = Fixture::new(item.example);
+            let program = mettle_syntax::parse(item.example).unwrap();
+            mettle_compiler::compile_with_capabilities(&program, CAPABILITIES)
+                .unwrap_or_else(|errors| panic!("{}: {errors:?}", item.name));
+            let byte = item
+                .example
+                .char_indices()
+                .map(|(byte, _)| byte)
+                .find(|byte| {
+                    mettle_syntax::language::at(item.example, *byte)
+                        .is_some_and(|(name, _)| name == item.name)
+                })
+                .unwrap();
+            let params = json!({ "textDocument": {"uri": super::super::path_to_file_uri(&fixture.path)}, "position": span_range(item.example, Span::new(byte, byte))["start"] });
+            let hover = fixture
+                .server
+                .documentation_query(&params, "textDocument/hover")
+                .unwrap();
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains(item.description)
+            );
+            assert_eq!(
+                hover["mettleReference"],
+                uri(&format!("language.{}", item.name))
+            );
+            fixture.server.virtual_documentation = true;
+            let target = fixture
+                .server
+                .navigation(&params, "textDocument/definition")
+                .unwrap();
+            let reference = reference_query(&json!({"uri":target["uri"]})).unwrap();
+            assert!(
+                reference["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("# {}\n", item.name))
+            );
+        }
+    }
+
+    #[test]
+    fn core_helpers_signatures_kinds_and_non_code_positions_are_documented_correctly() {
+        for item in mettle_compiler::documentation::BUILTINS {
+            let fixture = Fixture::new(item.example);
+            let hover = fixture.query("textDocument/hover", &format!("{}(", item.name));
+            assert!(
+                hover["contents"]["value"]
+                    .as_str()
+                    .unwrap()
+                    .contains(item.description)
+            );
+        }
+        for text in [
+            "flow main { assert(true, ",
+            "flow main { fail(",
+            "flow main = retry(attempts: 3, delay: ",
+            "flow main = env(",
+        ] {
+            let fixture = Fixture::new(text);
+            let signature = fixture.query("textDocument/signatureHelp", "");
+            assert!(
+                !signature["signatures"][0]["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            if text.contains("assert") || text.contains("retry") {
+                assert_eq!(signature["signatures"][0]["activeParameter"], 1);
+            }
+        }
+        let fixture = Fixture::new("flow main = retry(attempts: 3, delay: 1ms) { 42 }");
+        let hover = fixture.query("textDocument/hover", "attempts:");
+        assert!(
+            hover["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("including the first run")
+        );
+        let fixture = Fixture::new("flow main = 42 is number");
+        assert!(
+            fixture.query("textDocument/hover", "number")["contents"]["value"]
+                .as_str()
+                .unwrap()
+                .contains("integer or a finite")
+        );
+        let fixture = Fixture::new("flow main = (secret)(\"demo-token\")");
+        assert_eq!(
+            fixture.query("textDocument/hover", "secret")["mettleReference"],
+            uri("language.secret")
+        );
+        let fixture = Fixture::new("flow main { echo = \"local\"\n echo }");
+        assert!(
+            fixture
+                .server
+                .documentation_query(&fixture.params("echo }"), "textDocument/hover")
+                .is_none()
+        );
+        for text in [
+            "// assert(true)\nflow main = 1",
+            "flow main = \"use context\"",
+            "flow main = \"echo(hello)\"",
+        ] {
+            let fixture = Fixture::new(text);
+            let needle = if text.contains("assert") {
+                "assert"
+            } else if text.contains("use") {
+                "use"
+            } else {
+                "echo"
+            };
+            assert!(
+                fixture
+                    .server
+                    .documentation_query(&fixture.params(needle), "textDocument/hover")
+                    .is_none()
+            );
+        }
+        assert!(reference_query(&json!({"name":"language.then"})).is_none());
     }
 
     #[test]
