@@ -1146,6 +1146,7 @@ pub fn value_json(value: &Value) -> serde_json::Value {
                 .collect(),
         ),
         Value::Duration(value) => serde_json::Value::String(format!("{}ns", value.as_nanos())),
+        Value::Source(_) => serde_json::json!({"type": "byteSource"}),
         Value::Array(values) => serde_json::Value::Array(values.iter().map(value_json).collect()),
         Value::Object(values) => serde_json::Value::Object(
             values

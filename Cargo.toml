@@ -3,6 +3,7 @@ members = [
     "crates/mettle-capability",
     "crates/mettle-cli",
     "crates/mettle-compiler",
+    "crates/mettle-fs",
     "crates/mettle-http",
     "crates/mettle-runtime",
     "crates/mettle-syntax",
@@ -33,6 +34,7 @@ http-body-util = "0.1.5"
 hyper = { version = "1.11.1", default-features = false }
 hyper-rustls = { version = "0.27.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }
+libc = "0.2.189"
 rustls = { version = "0.23.45", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }

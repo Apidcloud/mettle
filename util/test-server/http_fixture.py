@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import ssl
 import threading
@@ -129,14 +130,26 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
             return
+        if self.path == "/reject-upload":
+            self.close_connection = True
+            self._json(413, {"error": "upload rejected before consumption"})
+            return
+        if self.path == "/upload":
+            body = self._read_body()
+            self._json(201, {
+                "bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "contentType": self.headers.get("Content-Type", ""),
+                "chunked": self.headers.get("Transfer-Encoding", "").lower() == "chunked",
+            })
+            return
         if self.path == "/method":
             self._method_response()
             return
         if self.path != "/users":
             self._json(404, {"error": "not found"})
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
+        body = self._read_body()
         try:
             request = json.loads(body)
         except json.JSONDecodeError:
@@ -200,8 +213,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         if self.path != "/method":
             self._json(404, {"error": "not found"})
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8")
+        body = self._read_body().decode("utf-8")
         content_type = self.headers.get("Content-Type", "")
         parsed_json = None
         if body and (content_type.split(";", 1)[0].lower().endswith("json")):
@@ -215,6 +227,37 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 "contentType": content_type,
             },
         )
+
+    def _read_body(self) -> bytes:
+        limit = 10 * 1024 * 1024
+        if self.headers.get("Transfer-Encoding", "").lower() != "chunked":
+            length = int(self.headers.get("Content-Length", "0"))
+            if length < 0 or length > limit:
+                raise ValueError("fixture body limit exceeded")
+            body = self.rfile.read(length)
+            if len(body) != length:
+                raise ValueError("truncated fixture body")
+            return body
+        body = bytearray()
+        while True:
+            line = self.rfile.readline(8192)
+            size = int(line.split(b";", 1)[0].strip(), 16)
+            if size == 0:
+                for _ in range(100):
+                    trailer = self.rfile.readline(8192)
+                    if trailer == b"\r\n":
+                        return bytes(body)
+                    if not trailer or not trailer.endswith(b"\r\n"):
+                        raise ValueError("invalid chunk trailers")
+                raise ValueError("too many chunk trailers")
+            if size < 0 or len(body) + size > limit:
+                raise ValueError("fixture body limit exceeded")
+            chunk = self.rfile.read(size)
+            if len(chunk) != size:
+                raise ValueError("truncated chunk")
+            body.extend(chunk)
+            if self.rfile.read(2) != b"\r\n":
+                raise ValueError("invalid chunk framing")
 
     def _json(self, status: int, value: object) -> None:
         body = json.dumps(value, separators=(",", ":")).encode()

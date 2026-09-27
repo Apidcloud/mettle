@@ -12,6 +12,7 @@ Basic language support for `.mettle` source files.
 - snippets for named flows, anonymous flows, tests, namespaces, assertions, terminal `fail()`,
   reusable and anonymous file contexts, `senv()`, `echo()`, conditionals, assertion messages, loops, named parallel branches, structured and load execution
   policies, and HTTP requests using named `body`;
+- snippets for complete filesystem reads, incremental copies, and streamed HTTP uploads;
 - compiler-backed **Run Flow** CodeLens actions above every named and anonymous flow;
 - **Run Test** play buttons above each test declaration; each runs only that test;
 - parser and compiler diagnostics in the editor, including unsaved project files;
@@ -79,6 +80,13 @@ is passed to Run Flow, Run All, and Run Tests. The picker refreshes when the
 active file changes, the window gains focus, or env files are created, deleted,
 or renamed. If a selected profile disappears, the status bar warns rather than
 silently switching environments.
+
+Filesystem paths in standalone executions start at the active file's containing
+directory, which is the task's CLI invocation directory. If the file belongs to
+a Mettle project, the CLI uses the project root or its top-level `workingDir`
+setting instead. Helper flows use the same directory. This does not change the
+profile picker's environment discovery. File reads/writes and `body: fs.stream`
+uploads use the ordinary flow actions; no exchange UI is required.
 
 ## Package
 

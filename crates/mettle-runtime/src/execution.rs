@@ -3,10 +3,10 @@
 use super::{
     ActiveContext, ActiveIteration, Arc, AssertionFailure, Capability, Clock, Constant,
     ContextPlan, DeclarationKind, Duration, ExecutionEvent, ExecutionEventKind, ExecutionObserver,
-    ExecutionPlan, ExecutionScope, Future, HashMap, Instant, Instruction, MAX_CALL_DEPTH,
-    MettlePlan, NoopObserver, Object, OperationEvent, Pin, PlanExpression, PlanExpressionKind,
-    PlanField, Poll, RateSettings, RuntimeError, Span, StringPart, TokioClock, Value,
-    WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL, WorkloadEvent, WorkloadMetrics,
+    ExecutionPlan, ExecutionScope, Future, HashMap, Instant, Instruction, IoContext,
+    MAX_CALL_DEPTH, MettlePlan, NoopObserver, Object, OperationEvent, Pin, PlanExpression,
+    PlanExpressionKind, PlanField, Poll, RateSettings, RuntimeError, Span, StringPart, TokioClock,
+    Value, WORKLOAD_DRAIN_TIMEOUT, WORKLOAD_PROGRESS_INTERVAL, WorkloadEvent, WorkloadMetrics,
     WorkloadOperation, WorkloadPhase, WorkloadPolicy, cooperative_yield, evaluate_binary,
     format_duration, process_environment,
 };
@@ -17,6 +17,7 @@ pub struct Runtime {
     clock: Arc<dyn Clock>,
     observer: Arc<dyn ExecutionObserver>,
     environment: Arc<HashMap<String, String>>,
+    io: Option<IoContext>,
 }
 
 impl Runtime {
@@ -27,6 +28,7 @@ impl Runtime {
             clock: Arc::new(TokioClock),
             observer: Arc::new(NoopObserver),
             environment: Arc::new(process_environment()),
+            io: None,
         }
     }
 
@@ -37,6 +39,7 @@ impl Runtime {
             clock,
             observer: Arc::new(NoopObserver),
             environment: Arc::new(process_environment()),
+            io: None,
         }
     }
 
@@ -49,6 +52,15 @@ impl Runtime {
     #[must_use]
     pub fn with_environment(mut self, environment: Arc<HashMap<String, String>>) -> Self {
         self.environment = environment;
+        self
+    }
+
+    #[must_use]
+    /// Supply resources for one entry. A normal execution cleans them up itself;
+    /// callers aborting its future must retain a clone and await `IoContext::cleanup`.
+    /// Create a fresh context for each execution, including concurrent entries.
+    pub fn with_io_context(mut self, context: IoContext) -> Self {
+        self.io = Some(context);
         self
     }
 
@@ -93,12 +105,19 @@ impl Runtime {
         arguments: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         self.validate_capabilities(plan)?;
-        Executor {
+        let io = self.io.clone().unwrap_or_else(|| {
+            IoContext::new(
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+        });
+        let _guard = ExecutionIoGuard(io.clone());
+        let mut result = Executor {
             plan,
             capabilities: &self.capabilities,
             clock: self.clock.as_ref(),
             observer: self.observer.as_ref(),
             environment: &self.environment,
+            io: &io,
             inside_workload: false,
             workload_id: None,
             flow_stack: Vec::new(),
@@ -109,7 +128,32 @@ impl Runtime {
             collect_test_expressions: false,
         }
         .execute_flow(flow, arguments, ActiveContext::default())
-        .await
+        .await;
+        if result.as_ref().is_ok_and(Value::contains_source) {
+            result = Err(RuntimeError {
+                message: "a byte source cannot be returned as an execution result; consume it within the entry".to_owned(),
+                span: plan.flows[flow].span,
+                flow_stack: Vec::new(), scope_path: Vec::new().into_boxed_slice(),
+                assertions: Vec::new(), assertion_only: false, terminal: false,
+            });
+        }
+        if let Err(error) = io.cleanup().await {
+            if let Err(original) = &mut result {
+                original.message.push_str("; I/O cleanup: ");
+                original.message.push_str(&error.message);
+            } else {
+                result = Err(RuntimeError {
+                    message: error.message,
+                    span: plan.flows[flow].span,
+                    flow_stack: Vec::new(),
+                    scope_path: Vec::new().into_boxed_slice(),
+                    assertions: Vec::new(),
+                    assertion_only: false,
+                    terminal: false,
+                });
+            }
+        }
+        result
     }
 
     fn validate_capabilities(&self, plan: &ExecutionPlan) -> Result<(), RuntimeError> {
@@ -150,6 +194,14 @@ impl Default for Runtime {
     }
 }
 
+struct ExecutionIoGuard(IoContext);
+
+impl Drop for ExecutionIoGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 #[derive(Clone)]
 struct Executor<'a> {
     plan: &'a ExecutionPlan,
@@ -157,6 +209,7 @@ struct Executor<'a> {
     clock: &'a dyn Clock,
     observer: &'a dyn ExecutionObserver,
     environment: &'a HashMap<String, String>,
+    io: &'a IoContext,
     inside_workload: bool,
     workload_id: Option<u64>,
     flow_stack: Vec<String>,
@@ -957,7 +1010,13 @@ impl Executor<'_> {
                     let operation_name = capability.operation_name(*operation);
                     let started = self.clock.now();
                     let result = capability
-                        .invoke(*operation, values, effective, expression.span)
+                        .invoke_with_context(
+                            *operation,
+                            values,
+                            effective,
+                            expression.span,
+                            self.io,
+                        )
                         .await;
                     let duration = self
                         .clock
@@ -1001,7 +1060,7 @@ impl Executor<'_> {
                                         operation: operation_name.to_owned(),
                                         duration,
                                         span: expression.span,
-                                        result: Ok(value.clone()),
+                                        result: Ok(capability.observed_result(*operation, &value)),
                                         report,
                                     }),
                                     scope_path: self.scope_path.clone(),

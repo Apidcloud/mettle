@@ -15,17 +15,21 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use mettle_capability::{
-    Capability, CapabilityError, CapabilityFuture, Object, OperationReport, ReportOutcome,
-    ReportSection, Span, Value, merge_objects,
+    Capability, CapabilityError, CapabilityFuture, IoContext, Object, OperationReport,
+    ReportOutcome, ReportSection, Span, Value, merge_objects,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
+mod request_body;
 mod schema;
+#[cfg(test)]
+mod streaming_tests;
+use request_body::{RequestBody, UploadControl, UploadGuard};
 pub use schema::DESCRIPTOR;
 
-type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+type HttpClient = Client<HttpsConnector<HttpConnector>, RequestBody>;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BodyFormat {
@@ -65,7 +69,9 @@ impl HttpCapability {
             .https_or_http()
             .enable_http1()
             .build();
-        let secure_client = Client::builder(TokioExecutor::new()).build(secure_connector);
+        let secure_client = Client::builder(TokioExecutor::new())
+            .retry_canceled_requests(false)
+            .build(secure_connector);
 
         let insecure_tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
             .with_safe_default_protocol_versions()
@@ -78,7 +84,9 @@ impl HttpCapability {
             .https_or_http()
             .enable_http1()
             .build();
-        let insecure_client = Client::builder(TokioExecutor::new()).build(insecure_connector);
+        let insecure_client = Client::builder(TokioExecutor::new())
+            .retry_canceled_requests(false)
+            .build(insecure_connector);
 
         Self {
             secure_client,
@@ -93,6 +101,7 @@ impl HttpCapability {
         arguments: Vec<Value>,
         options: Object,
         span: Span,
+        context: &IoContext,
     ) -> Result<Value, CapabilityError> {
         let method = match operation {
             0 => Method::GET,
@@ -128,6 +137,12 @@ impl HttpCapability {
         }
 
         let timeout = option_duration(&options, "timeout", Duration::from_secs(30), span)?;
+        let started = Instant::now();
+        let deadline = tokio::time::Instant::from_std(
+            started
+                .checked_add(timeout)
+                .ok_or_else(|| CapabilityError::new("HTTP timeout is too large", span))?,
+        );
         let max_response_bytes =
             option_usize(&options, "maxResponseBytes", 10 * 1024 * 1024, span)?;
         let verify_certificates = options
@@ -175,7 +190,7 @@ impl HttpCapability {
                 None => match payload.revealed() {
                     Value::Object(_) | Value::Array(_) => BodyFormat::Json,
                     Value::String(_) => BodyFormat::Text,
-                    Value::Bytes(_) => BodyFormat::Bytes,
+                    Value::Bytes(_) | Value::Source(_) => BodyFormat::Bytes,
                     _ => {
                         return Err(CapabilityError::new(
                             "this body value requires an explicit `bodyFormat`",
@@ -186,6 +201,35 @@ impl HttpCapability {
             })
         } else {
             None
+        };
+        let upload = Arc::new(UploadControl::default());
+        let _upload_guard = UploadGuard(upload.clone());
+        let stream = match payload.map(Value::revealed) {
+            Some(Value::Source(source)) => {
+                if body_format != Some(BodyFormat::Bytes) {
+                    return Err(CapabilityError::new(
+                        "a byte source cannot be encoded as JSON or text",
+                        span,
+                    ));
+                }
+                if options
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .is_some_and(|headers| {
+                        headers.keys().any(|name| {
+                            name.eq_ignore_ascii_case("content-length")
+                                || name.eq_ignore_ascii_case("transfer-encoding")
+                        })
+                    })
+                {
+                    return Err(CapabilityError::new(
+                        "Content-Length/Transfer-Encoding cannot be supplied for a streamed request; framing is automatic",
+                        span,
+                    ));
+                }
+                Some(source.clone())
+            }
+            _ => None,
         };
         let body = match (body_format, payload) {
             (Some(BodyFormat::Json), Some(value)) => {
@@ -198,6 +242,7 @@ impl HttpCapability {
             }
             (Some(BodyFormat::Bytes), Some(value)) => match value.revealed() {
                 Value::Bytes(bytes) => Bytes::copy_from_slice(bytes),
+                Value::Source(_) => Bytes::new(),
                 other => return Err(type_error("body", "bytes", other, span)),
             },
             _ => Bytes::new(),
@@ -251,7 +296,17 @@ impl HttpCapability {
                 request = request.header(CONTENT_TYPE, "application/octet-stream");
             }
         }
-        let request = request.body(Full::new(body)).map_err(|error| {
+        let body = if let Some(source) = stream {
+            let reader = tokio::time::timeout_at(deadline, source.open(context))
+                .await
+                .map_err(|_| {
+                    CapabilityError::new("opening request source timed out", source.span)
+                })??;
+            RequestBody::source(reader, upload.clone())
+        } else {
+            RequestBody::Full(Full::new(body))
+        };
+        let request = request.body(body).map_err(|error| {
             CapabilityError::new(format!("could not build HTTP request: {error}"), span)
         })?;
 
@@ -260,14 +315,22 @@ impl HttpCapability {
         } else {
             &self.insecure_client
         };
-        let started = Instant::now();
         let exchange = async {
             let response = client.request(request).await.map_err(|error| {
-                CapabilityError::new(
-                    format!("HTTP request failed: {}", error_chain(&error)),
-                    span,
-                )
+                upload
+                    .error
+                    .lock()
+                    .expect("upload error lock")
+                    .clone()
+                    .unwrap_or_else(|| {
+                        CapabilityError::new(
+                            format!("HTTP request failed: {}", error_chain(&error)),
+                            span,
+                        )
+                    })
             })?;
+
+            upload.stop();
 
             let status = response.status().as_u16();
             if method != Method::HEAD
@@ -338,15 +401,17 @@ impl HttpCapability {
             ])))
         };
 
-        tokio::time::timeout(timeout, exchange).await.map_err(|_| {
-            CapabilityError::new(
-                format!(
-                    "HTTP request exceeded its {} ms timeout",
-                    timeout.as_millis()
-                ),
-                span,
-            )
-        })?
+        tokio::time::timeout_at(deadline, exchange)
+            .await
+            .map_err(|_| {
+                CapabilityError::new(
+                    format!(
+                        "HTTP request exceeded its {} ms timeout",
+                        timeout.as_millis()
+                    ),
+                    span,
+                )
+            })?
     }
 }
 
@@ -436,7 +501,30 @@ impl Capability for HttpCapability {
         options: Object,
         span: Span,
     ) -> CapabilityFuture<'_> {
-        Box::pin(self.execute(operation, arguments, options, span))
+        Box::pin(async move {
+            let context = IoContext::new(std::env::current_dir().map_err(|error| {
+                CapabilityError::new(
+                    format!("could not determine execution directory: {error}"),
+                    span,
+                )
+            })?);
+            let result = self
+                .execute(operation, arguments, options, span, &context)
+                .await;
+            context.cleanup().await?;
+            result
+        })
+    }
+
+    fn invoke_with_context<'a>(
+        &'a self,
+        operation: usize,
+        arguments: Vec<Value>,
+        options: Object,
+        span: Span,
+        context: &'a IoContext,
+    ) -> CapabilityFuture<'a> {
+        Box::pin(self.execute(operation, arguments, options, span, context))
     }
 }
 
@@ -569,7 +657,7 @@ fn to_json(value: &Value, span: Span) -> Result<serde_json::Value, CapabilityErr
             .map(serde_json::Value::Number)
             .ok_or_else(|| CapabilityError::new("JSON number must be finite", span)),
         Value::String(value) => Ok(serde_json::Value::String(value.clone())),
-        Value::Bytes(_) => Err(CapabilityError::new(
+        Value::Bytes(_) | Value::Source(_) => Err(CapabilityError::new(
             "byte values cannot be encoded as JSON",
             span,
         )),

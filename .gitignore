@@ -1,6 +1,7 @@
 /target/
 .nvimlog
 .local/
+examples/language/filesystem/data/copy.txt
 .env
 .env.*
 !.env.example

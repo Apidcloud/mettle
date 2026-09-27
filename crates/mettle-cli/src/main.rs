@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use mettle_capability::IoContext;
 use mettle_capability::{CapabilityDescriptor, Object, Value};
 use mettle_compiler::{
     CompileError, DeclarationKind, ExecutionPlan, MettlePlan, compile_with_capabilities,
 };
+use mettle_fs::{DESCRIPTOR as FS_DESCRIPTOR, FsCapability};
 use mettle_http::{DESCRIPTOR as HTTP_DESCRIPTOR, HttpCapability};
 use mettle_runtime::{Runtime, RuntimeError};
 use mettle_syntax::{Expression, ExpressionKind, Span, SyntaxError, parse, parse_value};
@@ -58,7 +60,7 @@ use report::{
     CapturedEvents, CliObserver, ExecutionReport, display_duration, failure_summary, raw_value,
 };
 
-const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR];
+const CAPABILITIES: &[CapabilityDescriptor] = &[HTTP_DESCRIPTOR, FS_DESCRIPTOR];
 
 #[derive(Debug)]
 struct RunOptions {
@@ -129,6 +131,7 @@ struct ActiveEntry {
     source_index: usize,
     started: Instant,
     observer: Arc<CliObserver>,
+    io: IoContext,
 }
 
 enum BatchEvent {
@@ -746,19 +749,26 @@ fn spawn_entry(
     environment: Arc<HashMap<String, String>>,
     sources: Arc<[String]>,
     progress: bool,
+    directory: PathBuf,
 ) -> (tokio::task::Id, ActiveEntry) {
     let observer = Arc::new(CliObserver::new(progress).with_sources(sources));
     let started = Instant::now();
+    let io = IoContext::new(directory);
     let active = ActiveEntry {
         flow_id: spec.flow_id,
         source_index: spec.source_index,
         started,
         observer: observer.clone(),
+        io: io.clone(),
     };
     let handle = join_set.spawn(async move {
-        let mettle_runtime = Runtime::new(vec![Arc::new(HttpCapability::new())])
-            .with_observer(observer.clone())
-            .with_environment(environment);
+        let mettle_runtime = Runtime::new(vec![
+            Arc::new(HttpCapability::new()),
+            Arc::new(FsCapability),
+        ])
+        .with_observer(observer.clone())
+        .with_environment(environment)
+        .with_io_context(io);
         let result = mettle_runtime
             .execute_selected(&plan, spec.flow_id, spec.arguments)
             .await;
@@ -786,6 +796,7 @@ async fn execute_entries(
     jobs: usize,
 ) -> Result<(usize, usize), CliError> {
     let mut pending = std::collections::VecDeque::from(entries);
+    let directory = execution_directory(project)?;
     let sources: Arc<[String]> = Arc::from(
         project
             .sources
@@ -819,6 +830,7 @@ async fn execute_entries(
             environment.clone(),
             sources.clone(),
             progress,
+            directory.clone(),
         );
         active.insert(task_id, entry);
     }
@@ -839,6 +851,9 @@ async fn execute_entries(
         .await;
         match event {
             BatchEvent::Interrupted => {
+                for entry in active.values() {
+                    entry.io.cancel();
+                }
                 join_set.abort_all();
                 while let Some(result) = join_set.join_next_with_id().await {
                     if let Ok((task_id, outcome)) = result {
@@ -854,6 +869,9 @@ async fn execute_entries(
                 let mut cancelled = active.into_values().collect::<Vec<_>>();
                 cancelled.sort_by_key(|entry| entry.source_index);
                 for entry in &cancelled {
+                    if let Err(error) = entry.io.cleanup().await {
+                        eprintln!("error: {error}");
+                    }
                     print_cancellation(&plan, options, batch_kind, total, entry);
                 }
                 if let Some(kind) = batch_kind {
@@ -896,14 +914,20 @@ async fn execute_entries(
                             environment.clone(),
                             sources.clone(),
                             progress,
+                            directory.clone(),
                         );
                         active.insert(task_id, entry);
                     }
                 }
                 Some(Err(error)) => {
-                    active.remove(&error.id());
+                    for entry in active.values() {
+                        entry.io.cancel();
+                    }
                     join_set.abort_all();
                     while join_set.join_next().await.is_some() {}
+                    for entry in active.values() {
+                        let _ = entry.io.cleanup().await;
+                    }
                     eprintln!("error: an execution job failed internally: {error}");
                     return Err(CliError::Failure);
                 }
@@ -1574,6 +1598,35 @@ struct LoadedProject {
     sources: Vec<SourceDocument>,
     entry_source: usize,
     config: project_config::ProjectConfig,
+}
+
+fn execution_directory(project: &LoadedProject) -> Result<PathBuf, CliError> {
+    let entry = &project.sources[project.entry_source].path;
+    let root = if entry == Path::new("<stdin>") {
+        None
+    } else {
+        entry.parent().and_then(find_project_root)
+    };
+    let directory = if let Some(root) = root {
+        project
+            .config
+            .working_dir
+            .as_ref()
+            .map_or(root.clone(), |path| root.join(path))
+    } else {
+        std::env::current_dir().map_err(|error| {
+            eprintln!("error: could not determine invocation directory: {error}");
+            CliError::Failure
+        })?
+    };
+    if !directory.is_dir() {
+        eprintln!(
+            "error: workingDir is not an existing directory: {}",
+            directory.display()
+        );
+        return Err(CliError::Failure);
+    }
+    Ok(directory)
 }
 
 fn load_project(path: &Path) -> Result<LoadedProject, CliError> {

@@ -8,7 +8,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 use std::{env, fmt};
 
-use mettle_capability::{Capability, Object, OperationReport, Span, Value};
+use mettle_capability::{Capability, IoContext, Object, OperationReport, Span, Value};
 use mettle_compiler::{
     BinaryOperator, Constant, ContextPlan, DeclarationKind, ExecutionPlan, Instruction, MettlePlan,
     PlanExpression, PlanExpressionKind, PlanField, StringPart,

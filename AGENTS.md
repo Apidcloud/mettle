@@ -35,6 +35,7 @@ requiring every historical design note to be maintained.
 | `crates/mettle-compiler` | Resolution, semantic validation, and execution-plan lowering |
 | `crates/mettle-runtime` | Validated-plan interpretation, scheduling, cancellation, and metrics |
 | `crates/mettle-http` | HTTP schemas, pooling, request/response handling, and TLS |
+| `crates/mettle-fs` | Complete file I/O, file sources, and transactional publication |
 | `crates/mettle-cli` | Commands, project discovery, environment profiles, reporting, and LSP |
 | `util/plugin/` | VS Code, Neovim, and Tree-sitter integrations |
 | `tests/fixtures`, `tests/projects`, `util/test-server` | Local acceptance programs, project fixtures, and HTTP/HTTPS server |

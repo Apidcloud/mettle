@@ -1,0 +1,51 @@
+use context {
+    defaults http {
+        baseUrl: env("METTLE_BASE_URL")
+        headers: { Authorization: "Bearer local-test-token" }
+    }
+}
+
+flow complete = fs.readText("payload.txt")
+
+flow copy {
+    result = fs.write("copy.bin", fs.stream("payload.bin"))
+    assert(fs.read("copy.bin") == fs.read("payload.bin"))
+    result
+}
+
+flow upload = http.post("/upload", body: fs.stream("payload.bin")).json
+
+flow bufferedUpload = http.post("/upload", body: fs.read("payload.bin")).json
+
+flow rejectedUpload {
+    response = http.post("/reject-upload", body: fs.stream("payload.bin"))
+    assert(response.status == 413)
+    response.status
+}
+
+flow reused {
+    source = fs.stream("payload.bin")
+    alias = source
+    fs.write("first.bin", source)
+    fs.write("second.bin", alias)
+}
+
+flow escaped = { source: fs.stream("payload.bin") }
+
+flow boundedRead = fs.read("payload.bin", maxBytes: 2)
+
+flow invalidText = fs.readText("invalid.bin")
+
+flow boundedWrite = fs.write("bounded.bin", fs.stream("payload.bin"), maxBytes: 2)
+
+flow newSource(path) = fs.stream(path)
+
+flow helperCopy = fs.write("helper.bin", newSource("payload.bin"))
+
+flow concurrentReaders {
+    source = fs.stream("payload.bin")
+    parallel {
+        fs.write("a.bin", source)
+        fs.write("b.bin", source)
+    }
+}

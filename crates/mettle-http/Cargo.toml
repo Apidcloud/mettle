@@ -16,5 +16,8 @@ rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
 [lints]
 workspace = true

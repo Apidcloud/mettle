@@ -502,6 +502,82 @@ mettle run examples/language/project/main.mettle
 
 ## Protocol capabilities
 
+The implemented capabilities include HTTP and filesystem I/O. Filesystem byte
+sources compose with HTTP request bodies through the shared capability interface.
+
+### Read, copy, and send files
+
+```mettle
+message = fs.readText("./message.txt")
+payload = fs.read("./small.bin")
+copied = fs.write("./copy.bin", fs.stream("./large.bin"))
+response = http.post("http://127.0.0.1:8080/upload", body: fs.stream("./large.bin"))
+```
+
+| Operation | Result | Default `maxBytes` |
+| --- | --- | --- |
+| `fs.read(path)` | Complete, reusable bytes | 10 MiB |
+| `fs.readText(path)` | Complete, reusable UTF-8 string; invalid UTF-8 fails | 10 MiB |
+| `fs.stream(path)` | Lazy, single-use byte source | 1 GiB |
+| `fs.write(path, content)` | `{ bytesWritten: ... }` after writing string, bytes, or source | 1 GiB |
+
+Each accepts a positive integer `maxBytes` and positive duration `timeout`
+(default 30 seconds). Stream lifetime starts when consumption begins and includes
+time between reads. Complete reads fail when their bound is exceeded. Streams
+are pulled in chunks of at most 64 KiB without collecting the entire file.
+Each execution entry permits up to 64 open source readers and 64 filesystem
+worker operations; waiting for capacity is included in operation deadlines.
+
+Standalone paths start at the directory where you invoke `mettle`. When a
+project is discovered, paths start at its root, including paths in helper flows.
+Set a different directory using a top-level manifest field:
+
+```toml
+name = "upload-demo"
+workingDir = "./data"
+```
+
+Relative `workingDir` values start at the project root; the directory must exist.
+This does not change environment-profile discovery. VS Code launches standalone
+files from their containing directory; project execution follows the same root
+and configuration rules as the CLI.
+
+`fs.write` refuses existing destinations unless `overwrite: true` is supplied.
+It writes a temporary sibling and publishes only the complete output. Failure
+or cancellation cleans incomplete output before the execution finishes, retaining
+the previous destination. Publication is the commit point: cancellation after
+publication does not undo a completed write. Parent directories must exist.
+Writes are not a durability guarantee. File reads follow symlinks to regular
+files; writes reject final destination symlinks. Directories and special-file
+sources are rejected. These rules do not confine paths to the working directory.
+
+Complete values can be reused. Aliases of a stream share its consumption state:
+consuming the same source twice, including in parallel, fails. Create another
+`fs.stream(path)` for another read. An unopened source can pass through helper
+flows within its execution; it cannot be returned as the final execution result.
+Fresh reads can observe changed files. Limits are checked during reads as well
+as against initial file metadata.
+
+HTTP `body: fs.stream(path)` sends representation bytes through ordinary calls,
+using automatic HTTP/1.1 framing. Do not supply `Content-Length` or
+`Transfer-Encoding` for a streamed body. Bytes/sources infer
+`application/octet-stream`; an explicit `Content-Type` can describe an already
+encoded file. Sources cannot be serialized as JSON or text via `bodyFormat`.
+If an endpoint replies early, production stops and the normal call returns its
+actual bounded response. Source failures retain their original diagnostics.
+Streams are not automatically replayed; explicit retry must construct a new
+source inside each attempt. Request retries may duplicate external side effects.
+
+File operation reports retain counts and source descriptions, rather than
+capturing file contents. Returning or explicitly echoing a complete value still
+outputs it with the normal sensitivity/redaction rules.
+
+Try the [filesystem project](examples/language/filesystem/main.mettle) and
+[local upload example](examples/http/file-upload.mettle). Progressive response
+consumption, custom codecs, and decoded `.body` changes remain future phases.
+
+### Capability interfaces
+
 The core parser understands calls, values, flows, contexts, and execution policies. It does not need a special grammar rule for each protocol verb. The compiler resolves a qualified call such as `http.get()`, `sip.options()`, `grpc.call()`, or `kafka.publish()` through a registered capability.
 
 A capability contributes:
@@ -557,7 +633,7 @@ Mettle validates options during `mettle check`, before it opens a connection.
 | `headers` | Object of strings | Request headers |
 | `maxResponseBytes` | Positive integer | Response body limit; default: 10 MiB |
 | `tls.verifyCertificates` | Boolean | Certificate and hostname validation; default: `true` |
-| `body` | Object, array, string, bytes, or explicitly formatted scalar | Request payload for `post`, `put`, `patch`, or `delete` |
+| `body` | Object, array, string, bytes, byte source, or explicitly formatted scalar | Request payload for `post`, `put`, `patch`, or `delete` |
 | `bodyFormat` | `"json"`, `"text"`, or `"bytes"` | Overrides body-format inference when needed |
 | `json` | JSON value | Legacy payload option; prefer `body` in new files |
 
@@ -732,6 +808,7 @@ crates/mettle-capability          Capability schemas, values, and runtime interf
 crates/mettle-compiler            Resolution, validation, and execution-plan lowering
 crates/mettle-runtime             Async execution-plan interpreter and context scopes
 crates/mettle-http                HTTP schema, pooled client, JSON, timeouts, and TLS
+crates/mettle-fs                  Complete file I/O, owned sources, and safe publication
 crates/mettle-cli                 Native command-line interface and diagnostics
 examples/                         Curated language and HTTP examples; start with examples/README.md
 tests/fixtures/                   Deterministic HTTP programs and local TLS material
@@ -757,7 +834,7 @@ focused source modules.
 ## Current limits
 
 - no redirects or proxy discovery
-- request bodies support JSON, UTF-8 text, and runtime bytes values; multipart forms and streaming bodies are not implemented
+- request bodies support JSON, UTF-8 text, bytes, and filesystem byte sources; multipart forms and manual streaming exchanges are not implemented
 - no workload ramping or distributed workers yet; operation metrics are local and source-site aggregated, not distributed traces
 - the SIP capability and external capability distribution model are still planned work
 - no custom CA bundles, client certificates, or mutual TLS

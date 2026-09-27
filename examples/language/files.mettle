@@ -1,0 +1,14 @@
+// From the repository root:
+// mettle run examples/language/files.mettle inspectFile \
+//   --arg path=examples/language/filesystem/data/payload.txt
+// Standalone relative paths start at the CLI invocation directory.
+// In VS Code, paths start at the file's directory; an absolute path also works.
+
+flow inspectFile(path) {
+    bytes = fs.read(path, maxBytes: 1_048_576)
+    again = fs.read(path, maxBytes: 1_048_576)
+    assert(bytes == again, "Complete byte values can be reused")
+    text = fs.readText(path, maxBytes: 1_048_576)
+    echo("Complete reads return reusable values")
+    return { text: text, reusableBytes: bytes == again }
+}

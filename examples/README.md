@@ -30,6 +30,8 @@ The standalone language files below require no network access.
 | [Top-level jobs](language/jobs.mettle) | Bounded concurrent flow and test batches | `mettle test examples/language/jobs.mettle --jobs 3` |
 | [Secrets](language/secrets.mettle) | `senv()` and redaction | `mettle run examples/language/secrets.mettle` |
 | [Standalone profiles](language/profiles/main.mettle) | Automatic `.env` and `--profile` overlays | `mettle run examples/language/profiles/main.mettle --profile qa` |
+| [Complete file reads](language/files.mettle) | Reusable bytes and explicit UTF-8 text reads | `mettle run examples/language/files.mettle inspectFile --arg path=examples/language/filesystem/data/payload.txt` |
+| [Filesystem project](language/filesystem/main.mettle) | Incremental copy, helper sources, and project `workingDir` | `mettle run examples/language/filesystem/main.mettle` |
 
 Set `API_TOKEN` to any disposable demo value before running the secrets example.
 
@@ -52,6 +54,35 @@ mettle test examples/language/project/checks.mettle --jobs 1
 
 The profile and project `.env` files contain only public demonstration values;
 they are intentionally allowlisted in `.gitignore`.
+
+The filesystem project writes `data/copy.txt`, an ignored demonstration output.
+Its explicit `overwrite: true` permits repeated runs. Complete reads use bounded
+memory; `fs.stream` supplies one incremental read. Standalone paths use the CLI
+invocation directory; project paths use the root or configured `workingDir`.
+
+## HTTP — local file uploads
+
+[File upload](http/file-upload.mettle) demonstrates both buffered and streamed
+request bodies, plus a server that rejects an upload before reading its body.
+Start the included fixture on loopback:
+
+```bash
+python3 util/test-server/http_fixture.py --port 8080
+```
+
+In another terminal, from the repository root:
+
+```bash
+mettle run examples/http/file-upload.mettle upload \
+  --arg path=examples/language/filesystem/data/payload.txt
+mettle run examples/http/file-upload.mettle rejectedUpload \
+  --arg path=examples/language/filesystem/data/payload.txt --raw > result.json
+```
+
+No exchange scope is needed: `http.post` drives the source and returns its usual
+response. The fixture reports a byte count and SHA-256 digest rather than echoing
+file contents. For VS Code's Run Flow action, provide an absolute file path or a
+path relative to the active standalone file's directory.
 
 ## HTTP — internet connection required
 

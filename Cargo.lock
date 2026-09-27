@@ -229,6 +229,7 @@ name = "mettle-capability"
 version = "1.0.0-alpha.1"
 dependencies = [
  "mettle-syntax",
+ "tokio",
 ]
 
 [[package]]
@@ -237,6 +238,7 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "mettle-capability",
  "mettle-compiler",
+ "mettle-fs",
  "mettle-http",
  "mettle-runtime",
  "mettle-syntax",
@@ -252,6 +254,15 @@ version = "1.0.0-alpha.1"
 dependencies = [
  "mettle-capability",
  "mettle-syntax",
+]
+
+[[package]]
+name = "mettle-fs"
+version = "1.0.0-alpha.1"
+dependencies = [
+ "libc",
+ "mettle-capability",
+ "tokio",
 ]
 
 [[package]]

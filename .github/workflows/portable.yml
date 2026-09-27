@@ -32,6 +32,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Exercise HTTP and load runtime
         run: python scripts/acceptance-portable.py
+      - name: Exercise filesystem and streamed uploads
+        run: python scripts/acceptance-filesystem.py
 
   repository-checks:
     name: Repository checks

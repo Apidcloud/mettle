@@ -1,0 +1,42 @@
+// Start the local fixture in another terminal, from the repository root:
+// python3 util/test-server/http_fixture.py --port 8080
+// Then run:
+// mettle run examples/http/file-upload.mettle upload \
+//   --arg path=examples/language/filesystem/data/payload.txt
+// mettle run examples/http/file-upload.mettle rejectedUpload \
+//   --arg path=examples/language/filesystem/data/payload.txt
+// Save the selected flow result: append --raw > result.json
+// These use only local fixture credentials, not a public service.
+
+use context {
+    defaults http {
+        baseUrl: "http://127.0.0.1:8080"
+        headers: { Authorization: "Bearer local-test-token" }
+        timeout: 5s
+    }
+}
+
+flow upload(path) {
+    response = http.post("/upload", body: fs.stream(path))
+    assert(response.status == 201)
+    assert(response.json.chunked == true)
+    response.json
+}
+
+flow bufferedUpload(path) {
+    // Small files can instead become a reusable byte value before sending.
+    payload = fs.read(path)
+    response = http.post("/upload", body: payload)
+    assert(response.status == 201)
+    again = http.post("/upload", body: payload)
+    assert(again.json.sha256 == response.json.sha256)
+    response.json
+}
+
+flow rejectedUpload(path) {
+    // Production stops when the server sends an early final response.
+    // Ordinary calls still return a complete, bounded response.
+    response = http.post("/reject-upload", body: fs.stream(path))
+    assert(response.status == 413)
+    response.json
+}

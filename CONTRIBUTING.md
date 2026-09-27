@@ -41,7 +41,7 @@ The runtime uses Rustls and does not require a system OpenSSL installation.
 
 ## Code and architecture conventions
 
-The six Rust crates have distinct responsibilities:
+The Rust crates have distinct responsibilities:
 
 | Crate | Responsibility |
 | --- | --- |
@@ -50,6 +50,7 @@ The six Rust crates have distinct responsibilities:
 | `mettle-compiler` | Resolution, validation, and execution-plan lowering |
 | `mettle-runtime` | Interpretation, scopes, scheduling, cancellation, metrics |
 | `mettle-http` | HTTP schema, pooled client, response handling, TLS |
+| `mettle-fs` | Bounded file reads/writes and incremental file sources |
 | `mettle-cli` | Commands, discovery, profiles, reporting, LSP |
 
 - Keep protocol-specific behavior in capability implementations. The language
@@ -92,6 +93,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 python3 scripts/check-licenses.py
 python3 scripts/acceptance-portable.py
+python3 scripts/acceptance-filesystem.py
 ```
 
 GitHub Actions runs workspace tests, Clippy, and portable HTTP/load acceptance on

@@ -196,6 +196,7 @@ pub enum ValueType {
     Null,
     Boolean,
     Bytes,
+    Source,
     Integer,
     Float,
     String,
@@ -211,6 +212,7 @@ impl ValueType {
             Self::Null => "null",
             Self::Boolean => "boolean",
             Self::Bytes => "bytes",
+            Self::Source => "byte source",
             Self::Integer => "integer",
             Self::Float => "number",
             Self::String => "string",
@@ -225,8 +227,9 @@ impl ValueType {
 const fn schema_value_type(schema: SchemaType) -> ValueType {
     match schema {
         SchemaType::Boolean => ValueType::Boolean,
-        SchemaType::Body | SchemaType::Json => ValueType::Inferred,
+        SchemaType::Body | SchemaType::Json | SchemaType::Writable => ValueType::Inferred,
         SchemaType::Bytes => ValueType::Bytes,
+        SchemaType::Source => ValueType::Source,
         SchemaType::Duration => ValueType::Duration,
         SchemaType::Integer => ValueType::Integer,
         SchemaType::Object(_) | SchemaType::StringMap => ValueType::Object,

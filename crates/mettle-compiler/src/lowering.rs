@@ -1669,8 +1669,16 @@ impl<'a> Compiler<'a> {
         }
         let valid = match expected {
             SchemaType::Boolean => value.value_type == ValueType::Boolean,
-            SchemaType::Body | SchemaType::Json => value.value_type != ValueType::Duration,
+            SchemaType::Body => value.value_type != ValueType::Duration,
+            SchemaType::Json => {
+                !matches!(value.value_type, ValueType::Duration | ValueType::Source)
+            }
             SchemaType::Bytes => value.value_type == ValueType::Bytes,
+            SchemaType::Source => value.value_type == ValueType::Source,
+            SchemaType::Writable => matches!(
+                value.value_type,
+                ValueType::String | ValueType::Bytes | ValueType::Source
+            ),
             SchemaType::Duration => value.value_type == ValueType::Duration,
             SchemaType::Integer => value.value_type == ValueType::Integer,
             SchemaType::String => value.value_type == ValueType::String,

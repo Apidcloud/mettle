@@ -6,7 +6,8 @@ Mettle keeps third-party code concentrated around networking, TLS, byte buffers,
 
 | Package | Use | Licence | Selection notes |
 | --- | --- | --- | --- |
-| Tokio | Async runtime, sockets, timers, Ctrl+C handling | MIT | Cross-platform runtime; only `net`, runtime, signal, and time features are enabled |
+| Tokio | Async runtime, sockets, timers, Ctrl+C, and owned filesystem workers | MIT | Cross-platform runtime; `net`, runtime, signal, synchronization, and time features are enabled |
+| libc (Unix only) | Platform flag for nonblocking source opens | MIT OR Apache-2.0 | Uses `O_NONBLOCK` through safe standard-library `OpenOptionsExt` to avoid FIFO-open races; no unsafe code |
 | Hyper | HTTP/1.1 protocol implementation | MIT | Low-level client without a web framework |
 | Hyper-util | Tokio adapter and pooled legacy client | MIT | Provides maintained client pooling for Hyper 1.x |
 | HTTP-body-util | Request body and response frame helpers | MIT | Used for bounded streaming response reads |

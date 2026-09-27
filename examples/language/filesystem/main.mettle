@@ -1,0 +1,25 @@
+// Run from any directory using the appropriate entry-file path:
+// mettle run examples/language/filesystem/main.mettle
+// mettle test examples/language/filesystem/main.mettle
+// mettle.toml makes relative file paths start at this project's data/ directory.
+
+flow fileSource(path) = fs.stream(path)
+
+flow main {
+    original = fs.readText("payload.txt")
+    copied = fs.write("copy.txt", fileSource("payload.txt"), overwrite: true)
+    assert(fs.readText("copy.txt") == original)
+    echo("Copied incrementally and verified the complete text")
+    copied
+}
+
+test "complete bytes can be reused" {
+    payload = fs.read("payload.txt")
+    duplicate = payload
+    assert(payload == duplicate)
+    assert(payload == fs.read("payload.txt"))
+}
+
+test "UTF-8 text is decoded explicitly" {
+    assert(fs.readText("payload.txt") == "Hello from Mettle filesystem I/O.\n")
+}

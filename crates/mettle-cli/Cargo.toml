@@ -13,6 +13,7 @@ path = "src/main.rs"
 mettle-capability = { path = "../mettle-capability" }
 mettle-compiler = { path = "../mettle-compiler" }
 mettle-http = { path = "../mettle-http" }
+mettle-fs = { path = "../mettle-fs" }
 mettle-runtime = { path = "../mettle-runtime" }
 mettle-syntax = { path = "../mettle-syntax" }
 serde.workspace = true

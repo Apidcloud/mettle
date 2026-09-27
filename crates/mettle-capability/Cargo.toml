@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 mettle-syntax = { path = "../mettle-syntax" }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [lints]
 workspace = true

@@ -195,6 +195,21 @@
       "}"
     ]
   },
+  "Complete file read": {
+    "prefix": "fsread",
+    "description": "Read a bounded file as reusable bytes or UTF-8 text",
+    "body": ["${1:payload} = fs.${2|read,readText|}(\"${3:./payload.txt}\")"]
+  },
+  "Incremental file copy": {
+    "prefix": "fscopy",
+    "description": "Copy an incremental source without buffering the whole file",
+    "body": ["fs.write(\"${1:./copy.bin}\", fs.stream(\"${2:./payload.bin}\"))"]
+  },
+  "Streamed HTTP upload": {
+    "prefix": "httpfile",
+    "description": "Send a file progressively through an ordinary HTTP call",
+    "body": ["response = http.post(\"${1:/upload}\", body: fs.stream(\"${2:./payload.bin}\"))"]
+  },
   "Named parallel": {
     "prefix": "parallel-named",
     "description": "Run labeled branches concurrently",

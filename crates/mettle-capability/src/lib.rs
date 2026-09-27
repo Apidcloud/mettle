@@ -9,12 +9,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use mettle_syntax::Span;
+mod io;
+pub use io::{
+    ByteReader, ByteSource, CHUNK_BYTES, ChunkFuture, DEFAULT_READ_BYTES, DEFAULT_TRANSFER_BYTES,
+    IoCancellation, IoContext, ReaderFuture, SourceFactory,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaType {
     Boolean,
     Body,
     Bytes,
+    Source,
+    Writable,
     Duration,
     Integer,
     Json,
@@ -30,6 +37,8 @@ impl SchemaType {
             Self::Boolean => "boolean",
             Self::Body => "HTTP body value",
             Self::Bytes => "bytes",
+            Self::Source => "byte source",
+            Self::Writable => "string, bytes, or byte source",
             Self::Duration => "duration",
             Self::Integer => "integer",
             Self::Json => "JSON value",
@@ -73,6 +82,7 @@ pub enum Value {
     Float(f64),
     String(String),
     Bytes(Arc<[u8]>),
+    Source(Arc<ByteSource>),
     Duration(Duration),
     Array(Vec<Self>),
     Object(Object),
@@ -90,6 +100,7 @@ impl Value {
             Self::Float(_) => "number",
             Self::String(_) => "string",
             Self::Bytes(_) => "bytes",
+            Self::Source(_) => "byte source",
             Self::Duration(_) => "duration",
             Self::Array(_) => "array",
             Self::Object(_) => "object",
@@ -132,6 +143,16 @@ impl Value {
             Self::Sensitive(_) => true,
             Self::Array(values) => values.iter().any(Self::contains_sensitive),
             Self::Object(fields) => fields.values().any(Self::contains_sensitive),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn contains_source(&self) -> bool {
+        match self.revealed() {
+            Self::Source(_) => true,
+            Self::Array(values) => values.iter().any(Self::contains_source),
+            Self::Object(fields) => fields.values().any(Self::contains_source),
             _ => false,
         }
     }
@@ -225,6 +246,7 @@ impl fmt::Display for Value {
                 }
                 formatter.write_str("]")
             }
+            Self::Source(_) => formatter.write_str("<byte source>"),
             Self::Duration(value) => write!(formatter, "{}ns", value.as_nanos()),
             Self::Array(values) => {
                 formatter.write_str("[")?;
@@ -350,6 +372,11 @@ pub trait Capability: Send + Sync {
         None
     }
 
+    /// Snapshot an operation for observers without retaining live resources.
+    fn observed_result(&self, _operation: usize, result: &Value) -> Value {
+        result.clone()
+    }
+
     fn invoke(
         &self,
         operation: usize,
@@ -357,6 +384,17 @@ pub trait Capability: Send + Sync {
         options: Object,
         span: Span,
     ) -> CapabilityFuture<'_>;
+
+    fn invoke_with_context<'a>(
+        &'a self,
+        operation: usize,
+        arguments: Vec<Value>,
+        options: Object,
+        span: Span,
+        _context: &'a IoContext,
+    ) -> CapabilityFuture<'a> {
+        self.invoke(operation, arguments, options, span)
+    }
 }
 
 pub fn merge_objects(target: &mut Object, source: Object) {

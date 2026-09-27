@@ -1,0 +1,16 @@
+[package]
+name = "mettle-fs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mettle-capability = { path = "../mettle-capability" }
+tokio = { workspace = true, features = ["time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true

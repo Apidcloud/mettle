@@ -13,6 +13,8 @@ pub struct ProjectConfig {
     _name: Option<String>,
     #[serde(rename = "version")]
     _version: Option<String>,
+    #[serde(rename = "workingDir")]
+    pub working_dir: Option<std::path::PathBuf>,
     pub run: BatchDefaults,
     pub test: BatchDefaults,
 }
