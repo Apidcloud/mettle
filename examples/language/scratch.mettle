@@ -1,0 +1,15 @@
+flow main {
+  { url: "test" }
+}
+
+flow t(arg) {
+  "shouldn't run with --all because of arg ${arg}"
+}
+
+flow a {
+  fail("it cannot go on")
+}
+
+flow test {}
+
+
