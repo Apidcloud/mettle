@@ -163,7 +163,12 @@ def main() -> None:
             incoming = execute("run", "examples/http/incoming-content.mettle", "--arg", f"baseUrl={base}", "--raw")
             assert json.loads(incoming.stdout)["user"]["name"] == "Ada", incoming.stdout
             gzip_example = execute("run", "examples/http/gzip.mettle", "--arg", f"baseUrl={base}", "--raw")
-            assert json.loads(gzip_example.stdout) == {"name": "Ada", "json": "ordinary field"}, gzip_example.stdout
+            gzip_bodies = gzip_example.stdout.strip().split(" :: ")
+            assert len(gzip_bodies) == 2, gzip_example.stdout
+            assert all(
+                json.loads(body) == {"name": "Ada", "json": "ordinary field"}
+                for body in gzip_bodies
+            ), gzip_example.stdout
     finally:
         server.shutdown()
         server.server_close()
