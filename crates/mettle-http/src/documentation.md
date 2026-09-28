@@ -23,19 +23,20 @@ side effects.
 
 Incoming `.body` is decoded into native values: JSON/`+json` produces an object,
 array, scalar, or null; `text/*` produces a strict UTF-8 string; missing/unknown
-content types produce bytes, without sniffing. `.bodyBytes` retains bounded
-representation bytes. `.mediaType` is the normalized Content-Type string with
-explicit parameters, or null when absent; the original header remains available.
-JSON is a representation, not a native kind or proof of application fields.
+content types produce bytes, without sniffing. Gzip (`gzip` and `x-gzip`) response
+encodings are decompressed before this media-type decoding. `.bodyBytes` retains
+bounded received representation bytes. `.mediaType` is the normalized Content-Type
+string with explicit parameters, or null when absent; the original header remains
+available. JSON is a representation, not a native kind or proof of application
+fields.
 
 HEAD and statuses 204/205/304 have null bodies. Other empty text and binary
 representations remain an empty string or bytes; empty declared JSON is invalid.
-Malformed or duplicate Content-Type, invalid JSON/UTF-8, unsupported JSON/text
-charsets, numeric overflow, and body limits fail with source-aware errors.
-Non-identity Content-Encoding is rejected for responses with a body; automatic
-decompression is not implemented. Error HTTP statuses still return normally
-when their metadata/content are valid.
+Malformed or duplicate Content-Type, invalid JSON/UTF-8, invalid gzip data,
+unsupported JSON/text charsets, numeric overflow, and body limits fail with
+source-aware errors. Unsupported response content encodings fail. Error HTTP
+statuses still return normally when their metadata/content are valid.
 
 Response `.json` is removed: use `.body` for decoded values or explicitly decode
-`.bodyBytes`. HTTP/2, compression, live response iteration, and user codecs remain
-future work. Variable/field inference and richer hovers are the separate phase 3.5.
+`.bodyBytes`. HTTP/2, live response iteration, and user codecs remain future work.
+Variable/field inference and richer hovers are the separate phase 3.5.

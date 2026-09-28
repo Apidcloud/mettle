@@ -1,0 +1,27 @@
+// Start the local fixture: python3 util/test-server/http_fixture.py --port 8080
+// Run: mettle run examples/http/gzip.mettle --arg baseUrl=http://127.0.0.1:8080
+// Print just the decoded result: append --raw
+// The fixture's /gzip endpoint sends a gzip-compressed JSON representation.
+
+use context {
+    defaults http {
+        headers: { Authorization: "Bearer local-test-token" }
+    }
+}
+
+/// Fetch a gzip-compressed and double gzip-compressed JSON response
+/// from the repository's local fixture.
+/// @param baseUrl Base URL of the local HTTP fixture.
+/// @returns The decoded JSON object; the response's bodyBytes still hold gzip bytes.
+flow main(baseUrl) {
+    response = http.get("${baseUrl}/gzip")
+    response2 = http.get("${baseUrl}/gzip-gzip") 
+    assert(response.body is object)
+    assert(response.body.name == "Ada")
+    assert(response.bodyBytes is bytes)
+
+    assert(response.body == response2.body)
+    assert(response.body.name == response2.body.name)
+    assert(response.bodyBytes != response2.bodyBytes)
+    "${response.body} :: ${response2.body}"
+}

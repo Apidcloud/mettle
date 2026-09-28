@@ -139,13 +139,18 @@ def main() -> None:
                 ("empty-json", "invalid JSON"), ("invalid-json", "invalid JSON"),
                 ("invalid-text", "UTF-8"), ("invalid-type", "Content-Type"),
                 ("duplicate-type", "duplicate"), ("unsupported-charset", "charset"),
-                ("compressed", "Content-Encoding"), ("overflow", "64-bit range"),
+                ("overflow", "64-bit range"),
             ]:
                 failure = program(f'http.get("{base}/content/{case}", {authorization})', success=False)
                 assert message in failure.stderr, (case, failure.stderr)
             head = json.loads(program(f'http.head("{base}/content/object", {authorization}, maxResponseBytes: 1)').stdout)
             assert head["body"] is None and head["bodyBytes"] == [], head
             assert "byte limit" in program(f'http.get("{base}/content/object", {authorization}, maxResponseBytes: 1)', success=False).stderr
+            # The dedicated gzip fixture compresses the wire representation before sending it.
+            compressed = json.loads(program(f'http.get("{base}/gzip", {authorization})').stdout)
+            assert compressed["body"] == {"name": "Ada", "json": "ordinary field"}, compressed
+            assert compressed["mediaType"] == "application/json", compressed
+            assert compressed["bodyBytes"][:2] == [0x1F, 0x8B], compressed
             # Protected response headers retain their sensitivity after decoding.
             sensitive = program(f'http.get("{base}/content/secret", headers: {{ Authorization: senv("METTLE_TEST_AUTH") }}).headers', raw=False)
             assert "local-test-token" not in sensitive.stdout + sensitive.stderr, sensitive
@@ -157,6 +162,8 @@ def main() -> None:
             assert "Body" in human.stdout, human.stdout
             incoming = execute("run", "examples/http/incoming-content.mettle", "--arg", f"baseUrl={base}", "--raw")
             assert json.loads(incoming.stdout)["user"]["name"] == "Ada", incoming.stdout
+            gzip_example = execute("run", "examples/http/gzip.mettle", "--arg", f"baseUrl={base}", "--raw")
+            assert json.loads(gzip_example.stdout) == {"name": "Ada", "json": "ordinary field"}, gzip_example.stdout
     finally:
         server.shutdown()
         server.server_close()

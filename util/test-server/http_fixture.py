@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import socket
@@ -65,6 +66,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
+            return
+        if self.path == "/gzip":
+            self._gzip_response()
+            return
+        if self.path == "/gzip-gzip":
+            self._double_gzip_response()
             return
         if self.path.startswith("/content/"):
             self._content_response(self.path.removeprefix("/content/"))
@@ -210,6 +217,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         if not self._authorized():
             return
+        if self.path == "/gzip":
+            self._gzip_response()
+            return
         if self.path.startswith("/content/"):
             self._content_response(self.path.removeprefix("/content/"))
             return
@@ -260,7 +270,6 @@ class FixtureHandler(BaseHTTPRequestHandler):
             "invalid-type": (200, b'{}', ['application/json; charset="unfinished']),
             "duplicate-type": (200, b'{}', ["application/json", "text/plain"]),
             "unsupported-charset": (200, b'hello', ["text/plain; charset=latin1"]),
-            "compressed": (200, b'{}', ["application/json"]),
             "overflow": (200, b'9223372036854775808', ["application/json"]),
             "secret": (200, b'{"ok":true}', ["application/json"]),
         }
@@ -271,10 +280,27 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         for media_type in media_types:
             self.send_header("Content-Type", media_type)
-        if case == "compressed":
-            self.send_header("Content-Encoding", "gzip")
         if case == "secret":
             self.send_header("Set-Cookie", "local-test-token")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _gzip_response(self) -> None:
+        body = gzip.compress(b'{"name":"Ada","json":"ordinary field"}', mtime=0)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Encoding", "gzip, identity")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+    def _double_gzip_response(self) -> None:
+        body = gzip.compress(gzip.compress(b'{"name":"Ada","json":"ordinary field"}', mtime=0), mtime=0)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Encoding", "gzip, gzip")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
