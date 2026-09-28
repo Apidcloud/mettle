@@ -10,8 +10,6 @@ flow a {
   fail("it cannot go on")
 }
 
-flow test {
-  fail("this should fail with syntax error because of reserved keyword")
-}
+flow test {}
 
 
