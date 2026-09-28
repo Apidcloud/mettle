@@ -1,2 +1,5 @@
 # This fixture's exact UTF-8 bytes are asserted by the filesystem example.
 /examples/language/filesystem/data/payload.txt text eol=lf
+
+# Make Github syntax highlight mettle files like Rust 
+*.mettle linguistic-language=Rust
