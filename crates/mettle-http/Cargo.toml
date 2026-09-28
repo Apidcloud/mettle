@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 bytes.workspace = true
+flate2.workspace = true
 mettle-capability = { path = "../mettle-capability" }
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
