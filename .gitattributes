@@ -2,4 +2,4 @@
 /examples/language/filesystem/data/payload.txt text eol=lf
 
 # Make Github syntax highlight mettle files like Rust 
-*.mettle linguist-language=Rust
+*.mettle linguist-language=Rust -linguist-documentation linguist-detectable
