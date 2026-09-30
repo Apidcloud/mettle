@@ -93,7 +93,8 @@ The fixture startup command is below. No public service or real credential is
 needed. Client `.body` is decoded using Content-Type; `.bodyBytes` retains the
 received representation bytes and `.mediaType` records normalized metadata. See
 [incoming content](http/incoming-content.mettle) for native kinds and empty bodies,
-or [gzip responses](http/gzip.mettle) for a response compressed by the local fixture.
+or [gzip responses](http/gzip.mettle) for a response compressed by the local fixture,
+including a streamed variant whose raw chunks stay compressed.
 
 [File upload](http/file-upload.mettle) demonstrates both buffered and streamed
 request bodies, plus a server that rejects an upload before reading its body.

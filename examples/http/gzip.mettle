@@ -1,5 +1,6 @@
 // Start the local fixture: python3 util/test-server/http_fixture.py --port 8080
 // Run: mettle run examples/http/gzip.mettle --arg baseUrl=http://127.0.0.1:8080
+// Stream instead: mettle run examples/http/gzip.mettle streamed --arg baseUrl=http://127.0.0.1:8080
 // Print just the decoded result: append --raw
 // The fixture's /gzip endpoint sends a gzip-compressed JSON representation.
 
@@ -24,4 +25,18 @@ flow main(baseUrl) {
     assert(response.body.name == response2.body.name)
     assert(response.bodyBytes != response2.bodyBytes)
     "${response.body} :: ${response2.body}"
+}
+
+/// Stream the same gzip response twice. Capturing `.body` decompresses a bounded
+/// copy, while `.chunks` writes the raw gzip representation without decompressing it.
+/// @param baseUrl Base URL of the local HTTP fixture.
+/// @returns The decoded body and the raw download's filesystem write result.
+flow streamed(baseUrl) {
+    captured = http.get("${baseUrl}/gzip", stream: true, maxCaptureBytes: 1024)
+    assert(captured.body.name == "Ada")
+
+    raw = http.get("${baseUrl}/gzip", stream: true)
+    download = fs.write("target/gzip-response.json.gz", raw.chunks, overwrite: true)
+    result = { body: captured.body, download: download }
+    result
 }

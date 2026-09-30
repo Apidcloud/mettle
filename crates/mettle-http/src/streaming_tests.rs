@@ -1,3 +1,5 @@
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
@@ -82,6 +84,28 @@ fn chunked_server(
         socket.write_all(b"\r\n0\r\n\r\n").unwrap();
     });
     (url, release, server)
+}
+fn gzip_server(json: &[u8]) -> (String, std::thread::JoinHandle<()>) {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(json).unwrap();
+    let body = encoder.finish().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/gzip", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        let _ = socket.write_all(&body);
+    });
+    (url, server)
 }
 fn async_test(future: impl std::future::Future<Output = ()>) {
     tokio::runtime::Builder::new_multi_thread()
@@ -498,5 +522,47 @@ fn source_errors_preserve_their_diagnostic_and_source_span() {
             assert_eq!(error.span, Span::new(12, 23));
             context.cleanup().await.unwrap();
         });
+    server.join().unwrap();
+}
+
+#[test]
+fn streamed_gzip_capture_decodes_body_within_the_capture_bound() {
+    let (url, server) = gzip_server(br#"{"name":"Ada"}"#);
+    async_test(async {
+        let context = IoContext::new(std::env::temp_dir());
+        let response = streamed(url, &context, Object::new()).await;
+        assert_eq!(
+            field(&response, "body").await.unwrap(),
+            Value::Object([("name".into(), Value::String("Ada".into()))].into())
+        );
+        let Value::Bytes(bytes) = field(&response, "bodyBytes").await.unwrap() else {
+            panic!("bodyBytes")
+        };
+        assert_eq!(bytes[..2], [0x1f, 0x8b]);
+        context.cleanup().await.unwrap();
+    });
+    server.join().unwrap();
+
+    // Highly compressible content fits the capture but not once decompressed.
+    let json = format!(r#"{{"padding":"{}"}}"#, "a".repeat(4096));
+    let (url, server) = gzip_server(json.as_bytes());
+    async_test(async {
+        let context = IoContext::new(std::env::temp_dir());
+        let response = streamed(
+            url,
+            &context,
+            Object::from([("maxCaptureBytes".to_owned(), Value::Integer(256))]),
+        )
+        .await;
+        assert!(field(&response, "bodyBytes").await.is_ok());
+        assert!(
+            field(&response, "body")
+                .await
+                .unwrap_err()
+                .message
+                .contains("decompressed HTTP response exceeded the 256 byte limit")
+        );
+        context.cleanup().await.unwrap();
+    });
     server.join().unwrap();
 }

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import json
 import os
@@ -172,6 +173,11 @@ def main() -> None:
                 json.loads(body) == {"name": "Ada", "json": "ordinary field"}
                 for body in gzip_bodies
             ), gzip_example.stdout
+            streamed_gzip = json.loads(execute("run", "examples/http/gzip.mettle", "streamed", "--arg", f"baseUrl={base}", "--raw").stdout)
+            assert streamed_gzip["body"] == {"name": "Ada", "json": "ordinary field"}, streamed_gzip
+            raw_download = (ROOT / "target/gzip-response.json.gz").read_bytes()
+            assert raw_download[:2] == b"\x1f\x8b", raw_download[:2]
+            assert json.loads(gzip.decompress(raw_download)) == streamed_gzip["body"], raw_download
     finally:
         server.shutdown()
         server.server_close()
