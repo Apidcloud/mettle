@@ -125,13 +125,6 @@ fn decode_gzip(
     let mut decoder = GzDecoder::new(&bytes[..]);
     let mut result = Vec::with_capacity(bytes.len().min(max_bytes));
     loop {
-        if result.len() > max_bytes {
-            return Err(CapabilityError::new(
-                format!("HTTP gzip decoded response length exceeded max_bytes {max_bytes}"),
-                span,
-            ));
-        }
-
         let mut chunk = [0u8; 8 * 1024];
         let n = decoder.read(&mut chunk).map_err(|e| {
             let kind = e.kind();
@@ -150,7 +143,7 @@ fn decode_gzip(
 
         if result.len() + n > max_bytes {
             return Err(CapabilityError::new(
-                format!("HTTP gzip decoded response length exceeded max_bytes {max_bytes}"),
+                format!("decompressed HTTP response exceeded the {max_bytes} byte limit"),
                 span,
             ));
         }
@@ -273,7 +266,7 @@ mod tests {
             )
             .unwrap_err()
             .message
-            .contains("decoded response length exceeded")
+            .contains("decompressed HTTP response exceeded the 5 byte limit")
         );
     }
 
