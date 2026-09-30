@@ -134,6 +134,24 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_responses_ignore_content_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("br"));
+        assert_eq!(
+            decode(
+                &Value::Bytes(Arc::from(b"".as_slice())),
+                None,
+                &headers,
+                true,
+                1024,
+                Span::default(),
+            )
+            .unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
     fn decoding_uses_native_kinds_and_never_sniffs_unknown_content() {
         for (input, expected) in [
             (b"null".as_slice(), Value::Null),
@@ -191,19 +209,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(
-            representation(&headers, Span::default())
-                .unwrap_err()
-                .message
-                .contains("duplicate")
-        );
+        assert!(representation(&headers, Span::default())
+            .unwrap_err()
+            .message
+            .contains("duplicate"));
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        assert!(
-            decode(&bytes, None, &headers, false, 10, Span::default())
-                .unwrap_err()
-                .message
-                .contains("Content-Encoding")
-        );
+        assert!(decode(&bytes, None, &headers, false, 10, Span::default())
+            .unwrap_err()
+            .message
+            .contains("Content-Encoding"));
     }
 
     #[test]
