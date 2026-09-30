@@ -164,8 +164,8 @@ fn decode_gzip(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use hyper::header::HeaderValue;
     use std::io::Write;
     use std::sync::Arc;
@@ -193,7 +193,10 @@ mod tests {
         )
     }
 
-    fn decoded_content_encoding(content_encoding: Option<&str>) -> Result<Value, CapabilityError> {
+    fn decoded_content_encoding(
+        content_encoding: Option<&str>,
+        input: &[u8],
+    ) -> Result<Value, CapabilityError> {
         let mut headers = HeaderMap::new();
         if let Some(content_encoding) = content_encoding {
             headers.insert(
@@ -203,7 +206,7 @@ mod tests {
         }
         let span = Span::new(10, 20);
         decode(
-            &Value::Bytes(Arc::from(b"hello".as_slice())),
+            &Value::Bytes(Arc::from(input)),
             representation(&headers, span)?.as_ref(),
             &headers,
             false,
@@ -214,13 +217,23 @@ mod tests {
 
     #[test]
     fn content_encoding_verification() {
-        assert!(decoded_content_encoding(None).is_ok());
-        assert!(decoded_content_encoding(Some("identity")).is_ok());
-        assert!(decoded_content_encoding(Some("Identity")).is_ok());
-        assert!(decoded_content_encoding(Some("gzip")).is_err());
-        assert!(decoded_content_encoding(Some("br")).is_err());
-        assert!(decoded_content_encoding(Some("identity, gzip")).is_err());
-        assert!(decoded_content_encoding(Some("identity, identity")).is_ok());
+        let hello = Value::Bytes(Arc::from(b"hello".as_slice()));
+        let gzipped = gzip(b"hello");
+        assert!(decoded_content_encoding(None, b"hello").is_ok());
+        assert!(decoded_content_encoding(Some("identity"), b"hello").is_ok());
+        assert!(decoded_content_encoding(Some("Identity"), b"hello").is_ok());
+        assert!(decoded_content_encoding(Some("identity, identity"), b"hello").is_ok());
+        assert_eq!(
+            decoded_content_encoding(Some("gzip"), &gzipped).unwrap(),
+            hello
+        );
+        assert_eq!(
+            decoded_content_encoding(Some("identity, gzip"), &gzipped).unwrap(),
+            hello
+        );
+        assert!(decoded_content_encoding(Some("gzip"), b"hello").is_err());
+        assert!(decoded_content_encoding(Some("br"), b"hello").is_err());
+        assert!(decoded_content_encoding(Some("gzip, br"), &gzipped).is_err());
     }
 
     #[test]
@@ -249,17 +262,19 @@ mod tests {
         let input = gzip(br#"{"name":"Ada"}"#);
         let span = Span::new(10, 20);
 
-        assert!(decode(
-            &Value::Bytes(input),
-            representation(&headers, span).unwrap().as_ref(),
-            &headers,
-            false,
-            5,
-            span,
-        )
-        .unwrap_err()
-        .message
-        .contains("decoded response length exceeded"));
+        assert!(
+            decode(
+                &Value::Bytes(input),
+                representation(&headers, span).unwrap().as_ref(),
+                &headers,
+                false,
+                5,
+                span,
+            )
+            .unwrap_err()
+            .message
+            .contains("decoded response length exceeded")
+        );
     }
 
     #[test]
@@ -368,15 +383,19 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.append(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(representation(&headers, Span::default())
-            .unwrap_err()
-            .message
-            .contains("duplicate"));
+        assert!(
+            representation(&headers, Span::default())
+                .unwrap_err()
+                .message
+                .contains("duplicate")
+        );
         headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        assert!(decode(&bytes, None, &headers, false, 10, Span::default())
-            .unwrap_err()
-            .message
-            .contains("gzip"));
+        assert!(
+            decode(&bytes, None, &headers, false, 10, Span::default())
+                .unwrap_err()
+                .message
+                .contains("gzip")
+        );
     }
 
     #[test]

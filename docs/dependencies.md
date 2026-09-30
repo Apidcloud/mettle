@@ -14,6 +14,7 @@ Mettle keeps third-party code concentrated around networking, TLS, byte buffers,
 | Hyper-rustls | Hyper/Rustls connector | Apache-2.0 OR ISC OR MIT | Default features disabled; HTTP/1, ring, TLS 1.2, and WebPKI roots selected |
 | Rustls | TLS configuration | Apache-2.0 OR ISC OR MIT | Default features disabled; ring, standard library, and TLS 1.2 selected |
 | Bytes | HTTP byte buffers | MIT | Shared networking primitive used by Hyper |
+| Flate2 | Gzip response content decoding | MIT OR Apache-2.0 | Default pure-Rust `miniz_oxide` backend, so no system zlib is required; default runtime CPU detection keeps accelerated CRC32 on x64. The optional `zlib-rs` backend is locked but not built. Decompressed output is bounded by the response limits |
 | Regex | Unicode-aware text matching, captures, splitting, and replacement | MIT OR Apache-2.0 | Explicit `std`, `unicode`, and `perf` features; no lookaround or backreferences. Execution-owned workers, bounded input/pattern/compiled size/search budget and output |
 | Serde / Serde JSON | Shared bounded content serialization, JSON parsing, and CLI data | MIT OR Apache-2.0 | Codec policy lives in the capability foundation; HTTP reuses it rather than maintaining a second value decoder |
 
@@ -23,7 +24,7 @@ TLS currently uses Rustls with the ring provider and Mozilla WebPKI roots. The r
 
 ## Locked transitive graph
 
-[`third-party-licenses.md`](third-party-licenses.md) records every registry package resolved by `Cargo.lock` and its declared SPDX licence expression. The allowlist contains permissive licences used by the selected graph, including MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, Unlicense, and CDLA-Permissive-2.0.
+[`third-party-licenses.md`](third-party-licenses.md) records every registry package resolved by `Cargo.lock` and its declared SPDX licence expression. The allowlist contains permissive licences used by the selected graph, including MIT, Apache-2.0, ISC, BSD-3-Clause, Unicode-3.0, Unlicense, CDLA-Permissive-2.0, and Zlib. Multi-licence expressions that also offer 0BSD are accepted because they include MIT or Apache-2.0.
 
 Validate the lockfile and checked-in report with:
 

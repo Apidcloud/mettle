@@ -4,14 +4,17 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 
 | Package | Version | Declared licence |
 | --- | --- | --- |
+| `adler2` | `2.0.1` | `0BSD OR MIT OR Apache-2.0` |
 | `aho-corasick` | `1.1.5` | `Unlicense OR MIT` |
 | `atomic-waker` | `1.1.2` | `Apache-2.0 OR MIT` |
 | `bytes` | `1.12.1` | `MIT` |
 | `cc` | `1.4.6` | `MIT OR Apache-2.0` |
 | `cfg-if` | `1.0.5` | `MIT OR Apache-2.0` |
+| `crc32fast` | `1.5.2` | `MIT OR Apache-2.0` |
 | `equivalent` | `1.0.2` | `Apache-2.0 OR MIT` |
 | `errno` | `0.3.14` | `MIT OR Apache-2.0` |
 | `find-msvc-tools` | `0.1.12` | `MIT OR Apache-2.0` |
+| `flate2` | `1.1.10` | `MIT OR Apache-2.0` |
 | `futures-channel` | `0.3.34` | `MIT OR Apache-2.0` |
 | `futures-core` | `0.3.34` | `MIT OR Apache-2.0` |
 | `futures-task` | `0.3.34` | `MIT OR Apache-2.0` |
@@ -29,6 +32,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `itoa` | `1.0.18` | `MIT OR Apache-2.0` |
 | `libc` | `0.2.189` | `MIT OR Apache-2.0` |
 | `memchr` | `2.8.3` | `Unlicense OR MIT` |
+| `miniz_oxide` | `0.9.1` | `MIT OR Zlib OR Apache-2.0` |
 | `mio` | `1.2.3` | `MIT` |
 | `once_cell` | `1.21.4` | `MIT OR Apache-2.0` |
 | `pin-project-lite` | `0.2.17` | `Apache-2.0 OR MIT` |
@@ -48,6 +52,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `serde_spanned` | `1.1.1` | `MIT OR Apache-2.0` |
 | `shlex` | `2.0.1` | `MIT OR Apache-2.0` |
 | `signal-hook-registry` | `1.4.8` | `MIT OR Apache-2.0` |
+| `simd-adler32` | `0.3.10` | `MIT` |
 | `smallvec` | `1.16.1` | `MIT OR Apache-2.0` |
 | `socket2` | `0.6.5` | `MIT OR Apache-2.0` |
 | `subtle` | `2.6.1` | `BSD-3-Clause` |
@@ -82,6 +87,7 @@ Generated from `Cargo.lock` by `scripts/check-licenses.py`. Do not edit manually
 | `windows_x86_64_msvc` | `0.52.6` | `MIT OR Apache-2.0` |
 | `winnow` | `1.0.4` | `MIT` |
 | `zeroize` | `1.9.0` | `Apache-2.0 OR MIT` |
+| `zlib-rs` | `0.6.8` | `Zlib` |
 | `zmij` | `1.0.23` | `MIT` |
 
 All declared licences in this locked graph are on the project's permissive licence allowlist. The release-readiness milestone will additionally produce distributable notices and an SBOM.
