@@ -274,8 +274,10 @@ booleans, or null. `text/*` decodes into a strict UTF-8 string. `gzip` and
 `x-gzip` responses are decompressed before their media type is decoded. Missing or
 unknown content types remain bytes, without content sniffing. `bodyBytes` always
 retains the bounded received representation bytes; the original Content-Type stays
-in `headers`. JSON is a representation, not a language value kind or a guarantee
-that fields exist.
+in `headers`, so gzip responses keep their compressed bytes there. Mettle does not
+send `Accept-Encoding`; add `Accept-Encoding: gzip` to the request headers when a
+server should compress. JSON is a representation, not a language value kind or a
+guarantee that fields exist.
 
 HEAD and statuses 204/205/304 have `body: null`. Other empty text/binary bodies
 remain `""`/empty bytes; empty declared JSON fails. Malformed or duplicate
@@ -719,7 +721,8 @@ ordinary result explicitly when it should be displayed. Try the
 body kinds, metadata, bodyless responses, and explicit raw-byte decoding.
 
 Incoming `.body` values use the built-in decoders today. User-defined codecs,
-compression, scoped exchanges, and live response iteration are later work;
+content encodings other than gzip, scoped exchanges, and live response iteration
+are later work;
 raw `.bodyBytes` remain explicitly available.
 
 ### Capability interfaces
@@ -856,7 +859,9 @@ streaming; `maxCaptureBytes` separately bounds complete memory acquisition.
 The HTTP `timeout` starts at request creation and remains effective through body
 consumption. Sink/source deadlines can impose tighter limits. Raw chunks preserve
 the transmitted representation; no implicit decompression or record decoding
-occurs. Complete decoded capture still validates encoding and representation.
+occurs. A complete capture's `.body` still removes gzip Content-Encoding and
+validates the representation, with decompressed output bounded by
+`maxCaptureBytes`; its `.bodyBytes` remain the received bytes.
 
 Call `response.close()` when the body is unwanted. It is idempotent and abandons
 the body, not a promise to close the physical pooled connection. Entry completion,

@@ -15,7 +15,7 @@ use context {
 /// @returns The decoded JSON object; the response's bodyBytes still hold gzip bytes.
 flow main(baseUrl) {
     response = http.get("${baseUrl}/gzip")
-    response2 = http.get("${baseUrl}/gzip-gzip") 
+    response2 = http.get("${baseUrl}/gzip-gzip")
     assert(response.body is object)
     assert(response.body.name == "Ada")
     assert(response.bodyBytes is bytes)

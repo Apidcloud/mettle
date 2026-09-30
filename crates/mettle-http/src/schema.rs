@@ -37,8 +37,8 @@ const FIELD_MAX_BODY_BYTES: FieldSchema = FieldSchema::new("maxBodyBytes", Schem
     });
 mettle_capability::result_object! {
     pub(crate) struct ResponseValue {
-        body => ("body", SchemaType::Value, "Decoded native response value. JSON/+json produces native values; text/* produces a UTF-8 string; missing/unknown content types produce bytes. HEAD/204/205/304 have null bodies. With stream: true, access acquires the complete bounded body and shares its capture with bodyBytes; cannot mix with chunks consumption. A media type does not prove application fields exist."),
-        body_bytes => ("bodyBytes", SchemaType::Bytes, "Complete bounded response representation bytes. With stream: true, access acquires and caches the body; cannot mix with chunks consumption."),
+        body => ("body", SchemaType::Value, "Decoded native response value. JSON/+json produces native values; text/* produces a UTF-8 string; missing/unknown content types produce bytes. gzip/x-gzip Content-Encoding is decompressed first, within the response or capture byte limit; other non-identity encodings fail. HEAD/204/205/304 have null bodies. With stream: true, access acquires the complete bounded body and shares its capture with bodyBytes; cannot mix with chunks consumption. A media type does not prove application fields exist."),
+        body_bytes => ("bodyBytes", SchemaType::Bytes, "Complete bounded response representation bytes as received; Content-Encoding is not removed, so gzip responses stay compressed. With stream: true, access acquires and caches the body; cannot mix with chunks consumption."),
         duration => ("duration", SchemaType::Duration, "Elapsed duration until the call returns: complete body normally, final response headers with stream: true."),
         headers => ("headers", SchemaType::StringMap, "Response headers; credential-bearing values retain sensitivity."),
         media_type => ("mediaType", SchemaType::NullableString, "Normalized Content-Type string, preserving explicit parameters, or null when absent. No content sniffing, inferred type, or implicit charset parameter is added. The original header remains in headers."),
