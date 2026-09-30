@@ -270,6 +270,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             "invalid-type": (200, b'{}', ['application/json; charset="unfinished']),
             "duplicate-type": (200, b'{}', ["application/json", "text/plain"]),
             "unsupported-charset": (200, b'hello', ["text/plain; charset=latin1"]),
+            "unsupported-encoding": (200, b'{}', ["application/json"]),
             "overflow": (200, b'9223372036854775808', ["application/json"]),
             "secret": (200, b'{"ok":true}', ["application/json"]),
         }
@@ -280,6 +281,8 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         for media_type in media_types:
             self.send_header("Content-Type", media_type)
+        if case == "unsupported-encoding":
+            self.send_header("Content-Encoding", "br")
         if case == "secret":
             self.send_header("Set-Cookie", "local-test-token")
         self.send_header("Content-Length", str(len(body)))

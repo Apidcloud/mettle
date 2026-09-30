@@ -139,12 +139,15 @@ def main() -> None:
                 ("empty-json", "invalid JSON"), ("invalid-json", "invalid JSON"),
                 ("invalid-text", "UTF-8"), ("invalid-type", "Content-Type"),
                 ("duplicate-type", "duplicate"), ("unsupported-charset", "charset"),
-                ("overflow", "64-bit range"),
+                ("unsupported-encoding", "Content-Encoding: br"), ("overflow", "64-bit range"),
             ]:
                 failure = program(f'http.get("{base}/content/{case}", {authorization})', success=False)
                 assert message in failure.stderr, (case, failure.stderr)
             head = json.loads(program(f'http.head("{base}/content/object", {authorization}, maxResponseBytes: 1)').stdout)
             assert head["body"] is None and head["bodyBytes"] == [], head
+            # Bodyless responses have nothing to decode, so any Content-Encoding is accepted.
+            encoded_head = json.loads(program(f'http.head("{base}/content/unsupported-encoding", {authorization})').stdout)
+            assert encoded_head["body"] is None, encoded_head
             assert "byte limit" in program(f'http.get("{base}/content/object", {authorization}, maxResponseBytes: 1)', success=False).stderr
             # The dedicated gzip fixture compresses the wire representation before sending it.
             compressed = json.loads(program(f'http.get("{base}/gzip", {authorization})').stdout)
